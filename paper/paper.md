@@ -25,7 +25,7 @@ authors:
   - firstname: Ross E.
     surname: Larsen
     orcid: 0000-0002-2928-9835
-    affiliation: 1,2
+    affiliation: "1, 2"
   - firstname: Jon
     surname: Rood
     orcid: 0000-0002-7513-3225
