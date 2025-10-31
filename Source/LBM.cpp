@@ -1135,11 +1135,11 @@ void LBM::MakeNewLevelFromCoarse(
 
     f_to_macrodata(lev);
 
+    compute_q_corrections(lev);
+
     macrodata_to_equilibrium(lev);
 
     compute_derived(lev);
-
-    compute_q_corrections(lev);
 }
 
 // Make a new level from scratch using provided BoxArray and
@@ -1191,11 +1191,11 @@ void LBM::MakeNewLevelFromScratch(
 
     f_to_macrodata(lev);
 
+    compute_q_corrections(lev);
+
     macrodata_to_equilibrium(lev);
 
     compute_derived(lev);
-
-    compute_q_corrections(lev);
 }
 
 void LBM::initialize_f(const int lev)
@@ -1353,11 +1353,11 @@ void LBM::RemakeLevel(
 
     f_to_macrodata(lev);
 
+    compute_q_corrections(lev);
+
     macrodata_to_equilibrium(lev);
 
     compute_derived(lev);
-
-    compute_q_corrections(lev);
 
     m_ts_new[lev] = time;
     m_ts_old[lev] = time - constants::SMALL_NUM;
@@ -1907,11 +1907,11 @@ void LBM::read_checkpoint_file()
 
         f_to_macrodata(lev);
 
+        compute_q_corrections(lev);
+
         macrodata_to_equilibrium(lev);
 
         compute_derived(lev);
-
-        compute_q_corrections(lev);
     }
 }
 
