@@ -1024,13 +1024,8 @@ void LBM::compute_eb_forces()
                         const amrex::IntVect ivr(iv + evs[bounce_dirs[q]]);
 
                         for (int idir = 0; idir < AMREX_SPACEDIM; idir++) {
-                            // amrex::Print() << lev << " " << iv << " " << ivr
-                            // << " "  << ev[idir] << " "  << f_arrs[nbx](ivr,
-                            // q) << " "  << is_fluid_arrs[nbx](ivr, 0) <<
-                            // std::endl;
-                            //   fs[idir] += 2.0 * ev[idir] * f_arrs[nbx](ivr,
-                            //   q) *
-                            //               is_fluid_arrs[nbx](ivr, 0);
+                            fs[idir] += 2.0 * ev[idir] * f_arrs[nbx](ivr, q) *
+                                        is_fluid_arrs[nbx](ivr, 0);
                         }
                     }
                 }
