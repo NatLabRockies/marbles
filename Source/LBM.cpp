@@ -262,12 +262,12 @@ void LBM::read_parameters()
                 has_vel_bc = true;
             }
         }
-        if (!(pp.contains(vel_bc_key.c_str())) && has_vel_bc) {
+        if (!(pp.contains(vel_bc_key)) && has_vel_bc) {
             amrex::Abort(
                 "LBM::read_paramaters: velocity BC is used without specifying "
                 "the type to be used");
         }
-        pp.query(vel_bc_key.c_str(), m_velocity_bc_type);
+        pp.query(vel_bc_key, m_velocity_bc_type);
 
         pp.get("ic_type", m_ic_type);
 
