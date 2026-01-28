@@ -40,6 +40,14 @@ To compile and run `MARBLES`, one needs a C++ compiler that supports the C++17 s
     $ make realclean && make -j
     $ ./marbles3d.xxx.yyy.ex example.inp
 
+To compile and run `MARBLES` with GPU support, e.g. with CUDA, clone the repository as above, and then execute ::
+
+    $ cd Build
+    $ make USE_CUDA=TRUE
+    $ ./marbles3d.xxx.yyy.CUDA.ex example.inp    
+
+For additional flags to enable different compilers, architectures, and options, see `AMReX build options <https://amrex-codes.github.io/amrex/docs_html/BuildingAMReX.html>`_ . 
+
 .. note::
    A. In the exec line above, xxx.yyy is a tag identifying your compiler and various build options, and will vary across pltaform.  (Note that GNU compilers must be at least version 7, and MPI should be at least of standard version 3).
    B. The example file can be any file from the `Tests/test_files` directories.
