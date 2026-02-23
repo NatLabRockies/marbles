@@ -304,6 +304,12 @@ private:
     // Initial temperature.
     amrex::Real m_initialTemperature = 1.0 / 3.0;
 
+    // Body is isothermal.
+    bool m_bodyIsIsothermal = false;
+
+    // Body temperature.
+    amrex::Real m_bodyTemperature = 1.0 / 3.0;
+
     // Adiabatic exponent.
     amrex::Real m_adiabaticExponent = 5.0 / 3.0;
 
