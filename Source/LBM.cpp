@@ -2159,6 +2159,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
         auto const& newly_solid_arrs = newly_solid.const_arrays();
         auto const& frac_arrs = m_is_fluid_fraction[lev].const_arrays();
         auto const& old_boundary_arrs = old_fluid_side_boundary.const_arrays();
+        auto const& curr_fluid_arrs = m_is_fluid[lev].const_arrays();
         auto const& f_comp_arrs = m_component_lattices[c][lev].arrays();
         auto const& spill_comp_arrs = spill_f.arrays();
 
@@ -2181,7 +2182,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                 const auto hi = amrex::ubound(farr);
 
                 // First pass: compute sum of weights for OLD
-                // IS_FLUID_SIDE_BOUNDARY neighbors
+                // IS_FLUID_SIDE_BOUNDARY neighbors that are STILL FLUID
                 amrex::Real weight_sum = 0.0;
                 for (int nq = 1; nq < constants::N_MICRO_STATES; ++nq) {
                     int ni = i + evs[nq][0];
@@ -2194,8 +2195,9 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                         continue;
 
                     // Add weight if neighbor was on the OLD outer boundary
-                    // layer
-                    if (old_boundary_arrs[nbx](ni, nj, nk, 0) == 1) {
+                    // layer AND is still fluid in the current state
+                    if (old_boundary_arrs[nbx](ni, nj, nk, 0) == 1 &&
+                        curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1) {
                         weight_sum += weights[nq];
                     }
                 }
@@ -2220,7 +2222,9 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                         continue;
 
                     // Distribute if neighbor was on OLD outer boundary layer
-                    if (old_boundary_arrs[nbx](ni, nj, nk, 0) == 1) {
+                    // AND is still fluid in the current state
+                    if (old_boundary_arrs[nbx](ni, nj, nk, 0) == 1 &&
+                        curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1) {
                         // Normalized weight for this direction
                         amrex::Real w = weights[nq] / weight_sum;
 
