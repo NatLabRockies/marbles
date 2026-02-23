@@ -7,7 +7,7 @@ MARBLES: Multi-scale Adaptively Refined Boltzmann LatticE Solver
    :target: https://github.com/NREL/marbles/actions
 
 .. |Documentation Badge| image:: https://github.com/NREL/marbles/workflows/MARBLES-Docs/badge.svg
-   :target: https://https://nrel.github.io/marbles
+   :target: https://natlabrockies.github.io/marbles
 
 .. |License Badge| image:: https://img.shields.io/badge/License-Apache%20v2.0-blue.svg
    :target: https://www.apache.org/licenses/LICENSE-2.0
@@ -39,6 +39,14 @@ To compile and run `MARBLES`, one needs a C++ compiler that supports the C++17 s
     $ cd Build
     $ make realclean && make -j
     $ ./marbles3d.xxx.yyy.ex example.inp
+
+To compile and run `MARBLES` with GPU support, e.g. with CUDA, clone the repository as above, and then execute ::
+
+    $ cd Build
+    $ make USE_CUDA=TRUE
+    $ ./marbles3d.xxx.yyy.CUDA.ex example.inp    
+
+For additional flags to enable different compilers, architectures, and options, see `AMReX build options <https://amrex-codes.github.io/amrex/docs_html/BuildingAMReX.html>`_ . 
 
 .. note::
    A. In the exec line above, xxx.yyy is a tag identifying your compiler and various build options, and will vary across pltaform.  (Note that GNU compilers must be at least version 7, and MPI should be at least of standard version 3).
