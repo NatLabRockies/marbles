@@ -642,10 +642,11 @@ void LBM::advance(
         average_down_to(lev, amrex::IntVect(1));
     }
 
-    collide(lev);
-    
-    // Safety check AFTER collision - clamp negative component densities to zero
+    // Clamp negative component densities BEFORE collision so the collision
+    // step always acts on clean (non-negative) populations.
     clamp_negative_component_densities(lev);
+
+    collide(lev);
 }
 
 void LBM::post_time_step()
