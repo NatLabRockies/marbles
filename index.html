@@ -1,0 +1,215 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MARBLES: Multi-scale Adaptively Refined Boltzmann LatticE Solver &mdash; MARBLES 0.1 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=03e43079" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=2709fde1"></script>
+      <script src="_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Introduction" href="Introduction.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="#" class="icon icon-home">
+            MARBLES
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+<li class="toctree-l1"><a class="reference internal" href="Introduction.html">Introduction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="GettingStarted.html">Getting Started</a></li>
+<li class="toctree-l1"><a class="reference internal" href="LBM.html">Lattice Boltzmann Method</a></li>
+<li class="toctree-l1"><a class="reference internal" href="VandV.html">Validation and demonstration</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="#">MARBLES</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="#" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">MARBLES: Multi-scale Adaptively Refined Boltzmann LatticE Solver</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/index.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="marbles-multi-scale-adaptively-refined-boltzmann-lattice-solver">
+<h1>MARBLES: Multi-scale Adaptively Refined Boltzmann LatticE Solver<a class="headerlink" href="#marbles-multi-scale-adaptively-refined-boltzmann-lattice-solver" title="Link to this heading"></a></h1>
+<div class="toctree-wrapper compound">
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="Introduction.html">Introduction</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="Introduction.html#dependencies">Dependencies</a></li>
+<li class="toctree-l2"><a class="reference internal" href="Introduction.html#acknowledgment">Acknowledgment</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="GettingStarted.html">Getting Started</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="Building.html">Building</a></li>
+<li class="toctree-l2"><a class="reference internal" href="InputFiles.html">Input Files and Controls</a></li>
+<li class="toctree-l2"><a class="reference internal" href="Tutorials.html">Tutorials</a></li>
+<li class="toctree-l2"><a class="reference internal" href="Testing.html">Testing</a></li>
+<li class="toctree-l2"><a class="reference internal" href="Linting.html">Linting</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="LBM.html">Lattice Boltzmann Method</a></li>
+<li class="toctree-l1"><a class="reference internal" href="VandV.html">Validation and demonstration</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="VandV.html#flow-around-a-sphere">Flow around a sphere</a></li>
+<li class="toctree-l2"><a class="reference internal" href="VandV.html#flow-in-a-porous-media">Flow in a porous media</a></li>
+<li class="toctree-l2"><a class="reference internal" href="VandV.html#viscosity-verification">Viscosity verification</a></li>
+<li class="toctree-l2"><a class="reference internal" href="VandV.html#thermal-diffusivity-verification">Thermal diffusivity verification</a></li>
+<li class="toctree-l2"><a class="reference internal" href="VandV.html#sod-test-tube">Sod test tube</a></li>
+<li class="toctree-l2"><a class="reference internal" href="VandV.html#flow-around-a-cylinder-in-a-channel">Flow around a cylinder in a channel</a></li>
+</ul>
+</li>
+</ul>
+</div>
+<section id="readme">
+<h2>README<a class="headerlink" href="#readme" title="Link to this heading"></a></h2>
+<section id="id1">
+<span id="id2"></span><h3>MARBLES: Multi-scale Adaptively Refined Boltzmann LatticE Solver<a class="headerlink" href="#id1" title="Link to this heading"></a></h3>
+<p><a class="reference external" href="https://github.com/NREL/marbles/actions"><img alt="CI Badge" src="https://github.com/NREL/marbles/workflows/MARBLES-CI/badge.svg" /></a> <a class="reference external" href="https://natlabrockies.github.io/marbles"><img alt="Documentation Badge" src="https://github.com/NREL/marbles/workflows/MARBLES-Docs/badge.svg" /></a> <a class="reference external" href="https://www.apache.org/licenses/LICENSE-2.0"><img alt="License Badge" src="https://img.shields.io/badge/License-Apache%20v2.0-blue.svg" /></a> <a class="reference external" href="https://amrex-codes.github.io/amrex/"><img alt="AMReX Badge" src="https://img.shields.io/static/v1?label=%22powered%20by%22&amp;message=%22AMReX%22&amp;color=%22blue%22" /></a> <a class="reference external" href="https://isocpp.org/"><img alt="C++ Badge" src="https://img.shields.io/badge/language-C%2B%2B17-blue" /></a></p>
+<p>MARBLES (Multi-scale Adaptively Refined Boltzmann LatticE Solver) is a
+computational fluid dynamics solver that leverages the lattice
+Boltzmann method (LBM) and block-structured adaptive mesh refinement
+(AMR) to simulate flows in complex media. MARBLES supports various
+parallel decomposition strategies, including the use of the Message
+Passing Interface (MPI) and OpenMP threading. All major GPU
+architectures (e.g., Intel, AMD, NVIDIA) are supported through the use
+of performance portability functionalities implemented in AMReX. The
+MARBLES software is released in NREL Software Record <a class="reference external" href="https://doi.org/10.11578/dc.20231009.2">SWR-23-37</a> “MARBLES (Multi-scale
+Adaptively Refined Boltzmann LatticE Solver)”.</p>
+<section id="getting-started">
+<h4>Getting Started<a class="headerlink" href="#getting-started" title="Link to this heading"></a></h4>
+<p>To compile and run <cite>MARBLES</cite>, one needs a C++ compiler that supports the C++17 standard, and then execute</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>$ git clone --recursive git@github.com:NREL/marbles.git
+$ cd Build
+$ make realclean &amp;&amp; make -j
+$ ./marbles3d.xxx.yyy.ex example.inp
+</pre></div>
+</div>
+<p>To compile and run <cite>MARBLES</cite> with GPU support, e.g. with CUDA, clone the repository as above, and then execute</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>$ cd Build
+$ make USE_CUDA=TRUE
+$ ./marbles3d.xxx.yyy.CUDA.ex example.inp
+</pre></div>
+</div>
+<p>For additional flags to enable different compilers, architectures, and options, see <a class="reference external" href="https://amrex-codes.github.io/amrex/docs_html/BuildingAMReX.html">AMReX build options</a> .</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<ol class="upperalpha simple">
+<li><p>In the exec line above, xxx.yyy is a tag identifying your compiler and various build options, and will vary across pltaform.  (Note that GNU compilers must be at least version 7, and MPI should be at least of standard version 3).</p></li>
+<li><p>The example file can be any file from the <cite>Tests/test_files</cite> directories.</p></li>
+<li><p>In addition to informative output to the terminal, periodic plotfiles are written in the run folder.  These may be viewed with AMReX’s <a class="reference external" href="https://amrex-codes.github.io/amrex/docs_html/Visualization.html">Amrvis</a> or <a class="reference external" href="https://visit-dav.github.io/visit-website/">VisIt</a>:</p>
+<ol class="arabic simple">
+<li><p>In VisIt, direct the File-&gt;Open dialogue to select the file named “Header” that is inside each plotfile folder.</p></li>
+<li><p>With Amrvis, <cite>$ amrvis3d plt00030</cite>, for example.</p></li>
+</ol>
+</li>
+</ol>
+</div>
+<p>Alternatively, one can use cmake to build the code</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>$ cd Build
+$ ./cmake.sh
+$ ./marbles example.inp
+</pre></div>
+</div>
+</section>
+<section id="dependencies">
+<h4>Dependencies<a class="headerlink" href="#dependencies" title="Link to this heading"></a></h4>
+<p><cite>MARBLES</cite> is built on the <a class="reference external" href="https://github.com/AMReX-Codes/amrex">AMReX</a> library.</p>
+</section>
+<section id="documentation">
+<h4>Documentation<a class="headerlink" href="#documentation" title="Link to this heading"></a></h4>
+<p>The full documentation for <cite>MARBLES</cite> exists in the Docs directory; at present this is maintained inline using <a class="reference external" href="http://www.sphinx-doc.org">Sphinx</a>. To build the documentation</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>$ cd Docs &amp;&amp; mkdir build &amp;&amp; cd build &amp;&amp; sphinx-build -M html ../sphinx .
+</pre></div>
+</div>
+<p>Or, using cmake</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>$ cd Build &amp;&amp; cmake -B build-docs ../Docs &amp;&amp; cmake --build build-docs
+</pre></div>
+</div>
+</section>
+<section id="funding">
+<h4>Funding<a class="headerlink" href="#funding" title="Link to this heading"></a></h4>
+<p>This work was authored by the National Renewable Energy Laboratory (NREL) for the U.S. Department of Energy (DOE) under Contract No. DE-AC36-08GO28308. This work was supported by the Laboratory Directed Research and Development (LDRD) Program at NREL. The views expressed in the article do not necessarily represent the views of the DOE or the U.S. Government. The U.S. Government retains and the publisher, by accepting the article for publication, acknowledges that the U.S. Government retains a nonexclusive, paid-up, irrevocable, worldwide license to publish or reproduce the published form of this work, or allow others to do so, for U.S. Government purposes. A portion of the research was performed using computational resources sponsored by the Department of Energy’s Office of Energy Efficiency and Renewable Energy and located at the National Renewable Energy Laboratory.</p>
+</section>
+</section>
+</section>
+<section id="indices-and-tables">
+<h2>Indices and tables<a class="headerlink" href="#indices-and-tables" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p><a class="reference internal" href="genindex.html"><span class="std std-ref">Index</span></a></p></li>
+<li><p><a class="reference internal" href="search.html"><span class="std std-ref">Search Page</span></a></p></li>
+</ul>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="Introduction.html" class="btn btn-neutral float-right" title="Introduction" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023, the Alliance for Sustainable Energy, LLC., through National Renewable Energy Laboratory. All rights reserved.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

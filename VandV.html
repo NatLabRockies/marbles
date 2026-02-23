@@ -1,0 +1,182 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Validation and demonstration &mdash; MARBLES 0.1 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=03e43079" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=2709fde1"></script>
+      <script src="_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="prev" title="Lattice Boltzmann Method" href="LBM.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            MARBLES
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="Introduction.html">Introduction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="GettingStarted.html">Getting Started</a></li>
+<li class="toctree-l1"><a class="reference internal" href="LBM.html">Lattice Boltzmann Method</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Validation and demonstration</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#flow-around-a-sphere">Flow around a sphere</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#flow-in-a-porous-media">Flow in a porous media</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#viscosity-verification">Viscosity verification</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#thermal-diffusivity-verification">Thermal diffusivity verification</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#sod-test-tube">Sod test tube</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#flow-around-a-cylinder-in-a-channel">Flow around a cylinder in a channel</a></li>
+</ul>
+</li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">MARBLES</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Validation and demonstration</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/VandV.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="validation-and-demonstration">
+<span id="vandv"></span><h1>Validation and demonstration<a class="headerlink" href="#validation-and-demonstration" title="Link to this heading"></a></h1>
+<p><cite>MARBLES</cite> undergoes significant testing to ensure correct operation. MARBLES is routinely tested on different compilers and platforms through the GitHub Actions interaface. The regression tests are automatically run on these different platforms and checked for number of different types of errors, e.g., floating point exceptions, memory-bounds checks, and memory allocation/deallocation.</p>
+<p>The regression test suite contains several different cases. We present a few here.</p>
+<section id="flow-around-a-sphere">
+<h2>Flow around a sphere<a class="headerlink" href="#flow-around-a-sphere" title="Link to this heading"></a></h2>
+<p>This validation case is for the flow around a single sphere (Reynolds number of 100). The input file for this case is located in the <cite>Tests/test_files/single_cylinder</cite>. A 2D version of the same case is located in <cite>Tests/test_files/single_cylinder_2d</cite>. This case was run to steady state and resulted in a drag coefficient of 3.096, a lift coefficient of 0.8396, and a Strouhal number of 0.2986. These are within the acceptable range for reference values for this case. The velocity magnitude is shown here:</p>
+<a class="reference internal image-reference" href="_images/single_cylinder.png"><img alt="_images/single_cylinder.png" src="_images/single_cylinder.png" style="width: 600pt;" />
+</a>
+</section>
+<section id="flow-in-a-porous-media">
+<h2>Flow in a porous media<a class="headerlink" href="#flow-in-a-porous-media" title="Link to this heading"></a></h2>
+<p>This demonstrates MARBLES ability to simulate flow through complex, porous media. An STL file, representing a section of a porous pine wood chip, obtained from an experimentally imaged 3D file,, defines the geometry for this case.</p>
+<a class="reference internal image-reference" href="_images/pine_box.gif"><img alt="_images/pine_box.gif" src="_images/pine_box.gif" style="width: 600pt;" />
+</a>
+</section>
+<section id="viscosity-verification">
+<h2>Viscosity verification<a class="headerlink" href="#viscosity-verification" title="Link to this heading"></a></h2>
+<p>This test case demonstrates MARBLES ability to maintain the correct viscosity over a wide range of temperatures.
+Viscosity is computed from the simulation by tracking the maximum of velocity over time arising from an initial
+condition consisting of a sinusoidal velocity perturbation.
+The temperature is not restricted to 1/3, but it can be set to any value less than or equal to 1/3.
+This feature has been enabled by incorporating product-form of the equilibrium distribition which
+improves stability due to maximisation of the entropy and the incorporation of an extended lattice
+Boltzmann approach which adds a non-local correction term to the pressure tensor to correct the insufficient
+Galilean invariance of the standard lattice at the third order moment.</p>
+<p>Input and post processing files: <cite>Tests/test_files/viscosityTest/</cite></p>
+<a class="reference internal image-reference" href="_images/kinematicViscosity.png"><img alt="_images/kinematicViscosity.png" src="_images/kinematicViscosity.png" style="width: 400pt;" />
+</a>
+</section>
+<section id="thermal-diffusivity-verification">
+<h2>Thermal diffusivity verification<a class="headerlink" href="#thermal-diffusivity-verification" title="Link to this heading"></a></h2>
+<p>This test case demonstrates MARBLES ability to maintain the correct thermal diffusivity over a wide range of temperatures,
+as well as at different Prandtl numbers, adiabatic exponents and mean molecular masses.
+Themal diffusivity is computed from the simulation by tracking the maximum of temperature over time arising from an initial
+condition consisting of a sinusoidal temperature perturbation.
+The capability to solve for temperature has been enabled by an additional lattice which conserves the total energy of the fluid.
+The new lattice representing energy has been two way coupled with the existing momentum lattice which had been augmented with
+product-form equilibrium and extended pressure term to compensate the third order error. The new energy lattice adds an
+energy equation, while the multi-relaxation on the energy lattice enables a variable Prandtl number and an adjustable adiabatic
+exponent. The mean molecular mass is allowed to be a variable because the product form of the equilibrium on the
+first lattice allows the variance of the equilibrium distribution to be RT instead of T.</p>
+<p>Input and post processing files: <cite>Tests/test_files/thermalDiffusivityTest/</cite></p>
+<a class="reference internal image-reference" href="_images/thermalDiffusivity.png"><img alt="_images/thermalDiffusivity.png" src="_images/thermalDiffusivity.png" style="width: 400pt;" />
+</a>
+</section>
+<section id="sod-test-tube">
+<h2>Sod test tube<a class="headerlink" href="#sod-test-tube" title="Link to this heading"></a></h2>
+<p>This test case demonstrates MARBLES ability to solve compressible flows with realistic parameters of practical interest.
+The correct position of the wave structures confirm that the speed of sound is correct in the thermal version of the solver. The model
+is the same as that built for the thermal diffusivity test. The sod shock test marks the completion of the MARBLES solver to the
+extent of a contunuum limit, single-component, single-phase, transient computational fluid dynamics solver with mass, momentum and energy equations.</p>
+<p>Input and post processing files: <cite>Tests/test_files/sodTest/</cite></p>
+<a class="reference internal image-reference" href="_images/sodShock.png"><img alt="_images/sodShock.png" src="_images/sodShock.png" style="width: 600pt;" />
+</a>
+</section>
+<section id="flow-around-a-cylinder-in-a-channel">
+<h2>Flow around a cylinder in a channel<a class="headerlink" href="#flow-around-a-cylinder-in-a-channel" title="Link to this heading"></a></h2>
+<p>This test case solves flow around a cylinder confined in a channel and validates against the data from
+“Schäfer, M.; Turek, S.; Durst, F.; Krause, E.; Rannacher, R.
+Benchmark Computations of Laminar Flow Around a Cylinder, 1996. <a class="reference external" href="https://doi.org/10.1007/978-3-322-89849-4_39">https://doi.org/10.1007/978-3-322-89849-4_39</a>.” The input files included with
+MARBLES correspond to case 2D-2 of the “Schäfer et al.” benchmark. The Strouhal number is found to be 0.28 from the simulation, in agreement
+with the range from literature.</p>
+<p>Input and post processing files: <cite>Tests/test_files/cylinder_turek_2d2/</cite></p>
+<a class="reference internal image-reference" href="_images/sheddingCylinderRe100.png"><img alt="_images/sheddingCylinderRe100.png" src="_images/sheddingCylinderRe100.png" style="width: 600pt;" />
+</a>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="LBM.html" class="btn btn-neutral float-left" title="Lattice Boltzmann Method" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023, the Alliance for Sustainable Energy, LLC., through National Renewable Energy Laboratory. All rights reserved.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

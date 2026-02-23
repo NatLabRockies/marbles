@@ -1,0 +1,196 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Input Files and Controls &mdash; MARBLES 0.1 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=03e43079" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=2709fde1"></script>
+      <script src="_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Tutorials" href="Tutorials.html" />
+    <link rel="prev" title="Building" href="Building.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            MARBLES
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="Introduction.html">Introduction</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="GettingStarted.html">Getting Started</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="Building.html">Building</a></li>
+<li class="toctree-l2 current"><a class="current reference internal" href="#">Input Files and Controls</a></li>
+<li class="toctree-l2"><a class="reference internal" href="Tutorials.html">Tutorials</a></li>
+<li class="toctree-l2"><a class="reference internal" href="Testing.html">Testing</a></li>
+<li class="toctree-l2"><a class="reference internal" href="Linting.html">Linting</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="LBM.html">Lattice Boltzmann Method</a></li>
+<li class="toctree-l1"><a class="reference internal" href="VandV.html">Validation and demonstration</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">MARBLES</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="GettingStarted.html">Getting Started</a></li>
+      <li class="breadcrumb-item active">Input Files and Controls</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/InputFiles.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="input-files-and-controls">
+<h1>Input Files and Controls<a class="headerlink" href="#input-files-and-controls" title="Link to this heading"></a></h1>
+<p>The input file specified on the command line is a free-format text file, one entry per row, that specifies input data processed by the AMReX <code class="docutils literal notranslate"><span class="pre">ParmParse</span></code> module.</p>
+<p>This file needs to specified along with the executable as an <cite>argv</cite> option, for example:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">mpirun</span> <span class="o">-</span><span class="n">np</span> <span class="mi">64</span> <span class="o">./</span><span class="n">marbles</span> <span class="n">inputs</span>
+</pre></div>
+</div>
+<p>Entries can be overwritten on the command line: <code class="docutils literal notranslate"><span class="pre">./marbles</span> <span class="pre">inputs</span> <span class="pre">amr.plot_int=10</span></code>.</p>
+<p>Here is an example input file:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="c1"># maximum number of time steps at base AMR level</span>
+<span class="n">max_step</span> <span class="o">=</span> <span class="mi">1000</span>
+
+<span class="c1"># coordinates of domain&#39;s lower corner</span>
+<span class="n">geometry</span><span class="o">.</span><span class="n">prob_lo</span> <span class="o">=</span> <span class="mf">0.0</span> <span class="mf">0.0</span> <span class="mf">0.0</span>
+
+<span class="c1"># coordinates of domain&#39;s upper corner</span>
+<span class="n">geometry</span><span class="o">.</span><span class="n">prob_hi</span> <span class="o">=</span> <span class="mf">96.0</span> <span class="mf">16.0</span> <span class="mf">16.0</span>
+
+<span class="c1"># flag for periodicity (here y direction is periodic)</span>
+<span class="n">geometry</span><span class="o">.</span><span class="n">is_periodic</span> <span class="o">=</span> <span class="mi">0</span> <span class="mi">1</span> <span class="mi">0</span>
+
+<span class="c1"># number of cells along each direction at base level</span>
+<span class="n">amr</span><span class="o">.</span><span class="n">n_cell</span>  <span class="o">=</span> <span class="mi">96</span> <span class="mi">16</span> <span class="mi">16</span>
+
+<span class="c1"># maximum level number allowed</span>
+<span class="n">amr</span><span class="o">.</span><span class="n">max_level</span> <span class="o">=</span> <span class="mi">0</span>
+
+<span class="c1"># maximum number of cells per box along x,y,z</span>
+<span class="n">amr</span><span class="o">.</span><span class="n">max_grid_size</span> <span class="o">=</span> <span class="mi">16</span>
+
+<span class="c1"># number of timesteps between plot files</span>
+<span class="n">amr</span><span class="o">.</span><span class="n">plot_int</span> <span class="o">=</span> <span class="mi">10</span>
+
+<span class="c1"># number of timesteps between checkpoint files</span>
+<span class="n">amr</span><span class="o">.</span><span class="n">chk_int</span> <span class="o">=</span> <span class="mi">10</span>
+
+<span class="c1"># LBM parameteris</span>
+<span class="n">lbm</span><span class="o">.</span><span class="n">bc_lo</span> <span class="o">=</span> <span class="mi">2</span> <span class="mi">0</span> <span class="mi">1</span>
+<span class="n">lbm</span><span class="o">.</span><span class="n">bc_hi</span> <span class="o">=</span> <span class="mi">3</span> <span class="mi">0</span> <span class="mi">1</span>
+<span class="n">lbm</span><span class="o">.</span><span class="n">dx_outer</span> <span class="o">=</span> <span class="mf">1.0</span>
+<span class="n">lbm</span><span class="o">.</span><span class="n">dt_outer</span> <span class="o">=</span> <span class="mf">1.0</span>
+<span class="n">lbm</span><span class="o">.</span><span class="n">nu</span> <span class="o">=</span> <span class="mf">0.01733333333333333</span>
+<span class="n">lbm</span><span class="o">.</span><span class="n">save_streaming</span> <span class="o">=</span> <span class="mi">0</span>
+
+<span class="n">lbm</span><span class="o">.</span><span class="n">velocity_bc_type</span> <span class="o">=</span> <span class="s2">&quot;channel&quot;</span>
+<span class="n">velocity_bc_channel</span><span class="o">.</span><span class="n">initial_density</span> <span class="o">=</span> <span class="mf">1.0</span>
+<span class="n">velocity_bc_channel</span><span class="o">.</span><span class="n">Mach_ref</span> <span class="o">=</span> <span class="mf">0.01</span>
+<span class="n">velocity_bc_channel</span><span class="o">.</span><span class="n">initial_temperature</span> <span class="o">=</span> <span class="mf">0.03</span>
+
+<span class="n">lbm</span><span class="o">.</span><span class="n">ic_type</span> <span class="o">=</span> <span class="s2">&quot;constant&quot;</span>
+<span class="n">ic_constant</span><span class="o">.</span><span class="n">density</span> <span class="o">=</span> <span class="mf">1.0</span>
+<span class="n">ic_constant</span><span class="o">.</span><span class="n">velocity</span> <span class="o">=</span> <span class="mf">0.0</span> <span class="mf">0.0</span> <span class="mf">0.0</span>
+
+<span class="c1"># embedded boundary</span>
+<span class="n">eb2</span><span class="o">.</span><span class="n">geom_type</span> <span class="o">=</span> <span class="s2">&quot;cylinder&quot;</span>
+<span class="n">eb2</span><span class="o">.</span><span class="n">cylinder_radius</span> <span class="o">=</span> <span class="mf">2.0</span>
+<span class="n">eb2</span><span class="o">.</span><span class="n">cylinder_center</span> <span class="o">=</span> <span class="mf">32.0</span> <span class="mf">8.0</span> <span class="mf">8.0</span>
+<span class="n">eb2</span><span class="o">.</span><span class="n">cylinder_has_fluid_inside</span> <span class="o">=</span> <span class="mi">0</span>
+<span class="n">eb2</span><span class="o">.</span><span class="n">cylinder_height</span> <span class="o">=</span> <span class="mf">256.0</span>
+<span class="n">eb2</span><span class="o">.</span><span class="n">cylinder_direction</span> <span class="o">=</span> <span class="mi">1</span>
+
+<span class="c1"># amrex options for trapping FPEs</span>
+<span class="n">amrex</span><span class="o">.</span><span class="n">fpe_trap_invalid</span> <span class="o">=</span> <span class="mi">1</span>
+<span class="n">amrex</span><span class="o">.</span><span class="n">fpe_trap_zero</span> <span class="o">=</span> <span class="mi">1</span>
+<span class="n">amrex</span><span class="o">.</span><span class="n">fpe_trap_overflow</span> <span class="o">=</span> <span class="mi">1</span>
+</pre></div>
+</div>
+<p>Here is an examples of setting up tagging criteria:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="c1"># Tag inside a box and a velocity magnitude value</span>
+<span class="n">tagging</span><span class="o">.</span><span class="n">refinement_indicators</span> <span class="o">=</span> <span class="n">yLow</span> <span class="n">vel_mag</span>
+<span class="n">tagging</span><span class="o">.</span><span class="n">yLow</span><span class="o">.</span><span class="n">in_box_lo</span> <span class="o">=</span> <span class="o">-</span><span class="mf">0.1</span>  <span class="o">-</span><span class="mf">0.52</span>  <span class="o">-</span><span class="mf">0.85</span>
+<span class="n">tagging</span><span class="o">.</span><span class="n">yLow</span><span class="o">.</span><span class="n">in_box_hi</span> <span class="o">=</span>  <span class="mf">3.1</span> <span class="o">-</span><span class="mf">0.45</span>    <span class="mf">0.85</span>
+
+<span class="n">tagging</span><span class="o">.</span><span class="n">vel_mag</span><span class="o">.</span><span class="n">max_level</span>     <span class="o">=</span> <span class="mi">2</span>
+<span class="n">tagging</span><span class="o">.</span><span class="n">vel_mag</span><span class="o">.</span><span class="n">value_greater</span> <span class="o">=</span> <span class="mf">1.2e4</span>
+<span class="n">tagging</span><span class="o">.</span><span class="n">vel_mag</span><span class="o">.</span><span class="n">field_name</span>    <span class="o">=</span> <span class="n">vel_mag</span>
+</pre></div>
+</div>
+<p>The following keys are implemented: <cite>value_greater</cite>, <cite>value_less</cite>, <cite>adjacent_difference_greater</cite>, <cite>in_box_lo</cite> and <cite>in_box_hi</cite> (to specify a refinement region), <cite>max_level</cite>, <cite>start_time</cite>, and <cite>end_time</cite>. The <cite>field_name</cite> key can be any available variable.</p>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="Building.html" class="btn btn-neutral float-left" title="Building" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="Tutorials.html" class="btn btn-neutral float-right" title="Tutorials" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023, the Alliance for Sustainable Energy, LLC., through National Renewable Energy Laboratory. All rights reserved.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

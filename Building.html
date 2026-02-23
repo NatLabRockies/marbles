@@ -1,0 +1,145 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Building &mdash; MARBLES 0.1 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=03e43079" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=2709fde1"></script>
+      <script src="_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Input Files and Controls" href="InputFiles.html" />
+    <link rel="prev" title="Getting Started" href="GettingStarted.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            MARBLES
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="Introduction.html">Introduction</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="GettingStarted.html">Getting Started</a><ul class="current">
+<li class="toctree-l2 current"><a class="current reference internal" href="#">Building</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#gnu-make">GNU Make</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#cmake">CMake</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="InputFiles.html">Input Files and Controls</a></li>
+<li class="toctree-l2"><a class="reference internal" href="Tutorials.html">Tutorials</a></li>
+<li class="toctree-l2"><a class="reference internal" href="Testing.html">Testing</a></li>
+<li class="toctree-l2"><a class="reference internal" href="Linting.html">Linting</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="LBM.html">Lattice Boltzmann Method</a></li>
+<li class="toctree-l1"><a class="reference internal" href="VandV.html">Validation and demonstration</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">MARBLES</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="GettingStarted.html">Getting Started</a></li>
+      <li class="breadcrumb-item active">Building</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/Building.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="building">
+<span id="id1"></span><h1>Building<a class="headerlink" href="#building" title="Link to this heading"></a></h1>
+<p><cite>MARBLES</cite> can be built in two ways: GNU Make build system and CMake.</p>
+<section id="gnu-make">
+<h2>GNU Make<a class="headerlink" href="#gnu-make" title="Link to this heading"></a></h2>
+<p>Assuming one uses the submodules, e.g., <code class="docutils literal notranslate"><span class="pre">git</span> <span class="pre">clone</span> <span class="pre">--recursive</span></code> or <code class="docutils literal notranslate"><span class="pre">git</span> <span class="pre">submodule</span> <span class="pre">init;</span> <span class="pre">git</span> <span class="pre">submodule</span> <span class="pre">update</span></code>, then building <cite>MARBLES</cite> is as simple as</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">cd</span> <span class="n">Build</span>
+<span class="n">make</span> <span class="o">-</span><span class="n">j</span>
+</pre></div>
+</div>
+<p>One can edit the <code class="docutils literal notranslate"><span class="pre">GNUMakefile</span></code> to customize compile options.</p>
+</section>
+<section id="cmake">
+<h2>CMake<a class="headerlink" href="#cmake" title="Link to this heading"></a></h2>
+<p>To use the CMake option, one executes the CMake configure command in the build directory:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">cd</span> <span class="n">Build</span>
+<span class="n">cmake</span> <span class="o">-</span><span class="n">DCMAKE_BUILD_TYPE</span><span class="p">:</span><span class="n">STRING</span><span class="o">=</span><span class="n">Release</span> \
+      <span class="o">-</span><span class="n">DMARBLES_ENABLE_MPI</span><span class="p">:</span><span class="n">BOOL</span><span class="o">=</span><span class="n">ON</span> \
+      <span class="o">-</span><span class="n">DCMAKE_CXX_COMPILER</span><span class="p">:</span><span class="n">STRING</span><span class="o">=</span><span class="n">mpicxx</span> \
+      <span class="o">-</span><span class="n">DCMAKE_C_COMPILER</span><span class="p">:</span><span class="n">STRING</span><span class="o">=</span><span class="n">mpicc</span> \
+      <span class="o">..</span> <span class="o">&amp;&amp;</span> <span class="n">make</span>
+</pre></div>
+</div>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="GettingStarted.html" class="btn btn-neutral float-left" title="Getting Started" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="InputFiles.html" class="btn btn-neutral float-right" title="Input Files and Controls" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023, the Alliance for Sustainable Energy, LLC., through National Renewable Energy Laboratory. All rights reserved.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
