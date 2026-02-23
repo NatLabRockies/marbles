@@ -340,6 +340,9 @@ private:
     // compute and output forces
     bool m_compute_forces = false;
 
+    // clamp negative component densities before collision
+    bool m_clamp_component_densities = false;
+
     // file for forces
     std::string m_forces_file{"forces.txt"};
 

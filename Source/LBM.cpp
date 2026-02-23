@@ -309,6 +309,7 @@ void LBM::read_parameters()
 
         pp.query("compute_forces", m_compute_forces);
         pp.query("forces_file", m_forces_file);
+        pp.query("clamp_component_densities", m_clamp_component_densities);
 
         pp.query("initial_temperature", m_initialTemperature);
 
@@ -644,7 +645,10 @@ void LBM::advance(
 
     // Clamp negative component densities BEFORE collision so the collision
     // step always acts on clean (non-negative) populations.
-    clamp_negative_component_densities(lev);
+    // Activated via lbm.clamp_component_densities = 1 in the input file.
+    if (m_clamp_component_densities) {
+        clamp_negative_component_densities(lev);
+    }
 
     collide(lev);
 }
