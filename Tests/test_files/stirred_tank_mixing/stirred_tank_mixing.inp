@@ -1,4 +1,4 @@
-max_step = 10000
+max_step = 100000
 
 # geometry parameters
 geometry.prob_lo = 0.0 0.0 -64.0
@@ -12,7 +12,7 @@ amr.max_grid_size = 32
 amr.blocking_factor_x = 2
 amr.blocking_factor_y = 1
 amr.blocking_factor_z = 1
-amr.plot_int = 100
+amr.plot_int = 1000
 amr.chk_int = 10000000
 amr.file_name_digits = 5
 
@@ -24,7 +24,7 @@ lbm.dt_outer = 1.0
 lbm.nu = 0.008
 lbm.alpha = 0.008
 lbm.n_components = 1
-lbm.diffusivity_component_0 = 0.0008
+lbm.diffusivity_component_0 = 0.008
 lbm.initial_temperature = 0.03333
 lbm.adiabatic_exponent = 1.4
 lbm.save_streaming = 0
