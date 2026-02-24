@@ -53,7 +53,7 @@ ic_constant_component_0.mach_components = 0.0 0.0 0.0
 ic_constant_component_0.region_type = "sphere"
 ic_constant_component_0.region_center = 90.0 64.0 16.0
 ic_constant_component_0.region_radius = 10.0
-ic_constant_component_0.density = 1.0
+ic_constant_component_0.density = 0.01
 ic_constant_component_0.outside_density = 0.0
 ic_constant_component_0.initial_temperature = 0.03333
 
