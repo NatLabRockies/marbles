@@ -91,7 +91,7 @@ LBM::LBM()
     }
 
     for (int i = 0; i < m_n_components; ++i) {
-        m_lbm_varnames.push_back("rho_" + std::to_string(i));
+        m_lbm_varnames.push_back("Y_" + std::to_string(i));
     }
 
     read_tagging_parameters();
@@ -672,7 +672,7 @@ void LBM::stream(const int lev, amrex::Vector<amrex::MultiFab>& fs)
     amrex::MultiFab f_star(
         boxArray(lev), DistributionMap(lev), constants::N_MICRO_STATES,
         fs[lev].nGrow(), amrex::MFInfo(), *(m_factory[lev]));
-    f_star.setVal(-1.0);
+    f_star.setVal(0.0);
 
     auto const& fs_arrs = f_star.arrays();
     auto const& is_fluid_arrs = m_is_fluid[lev].const_arrays();
@@ -2097,7 +2097,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                 }
                 
                 // If no boundary neighbors, just zero out (mass is lost to EB)
-                if (weight_sum < 1e-12) {
+                if (weight_sum == 0.0) {
                     for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
                         f_arrs[nbx](i, j, k, q) = 0.0;
                         g_arrs[nbx](i, j, k, q) = 0.0;
@@ -2208,7 +2208,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                 }
 
                 // If no boundary neighbors, just zero out (mass is lost to EB)
-                if (weight_sum < 1e-12) {
+                if (weight_sum == 0.0) {
                     for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
                         f_comp_arrs[nbx](i, j, k, q) = 0.0;
                     }
@@ -2340,7 +2340,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
             
             // Step 3: Normalize the normal vector
             amrex::Real norm = std::sqrt(normal_x*normal_x + normal_y*normal_y + normal_z*normal_z);
-            if (norm < 1e-12) {
+            if (norm == 0.0) {
                 // Normal is zero - fall back to first persistent neighbor
                 for (int nq = 1; nq < constants::N_MICRO_STATES; ++nq) {
                     int ni = i + evs[nq][0];
@@ -2459,7 +2459,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
             
             // Normalize the normal vector
             amrex::Real norm = std::sqrt(normal_x*normal_x + normal_y*normal_y + normal_z*normal_z);
-            if (norm < 1e-12) {
+            if (norm == 0.0) {
                 // Fallback: use first persistent neighbor
                 for (int nq = 1; nq < constants::N_MICRO_STATES; ++nq) {
                     int ni = i + evs[nq][0];
@@ -3388,7 +3388,7 @@ amrex::Vector<const amrex::MultiFab*> LBM::plot_file_mf()
                     amrex::Real rho_total =
                         md_arrs[nbx](i, j, k, constants::RHO_IDX);
                     amrex::Real Y_k =
-                        (rho_total > 1e-12) ? (rho_comp / rho_total) : 0.0;
+                        (rho_total > 0.0) ? (rho_comp / rho_total) : 0.0;
                     plt_mf_arrs[nbx](i, j, k, cnt) = Y_k;
                 });
             amrex::Gpu::synchronize();
