@@ -155,6 +155,24 @@ public:
     // clamp negative component densities to zero
     void clamp_negative_component_densities(const int lev);
 
+    // Apply operator-split reaction source terms for the two-step catalytic
+    // mechanism  S+C <-> I -> P+C  to all component lattices on one level.
+    // Source increments are distributed uniformly across all N_MICRO_STATES
+    // populations so that no net momentum is added by the chemistry.
+    void apply_reaction_source_terms(int lev);
+
+    // Inject the catalyst (component 1) into a box region at a prescribed
+    // simulation step.  Executed only once (guarded by m_cat_inject_done).
+    void apply_timed_catalyst_injection(int lev);
+
+    // Open/close the per-step species statistics CSV file.
+    void open_species_stats_file(bool initialize);
+    void close_species_stats_file();
+
+    // Append one row (step, LB-time, mean rho per species, conservation
+    // residuals) to the species statistics file.
+    void write_species_stats();
+
 private:
     // read parameters
     void read_parameters();
@@ -394,6 +412,30 @@ private:
     // Set the actual reference speed of sound
     amrex::Real m_speedOfSound_Ref = std::sqrt(
         m_adiabaticExponent * (m_R_u / m_m_bar) * m_initialTemperature);
+
+    // ---------------------------------------------------------------
+    // Two-step catalytic reaction parameters
+    // Mechanism:  S + C <--k_f/k_r--> I --k_p--> P + C
+    //   component 0 = S  (substrate)
+    //   component 1 = C  (catalyst)
+    //   component 2 = I  (intermediate)
+    //   component 3 = P  (product)
+    // ---------------------------------------------------------------
+    bool        m_enable_reactions    = false;
+    amrex::Real m_rxn_k_forward       = 0.0;  // bimolecular  [LB_rho^-1 step^-1]
+    amrex::Real m_rxn_k_reverse       = 0.0;  // unimolecular [step^-1]
+    amrex::Real m_rxn_k_product       = 0.0;  // unimolecular [step^-1]
+
+    // Timed catalyst injection
+    bool        m_cat_inject_done     = false;
+    int         m_cat_inject_step     = -1;   // LB step for catalyst release
+    amrex::Real m_cat_inject_density  = 0.0;  // LB rho assigned in box
+    amrex::RealVect m_cat_inject_box_lo{AMREX_D_DECL(0.0, 0.0, 0.0)};
+    amrex::RealVect m_cat_inject_box_hi{AMREX_D_DECL(0.0, 0.0, 0.0)};
+
+    // Species statistics output
+    std::string   m_species_stats_file{"species_stats.csv"};
+    std::fstream  m_species_stats_stream;
 };
 } // namespace lbm
 #endif

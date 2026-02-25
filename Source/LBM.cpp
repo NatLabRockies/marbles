@@ -191,12 +191,14 @@ void LBM::init_data()
         }
 
         open_forces_file(true);
+        open_species_stats_file(true);
         compute_eb_forces();
     } else {
         // restart from a checkpoint
         read_checkpoint_file();
 
         open_forces_file(false);
+        open_species_stats_file(false);
     }
 
     if (m_plot_int > 0) {
@@ -317,6 +319,28 @@ void LBM::read_parameters()
         pp.query("body_temperature", m_bodyTemperature);
 
         pp.query("is_fluid_fraction_threshold", m_is_fluid_fraction_threshold);
+
+        // Reaction parameters
+        pp.query("enable_reactions",  m_enable_reactions);
+        pp.query("rxn_k_forward",     m_rxn_k_forward);
+        pp.query("rxn_k_reverse",     m_rxn_k_reverse);
+        pp.query("rxn_k_product",     m_rxn_k_product);
+
+        // Timed catalyst injection
+        pp.query("cat_inject_step",    m_cat_inject_step);
+        pp.query("cat_inject_density", m_cat_inject_density);
+        {
+            amrex::Vector<amrex::Real> lo_tmp(AMREX_SPACEDIM, 0.0);
+            amrex::Vector<amrex::Real> hi_tmp(AMREX_SPACEDIM, 0.0);
+            pp.queryarr("cat_inject_box_lo", lo_tmp, 0, AMREX_SPACEDIM);
+            pp.queryarr("cat_inject_box_hi", hi_tmp, 0, AMREX_SPACEDIM);
+            for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                m_cat_inject_box_lo[d] = lo_tmp[d];
+                m_cat_inject_box_hi[d] = hi_tmp[d];
+            }
+        }
+
+        pp.query("species_stats_file", m_species_stats_file);
     }
 
     // Moving body parameters
@@ -523,6 +547,7 @@ void LBM::evolve()
     if (m_plot_int > 0 && m_isteps[0] > last_plot_file_step) {
         write_plot_file();
     }
+    close_species_stats_file();
     close_forces_file();
 }
 
@@ -651,6 +676,19 @@ void LBM::advance(
     }
 
     collide(lev);
+
+    // Catalyst injection: executed exactly once on level 0 when the
+    // configured step is reached.  After injection the populations are
+    // filled and m_cat_inject_done prevents any repeated application.
+    if (lev == 0) {
+        apply_timed_catalyst_injection(lev);
+    }
+
+    // Operator-split chemistry: add/remove mass from the four scalar
+    // fields according to the two-step catalytic reaction kinetics.
+    if (m_enable_reactions && m_n_components >= 4) {
+        apply_reaction_source_terms(lev);
+    }
 }
 
 void LBM::post_time_step()
@@ -662,6 +700,11 @@ void LBM::post_time_step()
     }
 
     compute_eb_forces();
+
+    // Write per-step mean species concentrations when reactions are enabled.
+    if (m_enable_reactions && m_n_components >= 4) {
+        write_species_stats();
+    }
 }
 
 // Stream the information to the neighbor particles
@@ -3737,4 +3780,305 @@ void LBM::output_forces_file(const amrex::Vector<amrex::Real>& forces)
         m_forces_stream << std::endl;
     }
 }
+
+// ---------------------------------------------------------------
+// Two-step catalytic reaction: S + C <--(k_f/k_r)--> I --k_p--> P + C
+//
+// Operator-split source terms applied after each BGK collision step.
+// The change in local density for each species over one time step is:
+//
+//   R_fwd = k_f * rho_S * rho_C    (bimolecular)
+//   R_rev = k_r * rho_I             (unimolecular)
+//   R_prd = k_p * rho_I             (unimolecular)
+//
+//   Delta_rho_S = R_rev - R_fwd
+//   Delta_rho_C = (R_rev + R_prd) - R_fwd
+//   Delta_rho_I = R_fwd - (R_rev + R_prd)
+//   Delta_rho_P = R_prd
+//
+// Each increment is spread uniformly over all N_MICRO_STATES populations
+// (isotropic source => no spurious momentum injection).
+// ---------------------------------------------------------------
+void LBM::apply_reaction_source_terms(const int lev)
+{
+    BL_PROFILE("LBM::apply_reaction_source_terms()");
+
+    // Need exactly four components: S(0), C(1), I(2), P(3)
+    AMREX_ASSERT(m_n_components >= 4);
+
+    const amrex::Real k_f  = m_rxn_k_forward;
+    const amrex::Real k_r  = m_rxn_k_reverse;
+    const amrex::Real k_p  = m_rxn_k_product;
+    const amrex::Real inv_Q = 1.0 / constants::N_MICRO_STATES;
+
+    auto const& is_fluid_arrs = m_is_fluid[lev].const_arrays();
+
+    // Gather non-const arrays for the four reactive components
+    auto const& fS_arrs = m_component_lattices[0][lev].arrays();
+    auto const& fC_arrs = m_component_lattices[1][lev].arrays();
+    auto const& fI_arrs = m_component_lattices[2][lev].arrays();
+    auto const& fP_arrs = m_component_lattices[3][lev].arrays();
+
+    amrex::ParallelFor(
+        m_component_lattices[0][lev],
+        amrex::IntVect(0),   // no ghost cells — source terms only on interior
+        [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept
+        {
+            const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
+            if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_IDX) != 1) {
+                return;
+            }
+
+            // Compute local species densities by summing over populations
+            amrex::Real rho_S = 0.0, rho_C = 0.0, rho_I = 0.0, rho_P = 0.0;
+            for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+                rho_S += fS_arrs[nbx](iv, q);
+                rho_C += fC_arrs[nbx](iv, q);
+                rho_I += fI_arrs[nbx](iv, q);
+                rho_P += fP_arrs[nbx](iv, q);
+            }
+
+            // Guard against numerical noise producing negative densities
+            rho_S = amrex::max(rho_S, 0.0);
+            rho_C = amrex::max(rho_C, 0.0);
+            rho_I = amrex::max(rho_I, 0.0);
+
+            // Reaction rates
+            const amrex::Real R_fwd = k_f * rho_S * rho_C;
+            const amrex::Real R_rev = k_r * rho_I;
+            const amrex::Real R_prd = k_p * rho_I;
+
+            // Density increments
+            const amrex::Real d_S = R_rev - R_fwd;
+            const amrex::Real d_C = (R_rev + R_prd) - R_fwd;
+            const amrex::Real d_I = R_fwd - (R_rev + R_prd);
+            const amrex::Real d_P = R_prd;
+
+            // Distribute uniformly across populations
+            const amrex::Real dS_q = d_S * inv_Q;
+            const amrex::Real dC_q = d_C * inv_Q;
+            const amrex::Real dI_q = d_I * inv_Q;
+            const amrex::Real dP_q = d_P * inv_Q;
+
+            for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+                fS_arrs[nbx](iv, q) += dS_q;
+                fC_arrs[nbx](iv, q) += dC_q;
+                fI_arrs[nbx](iv, q) += dI_q;
+                fP_arrs[nbx](iv, q) += dP_q;
+            }
+        });
+    amrex::Gpu::synchronize();
+}
+
+// ---------------------------------------------------------------
+// Timed catalyst injection
+// On the first call where m_isteps[0] >= m_cat_inject_step, fill all
+// fluid cells whose physical centres fall inside the injection box with
+// a uniform equilibrium-like population for component 1 (catalyst C).
+// The flag m_cat_inject_done prevents any repeated application.
+// ---------------------------------------------------------------
+void LBM::apply_timed_catalyst_injection(const int lev)
+{
+    BL_PROFILE("LBM::apply_timed_catalyst_injection()");
+
+    if (m_cat_inject_done || m_cat_inject_step < 0) { return; }
+    if (m_isteps[0] < m_cat_inject_step)             { return; }
+    if (m_n_components < 2)                           { return; }
+
+    m_cat_inject_done = true;
+
+    if (amrex::ParallelDescriptor::IOProcessor()) {
+        amrex::Print() << "\n[Reaction] Injecting catalyst (component 1) at step "
+                       << m_isteps[0] << "  (LB time = " << m_ts_new[lev] << ")\n";
+    }
+
+    const amrex::Real rho_inject = m_cat_inject_density;
+    const amrex::Real pop_val    = rho_inject / constants::N_MICRO_STATES;
+
+    const amrex::RealVect box_lo = m_cat_inject_box_lo;
+    const amrex::RealVect box_hi = m_cat_inject_box_hi;
+
+    const auto prob_lo = Geom(lev).ProbLoArray();
+    const auto dx      = Geom(lev).CellSizeArray();
+
+    auto const& is_fluid_arrs = m_is_fluid[lev].const_arrays();
+    auto const& fC_arrs       = m_component_lattices[1][lev].arrays();
+
+    amrex::ParallelFor(
+        m_component_lattices[1][lev],
+        amrex::IntVect(0),
+        [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept
+        {
+            const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
+            if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_IDX) != 1) {
+                return;
+            }
+            // Physical cell centre
+            const amrex::Real cx = prob_lo[0] + (i + 0.5) * dx[0];
+            const amrex::Real cy = prob_lo[1] + (j + 0.5) * dx[1];
+#if AMREX_SPACEDIM == 3
+            const amrex::Real cz = prob_lo[2] + (k + 0.5) * dx[2];
+#else
+            const amrex::Real cz = 0.0;
+            (void)(cz); // suppress unused-variable warning in 2D builds
+#endif
+
+            const bool inside =
+                (cx >= box_lo[0] && cx <= box_hi[0]) &&
+                (cy >= box_lo[1] && cy <= box_hi[1])
+#if AMREX_SPACEDIM == 3
+                && (cz >= box_lo[2] && cz <= box_hi[2])
+#endif
+                ;
+
+            if (inside) {
+                for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+                    fC_arrs[nbx](iv, q) = pop_val;
+                }
+            }
+        });
+    amrex::Gpu::synchronize();
+
+    // Ensure ghost cells are consistent after the injection
+    m_component_lattices[1][lev].FillBoundary(Geom(lev).periodicity());
+}
+
+// ---------------------------------------------------------------
+// Species statistics file (species_stats.csv)
+// Columns: step, LBtime, mean_rho_S, mean_rho_C, mean_rho_I, mean_rho_P,
+//          cat_cycle_sum (= rho_C + rho_I, should be const after injection),
+//          sub_cycle_sum (= rho_S + rho_I + rho_P, should be const)
+// ---------------------------------------------------------------
+void LBM::open_species_stats_file(const bool initialize)
+{
+    BL_PROFILE("LBM::open_species_stats_file()");
+    if (!(m_enable_reactions && m_n_components >= 4)) { return; }
+
+    const bool file_already_exists = file_exists(m_species_stats_file);
+    if (file_already_exists && !initialize) {
+        m_species_stats_stream.open(m_species_stats_file, std::ios::app);
+    } else {
+        m_species_stats_stream.open(m_species_stats_file, std::ios::out);
+        // Header
+        m_species_stats_stream
+            << std::setw(12) << "step"
+            << std::setw(constants::DATWIDTH) << "LBtime"
+            << std::setw(constants::DATWIDTH) << "mean_rho_S"
+            << std::setw(constants::DATWIDTH) << "mean_rho_C"
+            << std::setw(constants::DATWIDTH) << "mean_rho_I"
+            << std::setw(constants::DATWIDTH) << "mean_rho_P"
+            << std::setw(constants::DATWIDTH) << "cat_cycle_sum"
+            << std::setw(constants::DATWIDTH) << "sub_cycle_sum"
+            << "\n";
+    }
+}
+
+void LBM::close_species_stats_file()
+{
+    BL_PROFILE("LBM::close_species_stats_file()");
+    if (m_species_stats_stream.is_open()) {
+        m_species_stats_stream.close();
+    }
+}
+
+void LBM::write_species_stats()
+{
+    BL_PROFILE("LBM::write_species_stats()");
+    if (!m_species_stats_stream.is_open()) { return; }
+
+    // Volume-average each species density over all fluid cells on level 0.
+    // We reduce four sums (one per component) plus a fluid-cell counter.
+    amrex::Real sum_S = 0.0, sum_C = 0.0, sum_I = 0.0, sum_P = 0.0;
+    amrex::Real n_fluid = 0.0;
+
+    auto const& is_fluid_arrs = m_is_fluid[0].const_arrays();
+
+    // Helper lambda: reduce total density of one component lattice.
+    auto reduce_component = [&](int c) -> amrex::Real {
+        amrex::Real total = 0.0;
+        auto const& fc_arrs = m_component_lattices[c][0].const_arrays();
+        amrex::ReduceOps<amrex::ReduceOpSum> reduce_op;
+        amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
+        using ReduceTuple = typename decltype(reduce_data)::Type;
+
+        reduce_op.eval(
+            m_component_lattices[c][0], amrex::IntVect(0),
+            reduce_data,
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) -> ReduceTuple
+            {
+                const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
+                if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_IDX) != 1) {
+                    return {0.0};
+                }
+                amrex::Real rho = 0.0;
+                const auto fc = fc_arrs[nbx];
+                for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+                    rho += fc(iv, q);
+                }
+                return {rho};
+            });
+        ReduceTuple hv = reduce_data.value(reduce_op);
+        total = amrex::get<0>(hv);
+        amrex::ParallelDescriptor::ReduceRealSum(total);
+        return total;
+    };
+
+    // Count fluid cells (only needs to be done once; reuse for all species)
+    {
+        amrex::ReduceOps<amrex::ReduceOpSum> reduce_op;
+        amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
+        using ReduceTuple = typename decltype(reduce_data)::Type;
+        reduce_op.eval(
+            m_component_lattices[0][0], amrex::IntVect(0), reduce_data,
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) -> ReduceTuple
+            {
+                const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
+                return {amrex::Real(is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_IDX) == 1 ? 1.0 : 0.0)};
+            });
+        ReduceTuple hv = reduce_data.value(reduce_op);
+        n_fluid = amrex::get<0>(hv);
+        amrex::ParallelDescriptor::ReduceRealSum(n_fluid);
+    }
+
+    if (n_fluid <= 0.5) { return; }
+
+    sum_S = reduce_component(0);
+    sum_C = reduce_component(1);
+    sum_I = reduce_component(2);
+    sum_P = reduce_component(3);
+
+    const amrex::Real inv_n = 1.0 / n_fluid;
+    const amrex::Real mean_S = sum_S * inv_n;
+    const amrex::Real mean_C = sum_C * inv_n;
+    const amrex::Real mean_I = sum_I * inv_n;
+    const amrex::Real mean_P = sum_P * inv_n;
+
+    // Conservation diagnostics
+    // cat_cycle_sum  = mean_C + mean_I  (constant after catalyst injection)
+    // sub_cycle_sum  = mean_S + mean_I + mean_P  (constant everywhere)
+    const amrex::Real cat_cycle = mean_C + mean_I;
+    const amrex::Real sub_cycle = mean_S + mean_I + mean_P;
+
+    if (amrex::ParallelDescriptor::IOProcessor()) {
+        m_species_stats_stream
+            << std::setw(12) << m_isteps[0]
+            << std::setw(constants::DATWIDTH)
+            << std::setprecision(constants::DATPRECISION) << m_ts_new[0]
+            << std::setw(constants::DATWIDTH)
+            << std::setprecision(constants::DATPRECISION) << mean_S
+            << std::setw(constants::DATWIDTH)
+            << std::setprecision(constants::DATPRECISION) << mean_C
+            << std::setw(constants::DATWIDTH)
+            << std::setprecision(constants::DATPRECISION) << mean_I
+            << std::setw(constants::DATWIDTH)
+            << std::setprecision(constants::DATPRECISION) << mean_P
+            << std::setw(constants::DATWIDTH)
+            << std::setprecision(constants::DATPRECISION) << cat_cycle
+            << std::setw(constants::DATWIDTH)
+            << std::setprecision(constants::DATPRECISION) << sub_cycle
+            << "\n";
+        m_species_stats_stream.flush();
+    }
+}
+
 } // namespace lbm
