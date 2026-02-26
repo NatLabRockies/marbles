@@ -178,7 +178,7 @@ body.center = 64.0 64.0 -23.0
 #   height             = 17.8 cells  (~0.0417 m)
 #   STL generated at origin; eb2.stl_center translates to body.center in domain
 eb2.geom_type = "all_regular"
-eb2.stl_file = "impeller.stl"
+eb2.stl_file = "pitched_impeller.stl"
 eb2.stl_center = 64.0 64.0 -23.0
 eb2.stl_scale = 1.0
 eb2.stl_reverse_normal = 0
