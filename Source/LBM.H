@@ -331,6 +331,9 @@ private:
 
     int m_plot_int = -1;
 
+    // screen output frequency (steps between step-header prints, default = plot_int)
+    int m_print_int = 1000;
+
     // checkpoint prefix and frequency
     std::string m_chk_file{"chk"};
     int m_chk_int = -1;

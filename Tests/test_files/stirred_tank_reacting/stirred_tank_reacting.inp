@@ -66,6 +66,7 @@ amr.blocking_factor_x = 2
 amr.blocking_factor_y = 1
 amr.blocking_factor_z = 1
 amr.plot_int = 1000
+amr.print_int = 100   # screen output every N steps (default = plot_int/10)
 amr.chk_int = 10000000
 amr.file_name_digits = 5
 
@@ -113,7 +114,7 @@ lbm.rxn_k_product      = 1.326e-3   # product rate     k_p  [step^-1]
 # centres fall inside [cat_inject_box_lo, cat_inject_box_hi].
 # Centre of injection: lower tank region (z ~ -39), centred in x and y.
 # ---------------------------------------------------------------
-lbm.cat_inject_step     = 377000    # step at which C is released (~5.0 s physical)
+lbm.cat_inject_step     = 37700    # step at which C is released (~5.0 s physical)
 lbm.cat_inject_density  = 2.0e-4    # LB rho for catalyst injection (~0.1 mol/L)
 # Box: 0.029 m x 0.029 m x 0.029 m centered at (0, 0.0595, 0) m  [Reference y=height]
 #   -> LB center (x=64, y=64, z=-64+25.4=-38.6), half-side = 0.0145/(0.3/128) = 6.19 cells

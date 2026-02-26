@@ -229,6 +229,8 @@ void LBM::read_parameters()
         pp.query("regrid_int", m_regrid_int);
         pp.query("plot_file", m_plot_file);
         pp.query("plot_int", m_plot_int);
+        m_print_int = (m_plot_int > 0) ? amrex::max(1, m_plot_int / 10) : m_print_int;  // default to plot_int/10
+        pp.query("print_int", m_print_int);
         pp.query("chk_file", m_chk_file);
         pp.query("chk_int", m_chk_int);
         pp.query("restart", m_restart_chkfile);
@@ -506,12 +508,14 @@ void LBM::evolve()
          ++step) {
         compute_dt();
 
-        amrex::Print() << "\n==============================================="
-                          "==============================="
-                       << std::endl;
-        amrex::Print() << "Step: " << step << " dt : " << m_dts[0]
-                       << " time: " << cur_time << " to " << cur_time + m_dts[0]
-                       << std::endl;
+        if (m_print_int > 0 && step % m_print_int == 0) {
+            amrex::Print() << "\n==============================================="
+                              "==============================="
+                           << std::endl;
+            amrex::Print() << "Step: " << step << " dt : " << m_dts[0]
+                           << " time: " << cur_time << " to " << cur_time + m_dts[0]
+                           << std::endl;
+        }
 
         m_fillpatch_op->fillpatch(0, cur_time, m_f[0]);
         for (int i = 0; i < m_n_components; ++i) {
@@ -2728,9 +2732,11 @@ void LBM::reconstruct_body_sdf(const int lev, amrex::Real time)
     
     if (omega_mag > 1e-12) {
         m_body_rotation_angle += omega_mag * dt;
-        amrex::Print() << "Updating rotation: dt=" << dt 
-                       << " omega=" << omega_mag 
-                       << " angle=" << m_body_rotation_angle << std::endl;
+        if (m_print_int > 0 && m_isteps[0] % m_print_int == 0) {
+            amrex::Print() << "Updating rotation: dt=" << dt 
+                           << " omega=" << omega_mag 
+                           << " angle=" << m_body_rotation_angle << std::endl;
+        }
     }
     
     // Current body center (for translation)
