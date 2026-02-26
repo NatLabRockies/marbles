@@ -29,11 +29,13 @@ struct Constant
         int model_type = 1;
 
         // Shape parameters
-        int region_type{0}; // 0 = all, 1 = sphere, 2 = cylinder
+        int region_type{0}; // 0 = all, 1 = sphere, 2 = cylinder, 3 = box
         amrex::RealVect region_center = {AMREX_D_DECL(0.0, 0.0, 0.0)};
         amrex::Real region_radius{1.0};
         amrex::Real cylinder_height{1.0};
         int cylinder_dir{2}; // 0 = x, 1 = y, 2 = z
+        amrex::RealVect region_lo = {AMREX_D_DECL(0.0, 0.0, 0.0)};
+        amrex::RealVect region_hi = {AMREX_D_DECL(0.0, 0.0, 0.0)};
         amrex::Real outside_density{0.0};
 
         AMREX_GPU_DEVICE
@@ -79,6 +81,12 @@ struct Constant
                 }
                 if (r2 > region_radius * region_radius ||
                     h > 0.5 * cylinder_height) {
+                    is_inside = false;
+                }
+            } else if (region_type == 3) { // box
+                if (AMREX_D_TERM(x < region_lo[0] || x > region_hi[0],
+                                 || y < region_lo[1] || y > region_hi[1],
+                                 || z < region_lo[2] || z > region_hi[2])) {
                     is_inside = false;
                 }
             }
@@ -136,6 +144,12 @@ struct Constant
                 }
                 if (r2 > region_radius * region_radius ||
                     h > 0.5 * cylinder_height) {
+                    is_inside = false;
+                }
+            } else if (region_type == 3) { // box
+                if (AMREX_D_TERM(x < region_lo[0] || x > region_hi[0],
+                                 || y < region_lo[1] || y > region_hi[1],
+                                 || z < region_lo[2] || z > region_hi[2])) {
                     is_inside = false;
                 }
             }

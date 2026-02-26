@@ -43,6 +43,8 @@ Constant::Constant(const std::string& prefix)
         m_op.region_type = 1;
     } else if (region_type_str == "cylinder") {
         m_op.region_type = 2;
+    } else if (region_type_str == "box") {
+        m_op.region_type = 3;
     } else {
         amrex::Abort(
             "Constant::Constant(): Unknown region_type: " + region_type_str);
@@ -55,6 +57,15 @@ Constant::Constant(const std::string& prefix)
     }
 
     pp.query("region_radius", m_op.region_radius);
+
+    amrex::Vector<amrex::Real> region_lo_v{AMREX_D_DECL(0.0, 0.0, 0.0)};
+    amrex::Vector<amrex::Real> region_hi_v{AMREX_D_DECL(0.0, 0.0, 0.0)};
+    pp.queryarr("region_lo", region_lo_v, 0, AMREX_SPACEDIM);
+    pp.queryarr("region_hi", region_hi_v, 0, AMREX_SPACEDIM);
+    for (int n = 0; n < AMREX_SPACEDIM; n++) {
+        m_op.region_lo[n] = region_lo_v[n];
+        m_op.region_hi[n] = region_hi_v[n];
+    }
 
     pp.query("cylinder_height", m_op.cylinder_height);
     std::string cylinder_dir_str = "z";

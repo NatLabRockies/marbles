@@ -17,18 +17,20 @@
 #
 # Conservation laws that should be satisfied everywhere at all times
 # after catalyst injection:
-#   rho_I + rho_C  = const   (catalyst balance)
-#   rho_S + rho_C + rho_P = const   (substrate + product balance)
+#   rho_I + rho_C  = const   (catalyst balance — d(C+I)/dt = 0)
+#   rho_S + rho_I + rho_P = const   (substrate balance — d(S+I+P)/dt = 0)
 #
 # ---------------------------------------------------------------
 # Unit conversion reference (for rate constant scaling)
 # ---------------------------------------------------------------
 #   Physical tank diameter  : D = 0.30 m       => 128 lattice cells
 #   Lattice spacing         : dx_phys = D/128  = 2.344e-3 m
+#   Impeller diameter       : Di = 0.125 m      => Di/dx = 53.33 cells  (radius = 26.67 cells)
+#   Impeller off-bottom C   : 0.096 m           => C/dx  = 40.96 cells  => body.center z = -64+41 = -23
 #   Impeller rotation rate  : 180 RPM = 18.850 rad/s
-#   LB angular velocity     : omega_LB = 0.0005 rad/step
+#   LB angular velocity     : omega_LB = 0.00025 rad/step  (halved from 0.0005 for stability)
 #   Physical time step      : dt_phys = omega_LB / omega_phys
-#                           = 0.0005 / 18.850 = 2.653e-5 s/step
+#                           = 0.00025 / 18.850 = 1.326e-5 s/step
 #
 #   Concentration reference : C_ref = 500 LB_rho / (mol/L)
 #     => rho_S0 = 0.01 LB units  <->  5.0 mol/L injection  concentration
@@ -37,19 +39,19 @@
 #   Physical rate constants (Michaelis-Menten-like kinetics):
 #     k_f_phys = 500  M^-1 s^-1    k_r_phys = 10  s^-1    k_p_phys = 100 s^-1
 #
-#   LB rate constants:
-#     k_f_LB = k_f_phys * dt_phys / C_ref  = 500 * 2.653e-5 / 500 = 2.653e-5
-#     k_r_LB = k_r_phys * dt_phys          = 10  * 2.653e-5        = 2.653e-4
-#     k_p_LB = k_p_phys * dt_phys          = 100 * 2.653e-5        = 2.653e-3
+#   LB rate constants (all scale with dt_phys):
+#     k_f is BIMOLECULAR: d(rho_S)/dn = -k_f_LB * rho_S * rho_C
+#       => k_f_LB = k_f_phys * C_ref * dt_phys = 500 * 500 * 1.326e-5 = 3.316
+#     k_r_LB = k_r_phys * dt_phys          = 10  * 1.326e-5        = 1.326e-4
+#     k_p_LB = k_p_phys * dt_phys          = 100 * 1.326e-5        = 1.326e-3
 #
-#   Catalyst injection time : t_cat = 0.50 s
-#     => cat_inject_step = 0.5 / 2.653e-5 = 18850 steps (rounded to 18900)
+#   Catalyst injection time : t_cat = 5.0 s  
+#     => cat_inject_step = 5.0 / 1.326e-5 = 377,000 steps
 #
-#   Total simulation time (test) : ~1 s  => 40000 steps
-#   Total simulation time (full) : ~8 s  => 300000 steps
+#   Total simulation time (full) : ~8 s  => 600000 steps
 # ============================================================
 
-max_step = 40000   # ~1.06 s physical (test run; increase to 300000 for full ~8 s)
+max_step = 600000  # ~8 s physical 
 
 # geometry parameters
 geometry.prob_lo = 0.0 0.0 -64.0
@@ -101,20 +103,22 @@ lbm.body_is_isothermal = 0
 # Reaction parameters (LB units — see unit conversion above)
 # ---------------------------------------------------------------
 lbm.enable_reactions   = 1
-lbm.rxn_k_forward      = 2.653e-5   # bimolecular rate k_f  [LB_rho^-1 step^-1]
-lbm.rxn_k_reverse      = 2.653e-4   # reverse rate     k_r  [step^-1]
-lbm.rxn_k_product      = 2.653e-3   # product rate     k_p  [step^-1]
+lbm.rxn_k_forward      = 3.316      # bimolecular rate k_f  [LB_rho^-1 step^-1]
+lbm.rxn_k_reverse      = 1.326e-4   # reverse rate     k_r  [step^-1]
+lbm.rxn_k_product      = 1.326e-3   # product rate     k_p  [step^-1]
 
 # ---------------------------------------------------------------
 # Timed catalyst injection (component 1 released at t_cat)
 # Box coordinates in LB units; catalyst fills all cells whose
 # centres fall inside [cat_inject_box_lo, cat_inject_box_hi].
-# Centre of injection: lower mid-tank region (y ~ 25, x=z=centre).
+# Centre of injection: lower tank region (z ~ -39), centred in x and y.
 # ---------------------------------------------------------------
-lbm.cat_inject_step     = 18900     # step at which C is released (~0.5 s physical)
+lbm.cat_inject_step     = 377000    # step at which C is released (~5.0 s physical)
 lbm.cat_inject_density  = 2.0e-4    # LB rho for catalyst injection (~0.1 mol/L)
-lbm.cat_inject_box_lo   = 52.0 13.0 -6.0
-lbm.cat_inject_box_hi   = 76.0 37.0  6.0
+# Box: 0.029 m x 0.029 m x 0.029 m centered at (0, 0.0595, 0) m  [Reference y=height]
+#   -> LB center (x=64, y=64, z=-64+25.4=-38.6), half-side = 0.0145/(0.3/128) = 6.19 cells
+lbm.cat_inject_box_lo   = 57.8 57.8 -44.8
+lbm.cat_inject_box_hi   = 70.2 70.2 -32.4
 
 #lbm.velocity_bc_type = "parabolic"
 #velocity_bc_parabolic.Mach_ref = 0.1
@@ -130,12 +134,14 @@ ic_constant.density = 1.0
 ic_constant.initial_temperature = 0.03333
 ic_constant.adiabatic_exponent = 1.4
 
-# Component 0: substrate S — spherical injection at top of tank (y~108)
+# Component 0: substrate S — box injection at t=0
+# Reference : 0.029 m x 0.029 m x 0.029 m box centred at (0, 0.1595, 0) m  [Reference y=height]
+#   -> LB center (x=64, y=64, z=-64+68.1=+4.1), half-side = 0.0145/(0.3/128) = 6.19 cells
 # rho_S0 = 0.01 LB units  <->  5.0 mol/L physical concentration
 ic_constant_component_0.mach_components = 0.0 0.0 0.0
-ic_constant_component_0.region_type = "sphere"
-ic_constant_component_0.region_center = 64.0 108.0 0.0
-ic_constant_component_0.region_radius = 12.0
+ic_constant_component_0.region_type = "box"
+ic_constant_component_0.region_lo = 57.8 57.8 -2.1
+ic_constant_component_0.region_hi = 70.2 70.2 10.2
 ic_constant_component_0.density = 0.01
 ic_constant_component_0.outside_density = 0.0
 ic_constant_component_0.initial_temperature = 0.03333
@@ -159,13 +165,21 @@ ic_constant_component_3.initial_temperature = 0.03333
 # MOVING BODY PARAMETERS
 body.is_moving = true
 body.velocity = 0.0 0.0 0.0
-body.angular_velocity = 0.0 0.0 0.0005
-body.center = 64.0 64.0 0.0
+body.angular_velocity = 0.0 0.0 0.00025
+# Z is the vertical axis; z=-64 is tank bottom.
+# Impeller is 0.096 m off-bottom: 0.096/(0.3/128)=40.96 cells => z = -64+41 = -23
+# Impeller centred horizontally: x=64, y=64
+body.center = 64.0 64.0 -23.0
 
-# Moving body geometry (STL)
+# Moving body geometry (STL) — generated by Build/generate_impeller_stl.py
+#   blade_outer_radius = 26.7 cells  (~0.0625 m = Di/2 = 0.125/2 m)
+#   hub_radius         = 17.8 cells  (~0.0417 m)
+#   blade_thickness    = 3.6  cells  (~0.00844 m)
+#   height             = 17.8 cells  (~0.0417 m)
+#   STL generated at origin; eb2.stl_center translates to body.center in domain
 eb2.geom_type = "all_regular"
 eb2.stl_file = "impeller.stl"
-eb2.stl_center = 64.0 64.0 0.0
+eb2.stl_center = 64.0 64.0 -23.0
 eb2.stl_scale = 1.0
 eb2.stl_reverse_normal = 0
 
