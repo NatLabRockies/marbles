@@ -3809,11 +3809,20 @@ void LBM::apply_reaction_source_terms(const int lev)
     const amrex::Real k_f  = m_rxn_k_forward;
     const amrex::Real k_r  = m_rxn_k_reverse;
     const amrex::Real k_p  = m_rxn_k_product;
-    const amrex::Real inv_Q = 1.0 / constants::N_MICRO_STATES;
+
+    // Thermodynamic constants needed for the equilibrium distribution
+    const amrex::Real specific_gas_constant = m_R_u / m_m_bar;
+    const amrex::Real l_mesh_speed          = m_mesh_speed;
+
+    // Stencil: lattice velocities and weights
+    const stencil::Stencil stencil;
+    const auto& evs    = stencil.evs;
+    const auto& weight = stencil.weights;
 
     auto const& is_fluid_arrs = m_is_fluid[lev].const_arrays();
+    auto const& md_arrs       = m_macrodata[lev].const_arrays();
 
-    // Gather non-const arrays for the four reactive components
+    // Non-const arrays for the four reactive components
     auto const& fS_arrs = m_component_lattices[0][lev].arrays();
     auto const& fC_arrs = m_component_lattices[1][lev].arrays();
     auto const& fI_arrs = m_component_lattices[2][lev].arrays();
@@ -3822,7 +3831,7 @@ void LBM::apply_reaction_source_terms(const int lev)
     amrex::ParallelFor(
         m_component_lattices[0][lev],
         amrex::IntVect(0),   // no ghost cells — source terms only on interior
-        [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept
+        [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k)) noexcept
         {
             const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
             if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_IDX) != 1) {
@@ -3854,17 +3863,33 @@ void LBM::apply_reaction_source_terms(const int lev)
             const amrex::Real d_I = R_fwd - (R_rev + R_prd);
             const amrex::Real d_P = R_prd;
 
-            // Distribute uniformly across populations
-            const amrex::Real dS_q = d_S * inv_Q;
-            const amrex::Real dC_q = d_C * inv_Q;
-            const amrex::Real dI_q = d_I * inv_Q;
-            const amrex::Real dP_q = d_P * inv_Q;
+            // Local fluid velocity and temperature from macrodata
+            const amrex::RealVect vel = {AMREX_D_DECL(
+                md_arrs[nbx](iv, constants::VELX_IDX),
+                md_arrs[nbx](iv, constants::VELY_IDX),
+                md_arrs[nbx](iv, constants::VELZ_IDX))};
+            const amrex::Real temperature = md_arrs[nbx](iv, constants::TEMPERATURE_IDX);
 
+            // Equilibrium stress components (purely kinetic — no viscous correction)
+            const amrex::Real Rg_T  = specific_gas_constant * temperature;
+            const amrex::Real pxx_eq = vel[0] * vel[0] + Rg_T;
+            const amrex::Real pyy_eq = vel[1] * vel[1] + Rg_T;
+            const amrex::Real pzz_eq = AMREX_D_PICK(0.0, 0.0, vel[2] * vel[2] + Rg_T);
+
+            // Distribute density increments using the local equilibrium shape.
+            // set_extended_equilibrium_value is linear in rho, so the unit
+            // equilibrium f_eq(rho=1, vel, T) gives the correct per-q weight.
+            // Adding d_X * f_eq_unit to each population preserves the net
+            // momentum added by the reaction (zero here since d_X is scalar).
             for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
-                fS_arrs[nbx](iv, q) += dS_q;
-                fC_arrs[nbx](iv, q) += dC_q;
-                fI_arrs[nbx](iv, q) += dI_q;
-                fP_arrs[nbx](iv, q) += dP_q;
+                const amrex::Real wt = weight[q];
+                const auto& ev       = evs[q];
+                const amrex::Real f_eq_unit = set_extended_equilibrium_value(
+                    1.0, vel, pxx_eq, pyy_eq, pzz_eq, l_mesh_speed, wt, ev);
+                fS_arrs[nbx](iv, q) += d_S * f_eq_unit;
+                fC_arrs[nbx](iv, q) += d_C * f_eq_unit;
+                fI_arrs[nbx](iv, q) += d_I * f_eq_unit;
+                fP_arrs[nbx](iv, q) += d_P * f_eq_unit;
             }
         });
     amrex::Gpu::synchronize();
