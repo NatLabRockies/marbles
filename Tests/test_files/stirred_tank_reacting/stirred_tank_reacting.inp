@@ -32,9 +32,10 @@
 #   Physical time step      : dt_phys = omega_LB / omega_phys
 #                           = 0.00025 / 18.850 = 1.326e-5 s/step
 #
-#   Concentration reference : C_ref = 500 LB_rho / (mol/L)
-#     => rho_S0 = 0.01 LB units  <->  5.0 mol/L injection  concentration
-#     => rho_C0 = 2e-4 LB units  <->  0.1 mol/L injection concentration
+#   Concentration reference : C_ref = 500 (mol/L) / LB_rho
+#     i.e. 1 LB_rho unit represents 500 mol/L physical concentration
+#     => rho_S0 = 0.01 LB units  <->  0.01 × 500 = 5.0 mol/L substrate
+#     => rho_C0 = 2e-4 LB units  <->  2e-4 × 500 = 0.1 mol/L catalyst
 #
 #   Physical rate constants (Michaelis-Menten-like kinetics):
 #     k_f_phys = 500  M^-1 s^-1    k_r_phys = 10  s^-1    k_p_phys = 100 s^-1
