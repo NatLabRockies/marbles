@@ -2103,6 +2103,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
         auto const& newly_solid_arrs = newly_solid.const_arrays();
         auto const& frac_arrs = m_is_fluid_fraction[lev].const_arrays();
         auto const& old_boundary_arrs = old_fluid_side_boundary.const_arrays();
+        auto const& curr_fluid_arrs = m_is_fluid[lev].const_arrays();
         auto const& f_arrs = m_f[lev].arrays();
         auto const& g_arrs = m_g[lev].arrays();
         auto const& spill_f_arrs = spill_f.arrays();
@@ -2143,7 +2144,23 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                     }
                 }
                 
-                // If no boundary neighbors, just zero out (mass is lost to EB)
+                // Fallback: if no old-boundary neighbor, widen to any currently-fluid neighbor
+                bool use_fallback = (weight_sum == 0.0);
+                if (use_fallback) {
+                    for (int nq = 1; nq < constants::N_MICRO_STATES; ++nq) {
+                        int ni = i + evs[nq][0];
+                        int nj = j + evs[nq][1];
+                        int nk = k + evs[nq][2];
+                        if (ni < lo.x || ni > hi.x ||
+                            nj < lo.y || nj > hi.y ||
+                            nk < lo.z || nk > hi.z) continue;
+                        if (curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1) {
+                            weight_sum += weights[nq];
+                        }
+                    }
+                }
+
+                // If still no fluid neighbor (cell fully buried in solid), mass is truly lost
                 if (weight_sum == 0.0) {
                     for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
                         f_arrs[nbx](i, j, k, q) = 0.0;
@@ -2163,19 +2180,16 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                         nj < lo.y || nj > hi.y || 
                         nk < lo.z || nk > hi.z) continue;
                     
-                    // Distribute if neighbor was on OLD outer boundary layer
-                    if (old_boundary_arrs[nbx](ni, nj, nk, 0) == 1) {
-                        // Normalized weight for this direction
+                    // Primary: old boundary neighbor; fallback: any fluid neighbor
+                    bool valid = use_fallback
+                        ? (curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1)
+                        : (old_boundary_arrs[nbx](ni, nj, nk, 0) == 1);
+
+                    if (valid) {
                         amrex::Real w = weights[nq] / weight_sum;
-                        
-                        // Distribute all populations with this weight
                         for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
-                            amrex::Real f_contrib = f_arrs[nbx](i, j, k, q) * w;
-                            amrex::Real g_contrib = g_arrs[nbx](i, j, k, q) * w;
-                            
-                            // Add to spill buffer instead of direct modification
-                            amrex::Gpu::Atomic::AddNoRet(&spill_f_arrs[nbx](ni, nj, nk, q), f_contrib);
-                            amrex::Gpu::Atomic::AddNoRet(&spill_g_arrs[nbx](ni, nj, nk, q), g_contrib);
+                            amrex::Gpu::Atomic::AddNoRet(&spill_f_arrs[nbx](ni, nj, nk, q), f_arrs[nbx](i, j, k, q) * w);
+                            amrex::Gpu::Atomic::AddNoRet(&spill_g_arrs[nbx](ni, nj, nk, q), g_arrs[nbx](i, j, k, q) * w);
                         }
                     }
                 }
@@ -2254,7 +2268,25 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                     }
                 }
 
-                // If no boundary neighbors, just zero out (mass is lost to EB)
+                // Fallback: if no old-boundary+still-fluid neighbor found,
+                // widen search to ANY currently-fluid neighbor (captures
+                // blade leading-edge / corner cells that lose all their
+                // old boundary neighbors in the same step).
+                bool use_fallback = (weight_sum == 0.0);
+                if (use_fallback) {
+                    for (int nq = 1; nq < constants::N_MICRO_STATES; ++nq) {
+                        int ni = i + evs[nq][0];
+                        int nj = j + evs[nq][1];
+                        int nk = k + evs[nq][2];
+                        if (ni < lo.x || ni > hi.x || nj < lo.y || nj > hi.y ||
+                            nk < lo.z || nk > hi.z) continue;
+                        if (curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1) {
+                            weight_sum += weights[nq];
+                        }
+                    }
+                }
+
+                // If still no fluid neighbor (cell fully buried in solid), mass is lost
                 if (weight_sum == 0.0) {
                     for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
                         f_comp_arrs[nbx](i, j, k, q) = 0.0;
@@ -2273,23 +2305,18 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                         nk < lo.z || nk > hi.z)
                         continue;
 
-                    // Distribute if neighbor was on OLD outer boundary layer
-                    // AND is still fluid in the current state
-                    if (old_boundary_arrs[nbx](ni, nj, nk, 0) == 1 &&
-                        curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1) {
-                        // Normalized weight for this direction
+                    // Primary: old boundary + still fluid; fallback: any fluid
+                    bool valid = use_fallback
+                        ? (curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1)
+                        : (old_boundary_arrs[nbx](ni, nj, nk, 0) == 1 &&
+                           curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1);
+
+                    if (valid) {
                         amrex::Real w = weights[nq] / weight_sum;
-
-                        // Distribute all populations with this weight
                         for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
-                            amrex::Real f_contrib =
-                                f_comp_arrs[nbx](i, j, k, q) * w;
-
-                            // Add to spill buffer instead of direct
-                            // modification
                             amrex::Gpu::Atomic::AddNoRet(
                                 &spill_comp_arrs[nbx](ni, nj, nk, q),
-                                f_contrib);
+                                f_comp_arrs[nbx](i, j, k, q) * w);
                         }
                     }
                 }
