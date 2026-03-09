@@ -314,6 +314,7 @@ void LBM::read_parameters()
         pp.query("compute_forces", m_compute_forces);
         pp.query("forces_file", m_forces_file);
         pp.query("clamp_component_densities", m_clamp_component_densities);
+        pp.query("use_entropic_components", m_use_entropic_components);
 
         pp.query("initial_temperature", m_initialTemperature);
 
@@ -1014,6 +1015,72 @@ void LBM::relax_f_to_equilibrium(const int lev)
             }
         });
 
+    const bool use_entropic_components = m_use_entropic_components;
+
+    // --------------------------------------------------------------------------
+    // Pre-compute two unit-density equilibrium shapes once, shared across all
+    // components.  set_extended_equilibrium_value is linear in rho.
+    //
+    // Layout (2 * N_MICRO_STATES components):
+    //   [0 .. N)   : eq_flow(q)  = f^eq(1, u_local, T_local)
+    //                Used as the BGK target: f^eq_comp = rho_comp * eq_flow(q)
+    //   [N .. 2N)  : eq_ref(q)   = f^eq(1, 0, T_local)
+    //                Used as the H-function reference in the entropic solve.
+    //                Generalises the lattice weights w_q (which equal eq_ref
+    //                only at the isothermal point cs^2 = 1/3).
+    // --------------------------------------------------------------------------
+    const int NQ = constants::N_MICRO_STATES;
+    amrex::MultiFab eq_unit(
+        m_macrodata[lev].boxArray(),
+        m_macrodata[lev].DistributionMap(),
+        2 * NQ,
+        m_eq[lev].nGrowVect());
+    {
+        auto const& eq_unit_arrs = eq_unit.arrays();
+        amrex::ParallelFor(
+            eq_unit, eq_unit.nGrowVect(),
+            [=] AMREX_GPU_DEVICE(
+                int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k)) noexcept {
+                const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
+                if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_IDX) == 1) {
+                    const auto md_arr = md_arrs[nbx];
+                    const auto eq_unit_arr = eq_unit_arrs[nbx];
+
+                    const amrex::Real temperature =
+                        md_arr(iv, constants::TEMPERATURE_IDX);
+                    const amrex::Real p_by_rho =
+                        specific_gas_constant * temperature;
+
+                    // Flow equilibrium: rho=1, local velocity
+                    const amrex::RealVect vel = {AMREX_D_DECL(
+                        md_arr(iv, constants::VELX_IDX),
+                        md_arr(iv, constants::VELY_IDX),
+                        md_arr(iv, constants::VELZ_IDX))};
+                    const amrex::Real pxx_eq =
+                        vel[0] * vel[0] + p_by_rho;
+                    const amrex::Real pyy_eq =
+                        vel[1] * vel[1] + p_by_rho;
+                    const amrex::Real pzz_eq = AMREX_D_PICK(
+                        0.0, 0.0, vel[2] * vel[2] + p_by_rho);
+
+                    // Reference equilibrium: rho=1, zero velocity, local T
+                    // p_ii^ref = 0^2 + p_by_rho = p_by_rho  (all diagonal components)
+                    const amrex::RealVect zero_vel = {AMREX_D_DECL(0.0, 0.0, 0.0)};
+
+                    for (int q = 0; q < NQ; ++q) {
+                        eq_unit_arr(iv, q) = set_extended_equilibrium_value(
+                            1.0, vel, pxx_eq, pyy_eq, pzz_eq,
+                            l_mesh_speed, weight[q], evs[q]);
+                        eq_unit_arr(iv, q + NQ) = set_extended_equilibrium_value(
+                            1.0, zero_vel, p_by_rho, p_by_rho, p_by_rho,
+                            l_mesh_speed, weight[q], evs[q]);
+                    }
+                }
+            });
+        amrex::Gpu::synchronize();
+    }
+    auto const& eq_unit_arrs = eq_unit.const_arrays();
+
     for (int c = 0; c < m_n_components; ++c) {
         auto const& f_comp_arrs = m_component_lattices[c][lev].arrays();
         amrex::Real diff = m_component_diffusivities[c];
@@ -1025,46 +1092,99 @@ void LBM::relax_f_to_equilibrium(const int lev)
                 const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
                 if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_IDX) == 1) {
                     const auto f_comp_arr = f_comp_arrs[nbx];
-                    const auto eq_arr = eq_arrs[nbx];
                     const auto md_arr = md_arrs[nbx];
+                    const auto eq_unit_arr = eq_unit_arrs[nbx];
 
                     amrex::Real rho_comp = 0.0;
                     for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
                         rho_comp += f_comp_arr(iv, q);
                     }
 
-                    amrex::Real rho_total = md_arr(iv, constants::RHO_IDX);
-                    amrex::Real Y_k =
-                        (rho_total > 1e-12) ? (rho_comp / rho_total) : 0.0;
-
-                    amrex::Real temperature =
+                    const amrex::Real temperature =
                         md_arr(iv, constants::TEMPERATURE_IDX);
-                    amrex::Real omega_comp =
+                    const amrex::Real omega_comp =
                         1.0 /
                         (diff / (specific_gas_constant * temperature * dt) +
                          0.5);
 
-                    const amrex::RealVect vel = {AMREX_D_DECL(
-                        md_arr(iv, constants::VELX_IDX),
-                        md_arr(iv, constants::VELY_IDX),
-                        md_arr(iv, constants::VELZ_IDX))};
-
-                    const amrex::Real pxx_eq =
-                        vel[0] * vel[0] + specific_gas_constant * temperature;
-                    const amrex::Real pyy_eq =
-                        vel[1] * vel[1] + specific_gas_constant * temperature;
-                    const amrex::Real pzz_eq = AMREX_D_PICK(
-                        0.0, 0.0,
-                        vel[2] * vel[2] + specific_gas_constant * temperature);
-
+                    // Scale cached unit-density shape by rho_comp
+                    amrex::GpuArray<amrex::Real, constants::N_MICRO_STATES> eq_all;
                     for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
-                        const amrex::Real wt = weight[q];
-                        const auto& ev = evs[q];
-                        amrex::Real eq_val = set_extended_equilibrium_value(
-                            rho_comp, vel, pxx_eq, pyy_eq, pzz_eq, l_mesh_speed, wt, ev);
-                        amrex::Real eq_comp = eq_val;//Y_k * eq_val;
+                        eq_all[q] = rho_comp * eq_unit_arr(iv, q);
+                    }
+
+                    // --- Entropic alpha solve (Ansumali & Karlin, Phys. Rev. E 2002) ---
+                    // Find alpha* in (0, 2] s.t. H(f + alpha*(f_eq - f)) = H(f),
+                    // where H(f) = sum_q f_q * ln(f_q / eq_ref_q)  and
+                    //   eq_ref_q = f^eq(1, 0, T_local)  (zero-velocity reference).
+                    // This generalises the standard H = sum f ln(f/w_q), which holds
+                    // only at the isothermal point cs^2 = 1/3.
+                    //
+                    // alpha_use hierarchy (when entropic is enabled):
+                    //   Newton succeeds  :  min(omega_comp, alpha*)   [tightest bound]
+                    //   Newton skipped   :  min(omega_comp, 1.0)      [safe fallback —
+                    //     (negative pops,   monotone approach to eq., never overshoots]
+                    //     near-zero rho)
+                    //   Entropic disabled:  omega_comp                [pure BGK]
+                    //
+                    // The safe fallback is critical at low diffusivity where
+                    // omega_comp ≈ 2.0: sharp IC edges and refill ghost cells can
+                    // develop negative populations that escape the Newton solve and
+                    // would otherwise receive the worst-case BGK relaxation rate.
+                    // Controlled by lbm.use_entropic_components (default = 0).
+                    amrex::Real alpha_use = omega_comp; // entropic disabled: pure BGK
+                    if (use_entropic_components) {
+                        // Safe fallback for any cell where Newton cannot run.
+                        // min(omega_comp, 1.0) guarantees monotone approach
+                        // toward equilibrium regardless of population state.
+                        alpha_use = amrex::min(omega_comp, 1.0);
+
+                        // Attempt the full entropic solve only when all pre-collision
+                        // populations are strictly positive (H0 is well-defined).
+                        amrex::Real H0 = 0.0;
+                        bool all_positive = true;
+                        for (int q = 0; q < NQ; ++q) {
+                            amrex::Real fq = f_comp_arr(iv, q);
+                            if (fq <= 0.0) { all_positive = false; break; }
+                            H0 += fq * log(fq / eq_unit_arr(iv, q + NQ));
+                        }
+
+                        if (all_positive) {
+                            // Newton iteration: g(alpha) = H(f + alpha*s) - H0 = 0
+                            // g'(alpha) = sum_q s_q * (ln(fhat_q / eq_ref_q) + 1)
+                            amrex::Real alpha = 2.0; // start at BGK mirror point
+                            for (int iter = 0; iter < 10; ++iter) {
+                                amrex::Real g = -H0, dg = 0.0;
+                                bool fhat_positive = true;
+                                for (int q = 0; q < NQ; ++q) {
+                                    amrex::Real sq =
+                                        eq_all[q] - f_comp_arr(iv, q);
+                                    amrex::Real fhat =
+                                        f_comp_arr(iv, q) + alpha * sq;
+                                    if (fhat <= 0.0) {
+                                        fhat_positive = false;
+                                        break;
+                                    }
+                                    amrex::Real ln_fhat_w =
+                                        log(fhat / eq_unit_arr(iv, q + NQ));
+                                    g  += fhat * ln_fhat_w;
+                                    dg += sq * (ln_fhat_w + 1.0);
+                                }
+                                if (!fhat_positive || fabs(dg) < 1.0e-14) break;
+                                alpha -= g / dg;
+                                // clamp to [0, 2] for safety
+                                alpha = amrex::min(2.0, amrex::max(0.0, alpha));
+                                if (fabs(g) < 1.0e-12 * (fabs(H0) + 1.0e-30)) break;
+                            }
+                            // Tightest bound: Newton result further caps omega_comp
+                            alpha_use = amrex::min(omega_comp, alpha);
+                        }
+                    }
+
+                    // --- Apply collision with entropic alpha ---
+                    for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
                         f_comp_arr(iv, q) +=
-                            omega_comp * (eq_comp - f_comp_arr(iv, q));
+                            alpha_use * (eq_all[q] - f_comp_arr(iv, q));
                     }
                 }
             });

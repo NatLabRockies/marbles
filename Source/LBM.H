@@ -364,6 +364,9 @@ private:
     // clamp negative component densities before collision
     bool m_clamp_component_densities = false;
 
+    // use entropic alpha stabilisation for component lattices
+    bool m_use_entropic_components = false;
+
     // file for forces
     std::string m_forces_file{"forces.txt"};
 
