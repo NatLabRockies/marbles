@@ -1,0 +1,64 @@
+max_step = 100000
+
+# geometry parameters
+geometry.prob_lo = 0.0 0.0 -2.0
+geometry.prob_hi = 660.0 123.0 2.0
+geometry.is_periodic = 0 0 1
+
+# timestepping
+amr.n_cell  = 660 123 4
+amr.max_level = 0
+amr.max_grid_size = 32
+amr.blocking_factor_x = 2
+amr.blocking_factor_y = 1
+amr.blocking_factor_z = 1
+amr.plot_int = 100
+amr.chk_int = 1000
+amr.file_name_digits = 5
+
+lbm.bc_lo = 2 1 0
+lbm.bc_hi = 5 1 0
+lbm.dx_outer = 1.0
+lbm.dt_outer = 1.0
+
+#nu = u D / Re
+#nu = M a D / Re
+#nu = M sqrt(gamma R T) D / Re
+#nu = 0.1 sqrt(1.4 1 0.03333) 30 / 100 
+
+lbm.nu = 0.00648
+lbm.alpha = 0.00648
+lbm.initial_temperature = 0.03333
+lbm.adiabatic_exponent = 1.4
+lbm.save_streaming = 0
+lbm.compute_forces = 1
+
+lbm.body_is_isothermal = 1
+lbm.body_temperature = 0.060
+
+lbm.velocity_bc_type = "parabolic"
+velocity_bc_parabolic.Mach_ref = 0.1
+velocity_bc_parabolic.normal_dir = 1
+velocity_bc_parabolic.tangential_dir = 0
+velocity_bc_parabolic.initial_density = 1.0
+velocity_bc_parabolic.initial_temperature = 0.03333
+velocity_bc_parabolic.adiabatic_exponent = 1.4
+
+lbm.ic_type = "constant"
+ic_constant.mach_components = 0.1 0.0 0.0
+ic_constant.density = 1.0
+ic_constant.initial_temperature = 0.03333
+ic_constant.adiabatic_exponent = 1.4
+
+eb2.geom_type = "cylinder"
+eb2.cylinder_radius = 15.0
+eb2.cylinder_center = 60.0 60.0 0.0
+eb2.cylinder_has_fluid_inside = 0
+eb2.cylinder_height = 1000.0
+eb2.cylinder_direction = 2
+
+amrex.fpe_trap_invalid = 1
+amrex.fpe_trap_zero = 1
+amrex.fpe_trap_overflow = 1
+amrex.the_arena_is_managed = 0
+amrex.abort_on_out_of_gpu_memory = 1

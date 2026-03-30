@@ -60,6 +60,7 @@ LBM::LBM()
 
     m_idata_varnames.push_back("is_fluid");
     m_idata_varnames.push_back("eb_boundary");
+    m_idata_varnames.push_back("eb_fluid_boundary");
     for (const auto& vname : m_macrodata_varnames) {
         m_lbm_varnames.push_back(vname);
     }
@@ -285,6 +286,9 @@ void LBM::read_parameters()
         pp.query("forces_file", m_forces_file);
 
         pp.query("initial_temperature", m_initialTemperature);
+
+        pp.query("body_is_isothermal", m_bodyIsIsothermal);
+        pp.query("body_temperature", m_bodyTemperature);
 
         pp.query("adiabatic_exponent", m_adiabaticExponent);
         pp.query("mean_molecular_mass", m_m_bar);
@@ -776,6 +780,8 @@ void LBM::relax_f_to_equilibrium(const int lev)
     amrex::Real nu = m_nu;
     amrex::Real dt = m_dts[lev];
 
+    const bool body_is_isothermal = m_bodyIsIsothermal;
+
     amrex::ParallelFor(
         m_f[lev], m_eq[lev].nGrowVect(), constants::N_MICRO_STATES,
         [=] AMREX_GPU_DEVICE(
@@ -799,6 +805,12 @@ void LBM::relax_f_to_equilibrium(const int lev)
                 f_arr(iv, q) += omega * (eq_arr(iv, q) - f_arr(iv, q));
 
                 g_arr(iv, q) += omega * (eq_arr_g(iv, q) - g_arr(iv, q));
+
+                if (body_is_isothermal) {
+                    if (is_fluid_arrs[nbx](iv, 2) == 1) {
+                        g_arr(iv, q) = eq_arr_g(iv, q);
+                    }
+                }
             }
         });
     amrex::Gpu::synchronize();
@@ -817,6 +829,9 @@ void LBM::f_to_macrodata(const int lev)
     const amrex::Real l_mesh_speed = m_mesh_speed;
     amrex::Real specific_gas_constant = m_R_u / m_m_bar;
     amrex::Real cv = specific_gas_constant / (m_adiabaticExponent - 1.0);
+
+    const bool body_is_isothermal = m_bodyIsIsothermal;
+    const amrex::Real body_temperature = m_bodyTemperature;
 
     const stencil::Stencil stencil;
     const auto& evs = stencil.evs;
@@ -887,6 +902,12 @@ void LBM::f_to_macrodata(const int lev)
 
                 amrex::Real temperature =
                     get_temperature(two_rho_e, rho, u, v, w, cv);
+
+                if (body_is_isothermal) {
+                    if (is_fluid_arrs[nbx](iv, 2) == 1) {
+                        temperature = body_temperature;
+                    }
+                }
 
                 md_arr(iv, constants::TEMPERATURE_IDX) = temperature;
 
@@ -1255,6 +1276,29 @@ void LBM::initialize_is_fluid(const int lev)
                 if_arr(iv, 1) = 0;
             } else {
                 if_arr(iv, 1) = 1;
+            }
+        });
+
+    // Compute the boundary cells on the fluid side
+    const stencil::Stencil stencil;
+    const auto& evs = stencil.evs;
+    amrex::ParallelFor(
+        m_is_fluid[lev], m_is_fluid[lev].nGrowVect() - 1,
+        [=] AMREX_GPU_DEVICE(
+            int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k)) noexcept {
+            const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
+            const auto if_arr = is_fluid_arrs[nbx];
+
+            bool all_covered = true;
+            for (int idir = 0; idir < constants::N_MICRO_STATES; idir++) {
+                const auto& dimvec = evs[idir];
+                all_covered &= (if_arr(iv - dimvec, 0) == 1);
+            }
+
+            if ((all_covered) || (if_arr(iv, 0) == 0)) {
+                if_arr(iv, 2) = 0;
+            } else {
+                if_arr(iv, 2) = 1;
             }
         });
 

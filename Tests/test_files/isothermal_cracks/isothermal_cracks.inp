@@ -1,0 +1,78 @@
+max_step = 1000
+
+# geometry parameters - coarse domain
+geometry.prob_lo = 0.0 0.0 0.0
+geometry.prob_hi = 60.0 40.0 30.0
+geometry.is_periodic = 0 1 1
+
+# timestepping - coarse grid for thick cracks
+amr.n_cell  = 60 40 30
+amr.max_level = 0
+amr.max_grid_size = 64
+amr.blocking_factor_x = 2
+amr.blocking_factor_y = 2
+amr.blocking_factor_z = 2
+amr.plot_int = 10
+amr.chk_int = 1000
+amr.file_name_digits = 5
+
+lbm.bc_lo = 2 0 0
+lbm.bc_hi = 5 0 0
+lbm.dx_outer = 1.0
+lbm.dt_outer = 1.0
+
+#Parameters and unit conversion
+#For air flowing through 6 millimeter crack at 0.1 meters/second
+#Re = D u / nu = 6e-3 * 0.1 / 1.5e-5 = 40
+
+#Calculating nu in LB units
+# dx = 1 = 1 millimeter. D = 6. Verify in mainCrackGenerator.C that std::vector<myReal> diameterVector{7,   6,   5}
+#nu = D u / Re
+#nu = D M a / Re
+#nu = D M sqrt(gamma R T) / Re
+#Since we are using a compressible code for incompressible problem, Mach can be used as a free parameter
+#Setting M=0.1
+#Setting T = 1/30 . Now corresponds to physical temperature at viscosity 1.5e-5 m^2/s, i.e. T=288 K
+#Except in combustion, only ratios of temeperature matter. E.g., T = 2/30 now corresponds to 576 K
+#R has be set in the code as a ratio of R_air, i.e. R=1 corresponds to 287 J/(kg K)
+#Adiabatic exponent for air, gamma=1.4  
+#nu = 6 0.1 sqrt(1.4 1 0.03333) / 40 
+#alpha = nu / Prandtl. Prandtl number is approx 0.7 for air 
+
+lbm.nu = 3.238e-3
+lbm.alpha = 4.626e-3
+lbm.initial_temperature = 0.03333
+lbm.adiabatic_exponent = 1.4
+lbm.save_streaming = 0
+# lbm.compute_forces = 1
+
+lbm.body_is_isothermal = 1
+lbm.body_temperature = 0.066
+
+lbm.velocity_bc_type = "parabolic"
+velocity_bc_parabolic.Mach_ref = 0.1
+velocity_bc_parabolic.normal_dir = 1
+velocity_bc_parabolic.tangential_dir = 0
+velocity_bc_parabolic.initial_density = 1.0
+velocity_bc_parabolic.initial_temperature = 0.03333
+velocity_bc_parabolic.adiabatic_exponent = 1.4
+
+lbm.ic_type = "constant"
+ic_constant.mach_components = 0.0 0.0 0.0
+ic_constant.density = 1.0
+ic_constant.initial_temperature = 0.03333
+ic_constant.adiabatic_exponent = 1.4
+
+# Use all_regular geometry with voxel crack generation
+eb2.geom_type = "all_regular"
+eb2.use_voxel_cracks = 1
+
+# Voxel crack generation from binary file (also supports .csv)
+# Geometry generation codes and tools are in ../../../Tools/isothermal_cracks
+voxel_cracks.crack_file = "microstructure_nX60_nY40_nZ30.bin"
+
+amrex.fpe_trap_invalid = 1
+amrex.fpe_trap_zero = 1
+amrex.fpe_trap_overflow = 1
+amrex.the_arena_is_managed = 0
+amrex.abort_on_out_of_gpu_memory = 1

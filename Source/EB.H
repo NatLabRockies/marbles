@@ -29,6 +29,11 @@ namespace lbm {
 void initialize_eb(const amrex::Geometry& geom, const int max_level);
 void initialize_from_stl(
     const amrex::Geometry& geom, amrex::iMultiFab& is_fluid);
+std::vector<uint16_t>
+read_crack_file(const std::string& filename, int nx, int ny, int nz);
+
+void generate_voxel_cracks(
+    const amrex::Geometry& geom, amrex::iMultiFab& is_fluid);
 
 } // namespace lbm
 #endif

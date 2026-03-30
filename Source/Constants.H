@@ -46,7 +46,7 @@ static constexpr int D_Q_CORR_X_IDX = 4;
 static constexpr int D_Q_CORR_Y_IDX = 5;
 static constexpr int D_Q_CORR_Z_IDX = 6;
 
-static constexpr int N_IS_FLUID = 2;
+static constexpr int N_IS_FLUID = 3;
 
 static constexpr amrex::Real ROOT3 =
     static_cast<amrex::Real>(1.732050807568877293527446341);
