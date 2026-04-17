@@ -59,6 +59,9 @@ LBM::LBM()
     m_deriveddata_varnames.push_back("dQCorrY");
     m_deriveddata_varnames.push_back("dQCorrZ");
 
+    // Energy dissipation rate (added for kLa two-phase model)
+    m_deriveddata_varnames.push_back("epsilon");
+
     m_idata_varnames.push_back("is_fluid");
     m_idata_varnames.push_back("eb_boundary");
     m_idata_varnames.push_back("eb_fluid_boundary");
@@ -185,6 +188,11 @@ void LBM::init_data()
         average_down(amrex::IntVect(0));
 
         compute_dt();
+
+        // Initialize Lagrangian bubble container (after grids are finalized)
+        if (m_enable_bubbles) {
+            m_bubbles.initialize(Geom(0), grids[0], dmap[0], m_bubble_params);
+        }
 
         if (m_chk_int > 0) {
             write_checkpoint_file();
@@ -377,6 +385,20 @@ void LBM::read_parameters()
         }
     }
 
+    // Free-surface parameters (Chiu & Lin 2011 conservative phase-field)
+    {
+        amrex::ParmParse pp("lbm");
+        pp.query("free_surface",          m_free_surface);
+        pp.query("free_surface_z",        m_free_surface_z);
+        pp.query("free_surface_gamma",    m_phi_gamma_coeff);
+        if (m_free_surface) {
+            amrex::Print() << "\n=== Free Surface Configuration ===" << std::endl;
+            amrex::Print() << "  Chiu & Lin (2011) conservative phase-field" << std::endl;
+            amrex::Print() << "  Interface z (LB cells)   : " << m_free_surface_z << std::endl;
+            amrex::Print() << "  gamma coefficient        : " << m_phi_gamma_coeff << std::endl;
+        }
+    }
+
     // Get geometry type for SDF reconstruction
     {
         amrex::ParmParse pp("eb2");
@@ -399,6 +421,45 @@ void LBM::read_parameters()
         m_cs = m_mesh_speed / constants::ROOT3;
 
         m_cs_2 = m_cs * m_cs;
+    }
+
+    // ---------------------------------------------------------------
+    // Lagrangian bubble (kLa) parameters
+    // ---------------------------------------------------------------
+    {
+        amrex::ParmParse pp("lbm");
+        pp.query("enable_bubbles", m_enable_bubbles);
+    }
+
+    if (m_enable_bubbles) {
+        BubbleManager::read_params(m_bubble_params);
+
+        // Physical unit conversions — must be set explicitly in input file.
+        // lbm.dx_outer and lbm.dt_outer are dimensionless LB units (= 1.0);
+        // dx_phys and dt_phys must be the actual SI values.
+        m_bubble_params.dx_phys = m_dx_outer;  // overridden below if lbm.dx_phys provided
+        m_bubble_params.dt_phys = m_dt_outer;  // overridden below if lbm.dt_phys provided
+        m_bubble_params.nu_lb   = m_nu;
+        {
+            amrex::ParmParse pp_lbm("lbm");
+            // Read actual SI values (meters, seconds) — REQUIRED for physical accuracy.
+            // dx_phys = physical cell size [m];  dt_phys = physical time step [s].
+            pp_lbm.query("dx_phys", m_bubble_params.dx_phys);
+            pp_lbm.query("dt_phys", m_bubble_params.dt_phys);
+        }
+
+        // Concentration reference scale: 1 LB_rho ≡ m_bubble_o2_C_ref mol/m³
+        {
+            amrex::ParmParse pp("bubble");
+            pp.query("O2_concentration_reference", m_bubble_o2_C_ref);
+        }
+        // Propagate C_ref into BubbleParams so deposit_o2_sources can use it
+        m_bubble_params.C_ref = m_bubble_o2_C_ref;
+
+        amrex::Print() << "[BubbleManager] Bubble physics enabled.\n"
+                       << "  dx_phys = " << m_bubble_params.dx_phys << " m\n"
+                       << "  dt_phys = " << m_bubble_params.dt_phys << " s\n"
+                       << "  O2 C_ref = " << m_bubble_o2_C_ref << " mol/m3 per LB_rho\n";
     }
 }
 
@@ -662,6 +723,12 @@ void LBM::advance(
         refill_and_spill(lev);
     }
 
+    // Free-surface advance: Chiu & Lin (2011) conservative phase-field Eq. 18.
+    // advance_phi handles ghost fills and calls refill_and_spill internally.
+    if (m_free_surface) {
+        advance_phi(lev);
+    }
+
     stream(lev, m_f);
     for (int i = 0; i < m_n_components; ++i) {
         stream(lev, m_component_lattices[i]);
@@ -693,6 +760,67 @@ void LBM::advance(
     // fields according to the two-step catalytic reaction kinetics.
     if (m_enable_reactions && m_n_components >= 4) {
         apply_reaction_source_terms(lev);
+    }
+
+    // ------------------------------------------------------------------
+    // Lagrangian bubble physics — two-phase kLa mass transfer
+    // Execute only on the base level to keep a single particle container.
+    // ------------------------------------------------------------------
+    if (m_enable_bubbles && lev == 0) {
+        // Physical time in seconds (m_ts_new is in LB steps)
+        const amrex::Real phys_time = m_ts_new[lev] * m_dt_outer;
+
+        // Temporary MultiFabs for bubble↔fluid coupling (zeroed each step)
+        amrex::MultiFab bubble_force(
+            m_f[lev].boxArray(), m_f[lev].DistributionMap(), 3, 0);
+        amrex::MultiFab o2_src(
+            m_f[lev].boxArray(), m_f[lev].DistributionMap(), 1, 0);
+        bubble_force.setVal(0.0);
+        o2_src.setVal(0.0);
+
+        // Sparger injection (every step)
+        m_bubbles.inject_bubbles(m_dt_outer);
+
+        // Determine O2 concentration MultiFab (component 0 if available)
+        // A valid kLa run requires at least 1 component for dissolved O2.
+        if (m_n_components < 1) {
+            amrex::Abort("lbm.enable_bubbles = 1 requires lbm.n_components >= 1 "
+                         "(component 0 = dissolved O2).");
+        }
+        const amrex::MultiFab& o2_conc = m_component_lattices[0][lev];
+
+        // Advance bubbles: forces, Verlet integration, mass transfer
+        m_bubbles.advance(
+            dt_lev,
+            m_macrodata[lev],
+            m_derived[lev],
+            o2_conc,
+            Geom(lev),
+            bubble_force,
+            o2_src,
+            phys_time,
+            m_free_surface ? &m_is_fluid_fraction[lev] : nullptr);
+
+        // Coalescence check (every coal_interval steps)
+        ++m_bubble_step_counter;
+        if (m_bubble_params.enable_coalescence &&
+            m_bubble_step_counter % m_bubble_params.coal_interval == 0) {
+            m_bubbles.do_coalescence(phys_time);
+        }
+
+        // Apply bubble body force to fluid distributions (He-Luo scheme)
+        apply_bubble_body_force(lev, bubble_force);
+
+        // Apply O2 source to component-0 lattice
+        if (m_n_components > 0) {
+            apply_bubble_o2_source(lev, o2_src);
+        }
+
+        // Statistics output
+        if (m_bubble_params.stats_int > 0 &&
+            m_isteps[lev] % m_bubble_params.stats_int == 0) {
+            m_bubbles.write_stats(m_isteps[lev], phys_time);
+        }
     }
 }
 
@@ -1376,6 +1504,10 @@ void LBM::compute_derived(const int lev)
     AMREX_ASSERT(m_macrodata[lev].nGrow() > m_derived[lev].nGrow());
     const auto& idx = geom[lev].InvCellSizeArray();
 
+    // Smagorinsky constant and LB kinematic viscosity captured for epsilon
+    const amrex::Real Cs     = constants::SMAGORINSKY_CS;
+    const amrex::Real nu_lb  = m_nu;   // LB kinematic viscosity (dx²/step)
+
     auto const& md_arrs = m_macrodata[lev].const_arrays();
     auto const& is_fluid_arrs = m_is_fluid[lev].const_arrays();
     auto const& d_arrs = m_derived[lev].arrays();
@@ -1390,6 +1522,7 @@ void LBM::compute_derived(const int lev)
             const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
 
             if (if_arr(iv, lbm::constants::IS_FLUID_IDX) == 1) {
+                // Off-diagonal velocity gradients (for vorticity)
                 const amrex::Real vx = gradient(
                     0, constants::VELY_IDX, iv, idx, dbox, if_arr, md_arr);
                 const amrex::Real wx = gradient(
@@ -1413,6 +1546,33 @@ void LBM::compute_derived(const int lev)
                 d_arr(iv, constants::VORTM_IDX) = std::sqrt(
                     (wy - vz) * (wy - vz) + (uz - wx) * (uz - wx) +
                     (vx - uy) * (vx - uy));
+
+                // Diagonal velocity gradients for strain rate
+                const amrex::Real ux = gradient(
+                    0, constants::VELX_IDX, iv, idx, dbox, if_arr, md_arr);
+                const amrex::Real vy = gradient(
+                    1, constants::VELY_IDX, iv, idx, dbox, if_arr, md_arr);
+                const amrex::Real wz = AMREX_D_PICK(
+                    0, 0,
+                    gradient(
+                        2, constants::VELZ_IDX, iv, idx, dbox, if_arr, md_arr));
+
+                // Strain-rate tensor S_ij; S_mag² = 2 * S_ij * S_ij
+                const amrex::Real Sxy = 0.5 * (uy + vx);
+                const amrex::Real Sxz = 0.5 * (uz + wx);
+                const amrex::Real Syz = 0.5 * (vz + wy);
+                const amrex::Real S_mag2 = 2.0 * (ux*ux + vy*vy + wz*wz +
+                                                   2.0*(Sxy*Sxy + Sxz*Sxz + Syz*Syz));
+                const amrex::Real S_mag  = std::sqrt(S_mag2);
+
+                // Smagorinsky SGS viscosity (LB units, dx_LB = 1)
+                const amrex::Real nu_sgs = Cs * Cs * S_mag;
+                const amrex::Real nu_T   = nu_lb + nu_sgs;
+
+                // Energy dissipation rate ε = ν_T * S_mag² (LB units: dx²/step³)
+                d_arr(iv, constants::EPSILON_IDX) = nu_T * S_mag2;
+            } else {
+                d_arr(iv, constants::EPSILON_IDX) = 0.0;
             }
         });
     amrex::Gpu::synchronize();
@@ -1689,6 +1849,57 @@ void LBM::MakeNewLevelFromScratch(
             });
         amrex::Gpu::synchronize();
     }
+
+    // Free surface: override m_is_fluid_fraction with Chiu & Lin tanh(Phi) profile.
+    // Phi = 1 (liquid, LBM active) below z_surf; Phi = 0 (gas, treated as solid) above.
+    // EB-solid cells retain Phi = 0.  eps = 1.5 * dz (Chiu & Lin §2.1).
+    if (m_free_surface) {
+        const auto& geom_fs  = Geom(lev);
+        const auto  dx_fs    = geom_fs.CellSizeArray();
+        const auto  plo_fs   = geom_fs.ProbLoArray();
+        m_free_surface_eps   = 1.5 * dx_fs[2];
+
+        const amrex::Real z_surf   = m_free_surface_z;
+        const amrex::Real eps_phi  = m_free_surface_eps;
+
+        auto const& if_arrs2   = m_is_fluid[lev].const_arrays();
+        auto const& frac_arrs2 = m_is_fluid_fraction[lev].arrays();
+        amrex::ParallelFor(
+            m_is_fluid_fraction[lev], m_is_fluid_fraction[lev].nGrowVect(),
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                // EB-solid cells stay at Phi = 0.
+                if (if_arrs2[nbx](i, j, k, lbm::constants::IS_FLUID_IDX) == 0) {
+                    frac_arrs2[nbx](i, j, k, 0) = 0.0;
+                    return;
+                }
+                const amrex::Real z   = plo_fs[2] + (k + 0.5) * dx_fs[2];
+                const amrex::Real phi = 0.5 * (1.0 + std::tanh((z_surf - z) / eps_phi));
+                frac_arrs2[nbx](i, j, k, 0) = amrex::max(0.0, amrex::min(1.0, phi));
+            });
+        amrex::Gpu::synchronize();
+
+        // Update integer is_fluid from Phi so gas headspace is "solid" for LBM.
+        update_is_fluid_from_fraction_and_mark(lev, m_is_fluid_fraction_threshold);
+
+        // Store initial total Phi mass M0 for Chiu & Lin mass redistribution (Sec. 2.5).
+        amrex::Real M0 = 0.0;
+        {
+            auto const& fc = m_is_fluid_fraction[lev].const_arrays();
+            M0 = amrex::ParReduce(
+                amrex::TypeList<amrex::ReduceOpSum>{},
+                amrex::TypeList<amrex::Real>{},
+                m_is_fluid_fraction[lev], amrex::IntVect(0),
+                [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k)
+                    -> amrex::GpuTuple<amrex::Real> {
+                    return {fc[nbx](i, j, k, 0)};
+                });
+            amrex::ParallelDescriptor::ReduceRealSum(M0);
+        }
+        m_phi_M0 = M0;
+        amrex::Print() << "Free surface Phi initialized: M0=" << m_phi_M0
+                       << "  eps=" << eps_phi << " (LB length)  z_surf=" << z_surf << std::endl;
+    }
+
     initialize_mask(lev);
     initialize_f(lev);
     m_macrodata[lev].setVal(0.0);
@@ -4257,6 +4468,432 @@ void LBM::write_species_stats()
             << "\n";
         m_species_stats_stream.flush();
     }
+}
+
+// ============================================================================
+// advance_phi — one step of the Chiu & Lin (2011) conservative phase-field
+// equation for the liquid-gas free surface.
+//
+// Governing equation (Chiu & Lin Eq. 18):
+//   dPhi/dt + div(u * Phi) = gamma * div[ grad(Phi) - Phi*(1-Phi)/eps * nhat ]
+// where
+//   nhat  = grad(Phi) / |grad(Phi)|   (unit normal, regularised)
+//   gamma = gamma_coeff * |u|          (interface compression coefficient)
+//   eps   = 1.5 * dx                   (interface half-width, set at init)
+//
+// Algorithm (per step):
+//   1. Compute cell-centred compression vector C = Phi*(1-Phi)/eps * nhat
+//      using central diffs from 1-ghost-cell halo of m_is_fluid_fraction.
+//   2. FillBoundary(C) so its divergence at interior cells has valid neighbours.
+//   3. Forward-Euler update:
+//        Phi_new = Phi + dt * [ -upwind_div(u,Phi)
+//                               + gamma * (Laplacian(Phi) - div(C)) ]
+//   4. Mass redistribution (Sec. 2.5): clip to [0,1], compute
+//      G = M0 - M, add G/N_interface to transition cells (0.001 < Phi < 0.999).
+//   5. Copy Phi_new -> m_is_fluid_fraction; call refill_and_spill to update
+//      the LBM fluid/gas domain (identical path to moving solid body).
+// ============================================================================
+void LBM::advance_phi(const int lev)
+{
+    BL_PROFILE("LBM::advance_phi()");
+
+    const auto& geom   = Geom(lev);
+    const auto  dx_arr = geom.CellSizeArray();
+    const amrex::Real inv2dx  = 0.5 / dx_arr[0];
+    const amrex::Real inv2dy  = 0.5 / dx_arr[1];
+    const amrex::Real inv2dz  = 0.5 / dx_arr[2];
+    const amrex::Real inv_dx2 = 1.0 / (dx_arr[0] * dx_arr[0]);
+    const amrex::Real inv_dy2 = 1.0 / (dx_arr[1] * dx_arr[1]);
+    const amrex::Real inv_dz2 = 1.0 / (dx_arr[2] * dx_arr[2]);
+    const amrex::Real dx0     = dx_arr[0];
+    const amrex::Real dy0     = dx_arr[1];
+    const amrex::Real dz0     = dx_arr[2];
+
+    const amrex::Real eps_phi    = m_free_surface_eps;
+    const amrex::Real gamma_coef = m_phi_gamma_coeff;
+    const amrex::Real dt         = m_dts[lev];
+    const amrex::Real nhat_reg   = 1.0e-8;   // |grad_phi| regulariser
+
+    // ------------------------------------------------------------------
+    // Ghost-fill Phi so the stencil has valid halo values.
+    // ------------------------------------------------------------------
+    m_is_fluid_fraction[lev].FillBoundary(geom.periodicity());
+
+    auto const& phi_arrs = m_is_fluid_fraction[lev].const_arrays();
+    auto const& md_arrs  = m_macrodata[lev].const_arrays();
+
+    // ------------------------------------------------------------------
+    // Step 1: compression vector  C = Phi*(1-Phi)/eps * grad(Phi)/|grad(Phi)|
+    // Computed at every cell (interior + 1-ghost layer).
+    // ------------------------------------------------------------------
+    amrex::MultiFab phi_comp(
+        m_is_fluid_fraction[lev].boxArray(),
+        m_is_fluid_fraction[lev].DistributionMap(),
+        AMREX_SPACEDIM, 1);
+    phi_comp.setVal(0.0);
+
+    {
+        auto const& c_arrs = phi_comp.arrays();
+        amrex::ParallelFor(
+            phi_comp, amrex::IntVect(1),
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                const amrex::Real phi = phi_arrs[nbx](i, j, k, 0);
+
+                const amrex::Real gpx = (phi_arrs[nbx](i+1,j,k,0) - phi_arrs[nbx](i-1,j,k,0)) * inv2dx;
+                const amrex::Real gpy = (phi_arrs[nbx](i,j+1,k,0) - phi_arrs[nbx](i,j-1,k,0)) * inv2dy;
+                const amrex::Real gpz = (phi_arrs[nbx](i,j,k+1,0) - phi_arrs[nbx](i,j,k-1,0)) * inv2dz;
+
+                const amrex::Real mag     = std::sqrt(gpx*gpx + gpy*gpy + gpz*gpz);
+                const amrex::Real inv_mag = 1.0 / amrex::max(mag, nhat_reg);
+                const amrex::Real coeff   = phi * (1.0 - phi) / eps_phi;
+
+                c_arrs[nbx](i, j, k, 0) = coeff * gpx * inv_mag;
+                c_arrs[nbx](i, j, k, 1) = coeff * gpy * inv_mag;
+                c_arrs[nbx](i, j, k, 2) = coeff * gpz * inv_mag;
+            });
+        amrex::Gpu::synchronize();
+    }
+
+    phi_comp.FillBoundary(geom.periodicity());
+
+    // ------------------------------------------------------------------
+    // Step 2+3: forward-Euler update
+    // ------------------------------------------------------------------
+    amrex::MultiFab phi_new(
+        m_is_fluid_fraction[lev].boxArray(),
+        m_is_fluid_fraction[lev].DistributionMap(),
+        1, 0);
+
+    {
+        auto const& c_arrs    = phi_comp.const_arrays();
+        auto const& pn_arrs   = phi_new.arrays();
+
+        amrex::ParallelFor(
+            phi_new,
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                const amrex::Real phi = phi_arrs[nbx](i, j, k, 0);
+
+                // Conservative 1st-order upwind advection  -div(u*Phi)
+                // Uses face-centred velocities interpolated as cell averages.
+                // This form is exact regardless of whether div(u)=0, so it
+                // remains correct when bubble forces / reaction sources make
+                // the velocity field locally non-solenoidal.
+                //
+                // Face flux (Godunov upwind):
+                //   F_{i+1/2} = max(ux_{i+1/2}, 0)*Phi_i
+                //              + min(ux_{i+1/2}, 0)*Phi_{i+1}
+                //   ux_{i+1/2} = 0.5*(ux_i + ux_{i+1})
+                //   div(u*Phi) = (F_{i+1/2} - F_{i-1/2}) / dx  + ...
+                const amrex::Real ux  = md_arrs[nbx](i,   j, k, constants::VELX_IDX);
+                const amrex::Real uy  = md_arrs[nbx](i, j,   k, constants::VELY_IDX);
+                const amrex::Real uz  = md_arrs[nbx](i, j, k,   constants::VELZ_IDX);
+                const amrex::Real uxm = md_arrs[nbx](i-1, j, k, constants::VELX_IDX);
+                const amrex::Real uxp = md_arrs[nbx](i+1, j, k, constants::VELX_IDX);
+                const amrex::Real uym = md_arrs[nbx](i, j-1, k, constants::VELY_IDX);
+                const amrex::Real uyp = md_arrs[nbx](i, j+1, k, constants::VELY_IDX);
+                const amrex::Real uzm = md_arrs[nbx](i, j, k-1, constants::VELZ_IDX);
+                const amrex::Real uzp = md_arrs[nbx](i, j, k+1, constants::VELZ_IDX);
+
+                const amrex::Real phim = phi_arrs[nbx](i-1, j, k, 0);
+                const amrex::Real phip = phi_arrs[nbx](i+1, j, k, 0);
+                const amrex::Real phijm = phi_arrs[nbx](i, j-1, k, 0);
+                const amrex::Real phijp = phi_arrs[nbx](i, j+1, k, 0);
+                const amrex::Real phikm = phi_arrs[nbx](i, j, k-1, 0);
+                const amrex::Real phikp = phi_arrs[nbx](i, j, k+1, 0);
+
+                // Face-centre velocities (arithmetic average)
+                const amrex::Real ux_hi = 0.5 * (ux + uxp);
+                const amrex::Real ux_lo = 0.5 * (uxm + ux);
+                const amrex::Real uy_hi = 0.5 * (uy + uyp);
+                const amrex::Real uy_lo = 0.5 * (uym + uy);
+                const amrex::Real uz_hi = 0.5 * (uz + uzp);
+                const amrex::Real uz_lo = 0.5 * (uzm + uz);
+
+                // Upwind face fluxes
+                const amrex::Real Fx_hi = amrex::max(ux_hi, 0.0)*phi  + amrex::min(ux_hi, 0.0)*phip;
+                const amrex::Real Fx_lo = amrex::max(ux_lo, 0.0)*phim + amrex::min(ux_lo, 0.0)*phi;
+                const amrex::Real Fy_hi = amrex::max(uy_hi, 0.0)*phi  + amrex::min(uy_hi, 0.0)*phijp;
+                const amrex::Real Fy_lo = amrex::max(uy_lo, 0.0)*phijm+ amrex::min(uy_lo, 0.0)*phi;
+                const amrex::Real Fz_hi = amrex::max(uz_hi, 0.0)*phi  + amrex::min(uz_hi, 0.0)*phikp;
+                const amrex::Real Fz_lo = amrex::max(uz_lo, 0.0)*phikm+ amrex::min(uz_lo, 0.0)*phi;
+
+                // Conservative flux divergence
+                const amrex::Real adv_x = (Fx_hi - Fx_lo) / dx0;
+                const amrex::Real adv_y = (Fy_hi - Fy_lo) / dy0;
+                const amrex::Real adv_z = (Fz_hi - Fz_lo) / dz0;
+
+                // Laplacian(Phi) for diffusion term
+                const amrex::Real lap_phi =
+                    (phi_arrs[nbx](i+1,j,k,0) - 2.0*phi + phi_arrs[nbx](i-1,j,k,0)) * inv_dx2
+                  + (phi_arrs[nbx](i,j+1,k,0) - 2.0*phi + phi_arrs[nbx](i,j-1,k,0)) * inv_dy2
+                  + (phi_arrs[nbx](i,j,k+1,0) - 2.0*phi + phi_arrs[nbx](i,j,k-1,0)) * inv_dz2;
+
+                // div(C) for compression term
+                const amrex::Real div_c =
+                    (c_arrs[nbx](i+1,j,k,0) - c_arrs[nbx](i-1,j,k,0)) * inv2dx
+                  + (c_arrs[nbx](i,j+1,k,1) - c_arrs[nbx](i,j-1,k,1)) * inv2dy
+                  + (c_arrs[nbx](i,j,k+1,2) - c_arrs[nbx](i,j,k-1,2)) * inv2dz;
+
+                const amrex::Real umag  = std::sqrt(ux*ux + uy*uy + uz*uz);
+                const amrex::Real gamma = gamma_coef * umag;
+
+                const amrex::Real rhs = -(adv_x + adv_y + adv_z)
+                                        + gamma * (lap_phi - div_c);
+
+                pn_arrs[nbx](i, j, k, 0) = phi + dt * rhs;
+            });
+        amrex::Gpu::synchronize();
+    }
+
+    // ------------------------------------------------------------------
+    // Step 4: mass redistribution (Chiu & Lin Sec. 2.5)
+    // ------------------------------------------------------------------
+    constexpr amrex::Real phi_lo = 0.001;
+    constexpr amrex::Real phi_hi = 0.999;
+    const amrex::Real M0 = m_phi_M0;
+
+    // (i) clip
+    {
+        auto const& pn = phi_new.arrays();
+        amrex::ParallelFor(phi_new,
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                pn[nbx](i,j,k,0) = amrex::max(0.0, amrex::min(1.0, pn[nbx](i,j,k,0)));
+            });
+        amrex::Gpu::synchronize();
+    }
+
+    // (ii–iii) total mass M and interface cell count N_G
+    amrex::Real M_cur = 0.0;
+    long        N_G   = 0;
+    {
+        auto const& pn = phi_new.const_arrays();
+        auto [sum_phi, cnt] = amrex::ParReduce(
+            amrex::TypeList<amrex::ReduceOpSum, amrex::ReduceOpSum>{},
+            amrex::TypeList<amrex::Real, long>{},
+            phi_new, amrex::IntVect(0),
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k)
+                -> amrex::GpuTuple<amrex::Real, long> {
+                const amrex::Real p = pn[nbx](i,j,k,0);
+                return {p, (p > phi_lo && p < phi_hi) ? 1L : 0L};
+            });
+        amrex::ParallelDescriptor::ReduceRealSum(sum_phi);
+        amrex::ParallelDescriptor::ReduceLongSum(cnt);
+        M_cur = sum_phi;
+        N_G   = cnt;
+    }
+
+    // (iv) distribute residual G = M0 - M over interface cells
+    if (N_G > 0) {
+        const amrex::Real G_per_cell =
+            (M0 - M_cur) / static_cast<amrex::Real>(N_G);
+        auto const& pn = phi_new.arrays();
+        amrex::ParallelFor(phi_new,
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                const amrex::Real p = pn[nbx](i,j,k,0);
+                if (p > phi_lo && p < phi_hi) {
+                    pn[nbx](i,j,k,0) =
+                        amrex::max(0.0, amrex::min(1.0, p + G_per_cell));
+                }
+            });
+        amrex::Gpu::synchronize();
+    }
+
+    // ------------------------------------------------------------------
+    // Step 5: commit and update LBM fluid domain
+    // ------------------------------------------------------------------
+    amrex::MultiFab::Copy(m_is_fluid_fraction[lev], phi_new, 0, 0, 1, 0);
+
+    // Ghost-fills required before refill_and_spill
+    m_is_fluid_fraction[lev].FillBoundary(geom.periodicity());
+    m_f[lev].FillBoundary(geom.periodicity());
+    m_g[lev].FillBoundary(geom.periodicity());
+    for (int ci = 0; ci < m_n_components; ++ci) {
+        m_component_lattices[ci][lev].FillBoundary(geom.periodicity());
+    }
+
+    refill_and_spill(lev);
+}
+
+} // namespace lbm
+
+// ============================================================================
+// Bubble body force: correct forcing for the entropic thermal D3Q27 model.
+//
+// Goal: add momentum F*dt to the fluid while leaving density unchanged.
+//
+// The wrong approach: He-Luo  delta_f = w_q * (e_q.F) / cs^2  assumes cs^2
+// = 1/3 (standard isothermal LBM) and modifies only the e_q-linear moment.
+//
+// The correct approach for this model (cs^2 = Ru/m_bar * T, cell-local):
+//   delta_f_q = f_eq(rho, u + delta_u, T) - f_eq(rho, u, T)
+//   where delta_u = F * dt / rho
+//
+// By construction of the equilibrium:
+//   sum_q  delta_f_q          = 0              (density unchanged)
+//   sum_q  e_qa * delta_f_q   = rho * delta_u  = F * dt  (correct momentum)
+//   Higher moments (stress, energy) shift self-consistently.
+//
+// The extended stress tensor pxx = ux^2 + r_temperature + dt*omega_corr*D_CORR_X
+// (where r_temperature = P/rho = (R/m_bar)*T) is recomputed with the shifted
+// velocity; the SGS correction term is the same for both states.
+// ============================================================================
+namespace lbm {
+
+void LBM::apply_bubble_body_force(int lev, const amrex::MultiFab& force_mf)
+{
+    BL_PROFILE("LBM::apply_bubble_body_force()");
+
+    const stencil::Stencil stencil;
+    const auto& evs    = stencil.evs;
+    const auto& weight = stencil.weights;
+
+    const amrex::Real l_mesh_speed   = m_mesh_speed;
+    const amrex::Real spec_gas_const = m_R_u / m_m_bar;  // (R/m_bar) = P/(rho*T)
+    const amrex::Real nu             = m_nu;
+    const amrex::Real dt             = m_dts[lev];
+
+    auto const& is_fluid_arrs = m_is_fluid[lev].const_arrays();
+    auto const& force_arrs    = force_mf.const_arrays();
+    auto const& f_arrs        = m_f[lev].arrays();
+    auto const& md_arrs       = m_macrodata[lev].const_arrays();
+    auto const& d_arrs        = m_derived[lev].const_arrays();
+
+    amrex::ParallelFor(
+        m_f[lev], amrex::IntVect(0),
+        [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+            const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
+            if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_IDX) != 1) {
+                return;
+            }
+
+            const amrex::Real Fx = force_arrs[nbx](iv, 0);
+            const amrex::Real Fy = force_arrs[nbx](iv, 1);
+            const amrex::Real Fz = force_arrs[nbx](iv, 2);
+            if (Fx == 0.0 && Fy == 0.0 && Fz == 0.0) { return; }
+
+            const auto md_arr = md_arrs[nbx];
+            const auto d_arr  = d_arrs[nbx];
+
+            const amrex::Real rho = md_arr(iv, constants::RHO_IDX);
+            if (rho < 1.0e-12) { return; }
+
+            const amrex::Real ux = md_arr(iv, constants::VELX_IDX);
+            const amrex::Real uy = md_arr(iv, constants::VELY_IDX);
+            const amrex::Real uz = md_arr(iv, constants::VELZ_IDX);
+
+            const amrex::Real temperature = md_arr(iv, constants::TEMPERATURE_IDX);
+            // r_temperature = (R/m_bar)*T = P/rho — the isotropic stress entry
+            // used in the equilibrium function (pxx = ux^2 + r_temperature, etc.)
+            // Note: this is NOT cs^2; the acoustic cs^2 = gamma*(R/m_bar)*T.
+            // The momentum equilibrium only sees P/rho, not gamma.
+            const amrex::Real r_temperature = spec_gas_const * temperature;
+
+            // SGS correction coefficient (same formula as macrodata_to_equilibrium)
+            const amrex::Real omega      = 1.0 / (nu / (r_temperature * dt) + 0.5);
+            const amrex::Real omega_corr = (2.0 - omega) / (2.0 * omega * rho);
+
+            // Extended stress tensor at current state
+            const amrex::Real pxx_0 = ux*ux + r_temperature
+                + dt * omega_corr * d_arr(iv, constants::D_Q_CORR_X_IDX);
+            const amrex::Real pyy_0 = uy*uy + r_temperature
+                + dt * omega_corr * d_arr(iv, constants::D_Q_CORR_Y_IDX);
+            const amrex::Real pzz_0 = uz*uz + r_temperature
+                + dt * omega_corr * d_arr(iv, constants::D_Q_CORR_Z_IDX);
+
+            // Shifted velocity: delta_u = F * dt / rho
+            const amrex::Real inv_rho = 1.0 / rho;
+            const amrex::Real ux1 = ux + Fx * dt * inv_rho;
+            const amrex::Real uy1 = uy + Fy * dt * inv_rho;
+            const amrex::Real uz1 = uz + Fz * dt * inv_rho;
+
+            // Extended stress tensor at shifted state
+            // (kinematic u^2 changes; r_temperature and SGS D_CORR unchanged)
+            const amrex::Real pxx_1 = ux1*ux1 + r_temperature
+                + dt * omega_corr * d_arr(iv, constants::D_Q_CORR_X_IDX);
+            const amrex::Real pyy_1 = uy1*uy1 + r_temperature
+                + dt * omega_corr * d_arr(iv, constants::D_Q_CORR_Y_IDX);
+            const amrex::Real pzz_1 = uz1*uz1 + r_temperature
+                + dt * omega_corr * d_arr(iv, constants::D_Q_CORR_Z_IDX);
+
+            const amrex::RealVect vel0 = {AMREX_D_DECL(ux,  uy,  uz )};
+            const amrex::RealVect vel1 = {AMREX_D_DECL(ux1, uy1, uz1)};
+
+            for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+                const auto& ev = evs[q];
+                const amrex::Real wt = weight[q];
+                const amrex::Real feq0 = set_extended_equilibrium_value(
+                    rho, vel0, pxx_0, pyy_0, pzz_0, l_mesh_speed, wt, ev);
+                const amrex::Real feq1 = set_extended_equilibrium_value(
+                    rho, vel1, pxx_1, pyy_1, pzz_1, l_mesh_speed, wt, ev);
+                f_arrs[nbx](iv, q) += feq1 - feq0;
+            }
+        });
+    amrex::Gpu::synchronize();
+}
+
+// ============================================================================
+// Bubble O2 source term
+// Convert mol/(m³·s) → LB_rho/step, distribute using local equilibrium shape.
+//
+// The density increment d_rho is deposited as:
+//   delta_f_q = d_rho * f_eq(rho=1, vel, T)
+// consistent with apply_reaction_source_terms.  This adds dissolved O2 mass
+// in an equilibrium state advecting at the local fluid velocity, which avoids
+// spurious non-equilibrium stress contributions at the next collision step.
+// Uniform 1/N_MICRO_STATES weighting would be equivalent only at u=0 and T=T0.
+// ============================================================================
+void LBM::apply_bubble_o2_source(int lev, const amrex::MultiFab& o2_src_mf)
+{
+    BL_PROFILE("LBM::apply_bubble_o2_source()");
+
+    if (m_n_components < 1) { return; }
+
+    // Conversion: [mol/(m³·s)] * dt_phys [s] / C_ref [mol/m³ per LB_rho] = [LB_rho/step]
+    const amrex::Real conv = m_bubble_params.dt_phys / m_bubble_o2_C_ref;
+
+    const amrex::Real specific_gas_constant = m_R_u / m_m_bar;
+    const amrex::Real l_mesh_speed          = m_mesh_speed;
+
+    const stencil::Stencil stencil;
+    const auto& evs    = stencil.evs;
+    const auto& weight = stencil.weights;
+
+    auto const& is_fluid_arrs = m_is_fluid[lev].const_arrays();
+    auto const& src_arrs      = o2_src_mf.const_arrays();
+    auto const& md_arrs       = m_macrodata[lev].const_arrays();
+    auto const& fO2_arrs      = m_component_lattices[0][lev].arrays();
+
+    amrex::ParallelFor(
+        m_component_lattices[0][lev], amrex::IntVect(0),
+        [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+            const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
+            if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_IDX) != 1) {
+                return;
+            }
+
+            const amrex::Real d_rho = src_arrs[nbx](iv, 0) * conv;
+            if (d_rho == 0.0) { return; }
+
+            // Local fluid velocity and r_temperature = (R/m_bar)*T = P/rho
+            const amrex::RealVect vel = {AMREX_D_DECL(
+                md_arrs[nbx](iv, constants::VELX_IDX),
+                md_arrs[nbx](iv, constants::VELY_IDX),
+                md_arrs[nbx](iv, constants::VELZ_IDX))};
+            const amrex::Real r_temperature =
+                specific_gas_constant * md_arrs[nbx](iv, constants::TEMPERATURE_IDX);
+
+            // Equilibrium stress entries (no viscous correction — pure kinematic)
+            const amrex::Real pxx_eq = vel[0]*vel[0] + r_temperature;
+            const amrex::Real pyy_eq = vel[1]*vel[1] + r_temperature;
+            const amrex::Real pzz_eq = AMREX_D_PICK(0.0, 0.0, vel[2]*vel[2] + r_temperature);
+
+            for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+                const amrex::Real f_eq_unit = set_extended_equilibrium_value(
+                    1.0, vel, pxx_eq, pyy_eq, pzz_eq, l_mesh_speed, weight[q], evs[q]);
+                fO2_arrs[nbx](iv, q) += d_rho * f_eq_unit;
+            }
+        });
+    amrex::Gpu::synchronize();
 }
 
 } // namespace lbm

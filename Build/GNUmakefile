@@ -15,7 +15,7 @@ USE_CUDA  = FALSE
 USE_EB    = TRUE
 
 TINY_PROFILE = TRUE
-USE_PARTICLES = FALSE
+USE_PARTICLES = TRUE
 
 BL_NO_FORT = TRUE
 
@@ -25,6 +25,7 @@ include $(AMREX_HOME)/Src/Base/Make.package
 include $(AMREX_HOME)/Src/EB/Make.package
 include $(AMREX_HOME)/Src/Boundary/Make.package
 include $(AMREX_HOME)/Src/AmrCore/Make.package
+include $(AMREX_HOME)/Src/Particle/Make.package
 
 include $(MARBLES_HOME)/Source/Make.package
 

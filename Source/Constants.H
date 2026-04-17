@@ -36,7 +36,7 @@ static constexpr int N_MICRO_STATES = 9;
 static constexpr int N_MICRO_STATES = 27;
 #endif
 
-static constexpr int N_DERIVED = 7;
+static constexpr int N_DERIVED = 8;
 static constexpr int VORTX_IDX = 0;
 static constexpr int VORTY_IDX = 1;
 static constexpr int VORTZ_IDX = 2;
@@ -45,6 +45,9 @@ static constexpr int VORTM_IDX = 3;
 static constexpr int D_Q_CORR_X_IDX = 4;
 static constexpr int D_Q_CORR_Y_IDX = 5;
 static constexpr int D_Q_CORR_Z_IDX = 6;
+
+// Energy dissipation rate ε (LB units: dx²/dt³) stored in derived[lev]
+static constexpr int EPSILON_IDX = 7;
 
 static constexpr int N_IS_FLUID = 4;
 // component indices for m_is_fluid (iMultiFab)
@@ -69,6 +72,22 @@ static constexpr int DATWIDTH = 24;
 static constexpr int DATPRECISION = 16;
 
 static constexpr amrex::Real AIR_MOLAR_MASS = 28.96;
+
+// ---------------------------------------------------------------
+// Physical constants for two-phase kLa mass transfer
+// ---------------------------------------------------------------
+static constexpr amrex::Real O2_MOLAR_VOLUME    = 0.0224;    // m³/mol at STP
+static constexpr amrex::Real O2_SOLUBILITY      = 0.032;     // dimensionless (Bunsen)
+static constexpr amrex::Real O2_DIFFUSIVITY     = 2.0e-9;    // m²/s in water at 25°C
+static constexpr amrex::Real O2_INIT_CONC_GAS   = 44.6;      // mol/m³ pure O2 at STP
+static constexpr amrex::Real KL_COEFFICIENT     = 0.301;     // C in Kawase k_L formula
+static constexpr amrex::Real SURF_TENSION_AIRWATER = 0.072;  // N/m (air-water at 25°C)
+static constexpr amrex::Real RHO_WATER          = 1000.0;    // kg/m³
+static constexpr amrex::Real NU_WATER           = 1.0e-6;    // m²/s kinematic viscosity
+static constexpr amrex::Real P_ATM              = 101325.0;  // Pa
+static constexpr amrex::Real G_GRAV             = 9.81;      // m/s² gravitational acceleration
+static constexpr amrex::Real C_ADDED_MASS       = 0.5;       // added-mass coefficient (sphere)
+static constexpr amrex::Real SMAGORINSKY_CS     = 0.1;       // Smagorinsky constant (calibrated)
 
 } // namespace lbm::constants
 

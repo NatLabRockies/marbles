@@ -19,6 +19,7 @@
 #include "IC.H"
 #include "Utilities.H"
 #include "Stencil.H"
+#include "Bubble.H"
 
 namespace lbm {
 
@@ -138,6 +139,11 @@ public:
     // m_is_fluid_fraction by evaluating the body geometry in its current
     // position/orientation without numerical diffusion.
     void reconstruct_body_sdf(const int lev, amrex::Real time);
+
+    // Advance the conservative phase-field (Chiu & Lin 2011, Eq. 18) for
+    // the free liquid-gas surface by one LBM time step.
+    // Evolves m_is_fluid_fraction in place; calls refill_and_spill internally.
+    void advance_phi(const int lev);
 
     // Initialize masks
     void initialize_mask(const int lev);
@@ -367,6 +373,21 @@ private:
     // use entropic alpha stabilisation for component lattices
     bool m_use_entropic_components = false;
 
+    // ---------------------------------------------------------------
+    // Lagrangian bubble mass transfer physics
+    // ---------------------------------------------------------------
+
+public:
+    /// Apply bubble-to-fluid body force via He-Luo forcing scheme.
+    /// force_mf: 3-component body force density in LB units (force/vol).
+    void apply_bubble_body_force(int lev, const amrex::MultiFab& force_mf);
+
+    /// Apply bubble O2 source to the dissolved-O2 component lattice.
+    /// o2_src_mf: 1-component source rate in mol/(m³·s).
+    void apply_bubble_o2_source(int lev, const amrex::MultiFab& o2_src_mf);
+
+private:
+
     // file for forces
     std::string m_forces_file{"forces.txt"};
 
@@ -391,6 +412,21 @@ private:
 
     // threshold for converting fractional mask into integer is_fluid
     amrex::Real m_is_fluid_fraction_threshold = 0.5;
+
+    // ---------------------------------------------------------------
+    // Free-surface (conservative phase-field, Chiu & Lin 2011)
+    // ---------------------------------------------------------------
+    // Enable by setting  lbm.free_surface = 1  in the input file.
+    // m_is_fluid_fraction plays the role of Phi in [0,1]:
+    //   Phi = 1  liquid cells  (LBM is active)
+    //   Phi = 0  gas headspace (LBM is inactive — like a moving solid)
+    // The initial flat interface at  z = m_free_surface_z  (LB cells)
+    // is smeared over ~1.5 cells with a tanh profile.
+    bool        m_free_surface       = false;
+    amrex::Real m_free_surface_z     = 0.0;   // interface z, in LB cell index units
+    amrex::Real m_free_surface_eps   = 0.0;   // interface half-width  (~1.5*dx, set by init)
+    amrex::Real m_phi_M0             = 0.0;   // initial total Phi mass for mass redistribution
+    amrex::Real m_phi_gamma_coeff    = 1.0;   // multiplier on gamma = gamma_coeff * |u|
 
     // Moving body parameters
     bool m_body_is_moving = false;
@@ -442,6 +478,20 @@ private:
     // Species statistics output
     std::string   m_species_stats_file{"species_stats.csv"};
     std::fstream  m_species_stats_stream;
+
+    // ---------------------------------------------------------------
+    // Lagrangian bubble physics (two-phase kLa mass transfer)
+    // ---------------------------------------------------------------
+    bool             m_enable_bubbles      = false;
+    BubbleManager    m_bubbles;
+    BubbleParams     m_bubble_params;
+
+    /// Concentration reference: 1 LB_rho unit ≡ m_bubble_o2_C_ref [mol/m³]
+    /// Used to convert k_La O2 source from mol/(m³·s) → LB_rho/step.
+    amrex::Real      m_bubble_o2_C_ref     = 1.0;
+
+    /// Internal step counter for coalescence and stats intervals
+    int              m_bubble_step_counter = 0;
 };
 } // namespace lbm
 #endif
