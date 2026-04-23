@@ -47,8 +47,8 @@
 #   Bubble initial O₂ conc  : Cg₀ = 1/V_m = 1/0.0224 = 44.6 mol/m³
 #   Injection rate          : ṅ = Q/V_b0 ≈ 9560 bubbles/s (≈ 0.46 bub/step/point)
 #
-#   Free surface (liquid top): h_fluid = 0.13 m = 130 cells from bottom
-#     => liquid free surface at z = -90 + 130 = 40 LB cells
+#   Free surface (liquid top): h_fluid = 0.16 m = 160 cells from bottom
+#     => liquid free surface at z = -90 + 160 = 70 LB cells
 #
 #   Total sim (10 s physical): 10 / 4.77465e-5 ≈ 210 000 steps
 #   Coalescence start (2 s physical): 2 / 4.77465e-5 ≈ 42 000 steps
@@ -111,13 +111,11 @@ lbm.clamp_component_densities = 0
 lbm.body_is_isothermal = 0
 
 # Free surface (Chiu & Lin 2011 conservative phase-field, Eq. 18)
-# Interface at z = 40 LB cells = 130 cells above domain bottom (z=-90)
-# = 0.13 m fluid height, leaving 0.05 m headspace — consistent with published benchmark
-# benchmark (3.9 L fill, 0.02 m headspace specified; remainder absorbed by
-# the cylindrical tank geometry embedded via STL).
+# Interface at z = 70 LB cells = 160 cells above domain bottom (z=-90)
+# = 0.16 m fluid height, leaving 0.02 m headspace — matches benchmark (3.9 L fill).
 # gamma = 1.0 (default: compression coefficient = |u|).
 lbm.free_surface       = 1
-lbm.free_surface_z     = 40.0   # LB cell z-coordinate of the gas-liquid interface
+lbm.free_surface_z     = 70.0   # LB cell z-coordinate of the gas-liquid interface
 lbm.free_surface_gamma = 1.0    # multiplier: actual gamma = gamma_coeff * |u|
 
 # ---------------------------------------------------------------
@@ -165,8 +163,8 @@ bubble.surface_tension    = 0.072   # N/m     (air-water)
 bubble.P_atm              = 101325.0 # Pa
 bubble.g_grav             = 9.81    # m/s²
 
-# Free surface: liquid height = 130 cells from bottom (z=-90)
-bubble.free_surface_z     = 40.0    # LB cell coordinate (= -90 + 130)
+# Free surface: liquid height = 160 cells from bottom (z=-90)
+bubble.free_surface_z     = 70.0    # LB cell coordinate (= -90 + 160)
 
 # Coalescence parameters (Boshenyatov Re_a criterion)
 bubble.enable_coalescence      = 1
