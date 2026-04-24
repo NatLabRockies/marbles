@@ -373,6 +373,9 @@ private:
     // use entropic alpha stabilisation for component lattices
     bool m_use_entropic_components = false;
 
+    // use entropic alpha stabilisation for the main f distribution
+    bool m_use_entropic_f = false;
+
     // ---------------------------------------------------------------
     // Lagrangian bubble mass transfer physics
     // ---------------------------------------------------------------

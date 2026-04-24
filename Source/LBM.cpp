@@ -323,6 +323,7 @@ void LBM::read_parameters()
         pp.query("forces_file", m_forces_file);
         pp.query("clamp_component_densities", m_clamp_component_densities);
         pp.query("use_entropic_components", m_use_entropic_components);
+        pp.query("use_entropic_f", m_use_entropic_f);
 
         pp.query("initial_temperature", m_initialTemperature);
 
@@ -1105,12 +1106,14 @@ void LBM::relax_f_to_equilibrium(const int lev)
     amrex::Real dt = m_dts[lev];
 
     const bool body_is_isothermal = m_bodyIsIsothermal;
+    const bool use_entropic_f     = m_use_entropic_f;
 
     const amrex::Real l_mesh_speed = m_mesh_speed;
     const stencil::Stencil stencil;
     const auto& evs = stencil.evs;
     const auto& weight = stencil.weights;
 
+    // Per-direction BGK pass: always updates g; updates f only when entropic is OFF.
     amrex::ParallelFor(
         m_f[lev], m_eq[lev].nGrowVect(), constants::N_MICRO_STATES,
         [=] AMREX_GPU_DEVICE(
@@ -1131,7 +1134,11 @@ void LBM::relax_f_to_equilibrium(const int lev)
                     1.0 /
                     (nu / (specific_gas_constant * temperature * dt) + 0.5);
 
-                f_arr(iv, q) += omega * (eq_arr(iv, q) - f_arr(iv, q));
+                // f is updated here only for plain BGK; the entropic path
+                // handles f in a separate cell-loop below.
+                if (!use_entropic_f) {
+                    f_arr(iv, q) += omega * (eq_arr(iv, q) - f_arr(iv, q));
+                }
 
                 g_arr(iv, q) += omega * (eq_arr_g(iv, q) - g_arr(iv, q));
 
@@ -1142,6 +1149,98 @@ void LBM::relax_f_to_equilibrium(const int lev)
                 }
             }
         });
+
+    // --- Entropic alpha solve for m_f (Ansumali & Karlin, Phys. Rev. E 2002) ---
+    // Finds alpha* in (0, 2] s.t. H(f + alpha*(f_eq - f)) = H(f), where
+    //   H(f) = sum_q f_q * ln(f_q / f_ref_q)
+    //   f_ref_q = f^eq(rho, 0, T)  (zero-velocity Maxwellian reference).
+    //
+    // alpha_use hierarchy:
+    //   Newton succeeds  :  min(omega, alpha*)   [tightest H-theorem bound]
+    //   Negative pops    :  min(omega, 1.0)      [safe fallback, monotone]
+    //   Disabled         :  (this block not executed)
+    //
+    // Controlled by lbm.use_entropic_f (default = 0).
+    if (use_entropic_f) {
+        constexpr int NQ = constants::N_MICRO_STATES;
+        amrex::ParallelFor(
+            m_f[lev], m_eq[lev].nGrowVect(),
+            [=] AMREX_GPU_DEVICE(
+                int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k)) noexcept {
+                const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
+                if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_IDX) != 1) {
+                    return;
+                }
+
+                const auto f_arr  = f_arrs[nbx];
+                const auto eq_arr = eq_arrs[nbx];
+                const auto md_arr = md_arrs[nbx];
+
+                const amrex::Real temperature =
+                    md_arr(iv, constants::TEMPERATURE_IDX);
+                const amrex::Real omega =
+                    1.0 / (nu / (specific_gas_constant * temperature * dt) + 0.5);
+                const amrex::Real p_by_rho = specific_gas_constant * temperature;
+
+                // BGK target (q-corrected, already stored in m_eq)
+                amrex::GpuArray<amrex::Real, NQ> eq_all;
+                for (int q = 0; q < NQ; ++q) {
+                    eq_all[q] = eq_arr(iv, q);
+                }
+
+                // Zero-velocity unit-density reference for the H-function:
+                //   f_ref[q] = f^eq(1, 0, T)  — identical to eq_unit_arr(iv, q+NQ)
+                //   used for the component entropic solve.  Unit density makes the
+                //   logarithm independent of rho (matching the component convention).
+                const amrex::RealVect zero_vel = {AMREX_D_DECL(0.0, 0.0, 0.0)};
+                amrex::GpuArray<amrex::Real, NQ> f_ref;
+                for (int q = 0; q < NQ; ++q) {
+                    f_ref[q] = set_extended_equilibrium_value(
+                        1.0, zero_vel, p_by_rho, p_by_rho, p_by_rho,
+                        l_mesh_speed, weight[q], evs[q]);
+                }
+
+                // Safe fallback: min(omega, 1.0) guarantees monotone approach
+                amrex::Real alpha_use = amrex::min(omega, 1.0);
+
+                // Attempt Newton only when all pre-collision pops are positive
+                amrex::Real H0 = 0.0;
+                bool all_positive = true;
+                for (int q = 0; q < NQ; ++q) {
+                    const amrex::Real fq = f_arr(iv, q);
+                    if (fq <= 0.0) { all_positive = false; break; }
+                    H0 += fq * log(fq / f_ref[q]);
+                }
+
+                if (all_positive) {
+                    // Newton: g(alpha) = H(f + alpha*s) - H0 = 0
+                    amrex::Real alpha = 2.0;
+                    for (int iter = 0; iter < 10; ++iter) {
+                        amrex::Real g = -H0, dg = 0.0;
+                        bool fhat_positive = true;
+                        for (int q = 0; q < NQ; ++q) {
+                            const amrex::Real sq   = eq_all[q] - f_arr(iv, q);
+                            const amrex::Real fhat = f_arr(iv, q) + alpha * sq;
+                            if (fhat <= 0.0) { fhat_positive = false; break; }
+                            const amrex::Real ln_ratio = log(fhat / f_ref[q]);
+                            g  += fhat * ln_ratio;
+                            dg += sq * (ln_ratio + 1.0);
+                        }
+                        if (!fhat_positive || fabs(dg) < 1.0e-14) { break; }
+                        alpha -= g / dg;
+                        alpha = amrex::min(2.0, amrex::max(0.0, alpha));
+                        if (fabs(g) < 1.0e-12 * (fabs(H0) + 1.0e-30)) { break; }
+                    }
+                    alpha_use = amrex::min(omega, alpha);
+                }
+
+                // Apply entropic collision to f
+                for (int q = 0; q < NQ; ++q) {
+                    f_arr(iv, q) += alpha_use * (eq_all[q] - f_arr(iv, q));
+                }
+            });
+        amrex::Gpu::synchronize();
+    }
 
     const bool use_entropic_components = m_use_entropic_components;
 
