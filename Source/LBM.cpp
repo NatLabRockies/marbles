@@ -768,8 +768,8 @@ void LBM::advance(
     // Execute only on the base level to keep a single particle container.
     // ------------------------------------------------------------------
     if (m_enable_bubbles && lev == 0) {
-        // Physical time in seconds (m_ts_new is in LB steps)
-        const amrex::Real phys_time = m_ts_new[lev] * m_dt_outer;
+        // Physical time in seconds (m_ts_new is in LB steps, dt_phys is s/step)
+        const amrex::Real phys_time = m_ts_new[lev] * m_bubble_params.dt_phys;
 
         // Temporary MultiFabs for bubble↔fluid coupling (zeroed each step)
         amrex::MultiFab bubble_force(
@@ -780,7 +780,8 @@ void LBM::advance(
         o2_src.setVal(0.0);
 
         // Sparger injection (every step)
-        m_bubbles.inject_bubbles(m_dt_outer);
+        // Must pass physical seconds per step, not the dimensionless LB m_dt_outer.
+        m_bubbles.inject_bubbles(m_bubble_params.dt_phys);
 
         // Determine O2 concentration MultiFab (component 0 if available)
         // A valid kLa run requires at least 1 component for dissolved O2.
@@ -1149,6 +1150,7 @@ void LBM::relax_f_to_equilibrium(const int lev)
                 }
             }
         });
+    amrex::Gpu::synchronize();  // catch any CUDA error before bubble CPU code runs
 
     // --- Entropic alpha solve for m_f (Ansumali & Karlin, Phys. Rev. E 2002) ---
     // Finds alpha* in (0, 2] s.t. H(f + alpha*(f_eq - f)) = H(f), where

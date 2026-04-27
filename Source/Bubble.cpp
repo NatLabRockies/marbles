@@ -155,9 +155,11 @@ amrex::Real BubbleManager::trilinear_interp(
         const auto& arr = mf.const_array(mfi);
 
         auto get = [&](int ii, int jj, int kk) {
-            return arr(amrex::IntVect(clamp(ii, bx.smallEnd(0), bx.bigEnd(0)),
+            amrex::Real v = arr(amrex::IntVect(clamp(ii, bx.smallEnd(0), bx.bigEnd(0)),
                                      clamp(jj, bx.smallEnd(1), bx.bigEnd(1)),
                                      clamp(kk, bx.smallEnd(2), bx.bigEnd(2))), comp);
+            // EB/solid cells may contain NaN; treat as zero for interpolation purposes
+            return std::isfinite(v) ? v : amrex::Real(0.0);
         };
 
         val =
@@ -255,6 +257,10 @@ void BubbleManager::initialize(
 {
     m_params = params;
     m_container.Define(geom, dm, ba);
+    m_container.resizeData();        // resizes m_particles to finestLevel()+1 levels
+                                     // (Define() only sets GDB; constructors call
+                                     //  resizeData() automatically but Define() does not)
+    m_injection_residual = 1.0;  // pre-seed: guarantee injection on first step
     m_initialized = true;
     open_stats_file();
     amrex::Print() << "[BubbleManager] Initialized. n_sparger_points = "
@@ -278,12 +284,22 @@ void BubbleManager::inject_bubbles(amrex::Real dt_phys)
     const amrex::Real rate_total =
         m_params.flow_rate / V0;
 
-    // Accumulate fractional bubbles
+    // Accumulate fractional bubbles.
+    // Pre-seeded to 1.0 in initialize() so the very first call always injects,
+    // ensuring the container tile map is populated before any particle iteration.
     m_injection_residual += rate_total * dt_phys;
     int n_inject = static_cast<int>(m_injection_residual);
     m_injection_residual -= static_cast<amrex::Real>(n_inject);
 
-    if (n_inject == 0) { return; }
+    if (n_inject == 0) {
+        // Still call Redistribute to ensure tile map is populated even on steps
+        // where no bubbles are injected (e.g. first step when residual < 1).
+        if (!m_particles_ever_injected) { return; }  // m_particles not yet sized
+        m_container.Redistribute();
+        return;
+    }
+
+    // Distribute injected bubbles across sparger holes
 
     // Distribute injected bubbles across sparger holes
     int per_hole = n_inject / m_params.n_sparger_points;
@@ -325,6 +341,7 @@ void BubbleManager::inject_bubbles(amrex::Real dt_phys)
         }
     }
     m_container.Redistribute();
+    m_particles_ever_injected = true;
 }
 
 // ============================================================================
@@ -979,6 +996,7 @@ void BubbleManager::advance(
     const amrex::MultiFab*     phi_mf)
 {
     if (!m_initialized) { return; }
+    if (!m_particles_ever_injected) { return; }  // m_particles not yet sized
     const amrex::Real dt_phys = m_params.dt_phys;
     const amrex::Real dx_phys = m_params.dx_phys;
 

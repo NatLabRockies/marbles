@@ -285,7 +285,8 @@ private:
     // Fractional injection counter (accumulated between integer events)
     amrex::Real m_injection_residual = 0.0;
 
-    bool       m_initialized   = false;
+    bool       m_initialized            = false;
+    bool       m_particles_ever_injected = false;  ///< true after first Redistribute with particles
     std::fstream m_stats_stream;
 };
 
