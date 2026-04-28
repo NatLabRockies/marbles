@@ -56,6 +56,19 @@ static constexpr int EB_BOUNDARY_IDX = 1;              // 1 = EB boundary flag
 static constexpr int IS_FLUID_SIDE_IDX = 2;            // 2 = fluid-side boundary
 static constexpr int IS_FLUID_SIDE_BOUNDARY_IDX = 3;   // 3 = next layer boundary
 
+// ---------------------------------------------------------------
+// FSLBM cell types (stored in m_cell_type iMultiFab, 1 component)
+// Körner et al. (2005), Schwarzmeier et al. (2023, JCP 473 111753)
+// ---------------------------------------------------------------
+static constexpr int CELL_SOLID     = 0;  // EB or moving body — no PDFs
+static constexpr int CELL_GAS       = 1;  // headspace — no PDFs, no LBM update
+static constexpr int CELL_INTERFACE = 2;  // free-surface cell — has PDFs, fill ∈ (0,1)
+static constexpr int CELL_LIQUID    = 3;  // fully liquid — has PDFs, fill = 1
+
+// Conversion thresholds for fill level φ
+static constexpr amrex::Real FSLBM_PHI_LO = amrex::Real(1.0e-4);       // below → GAS
+static constexpr amrex::Real FSLBM_PHI_HI = amrex::Real(1.0) - amrex::Real(1.0e-4); // above → LIQUID
+
 static constexpr amrex::Real ROOT3 =
     static_cast<amrex::Real>(1.732050807568877293527446341);
 

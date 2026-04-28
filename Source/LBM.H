@@ -145,6 +145,18 @@ public:
     // Evolves m_is_fluid_fraction in place; calls refill_and_spill internally.
     void advance_phi(const int lev);
 
+    // FSLBM (Körner 2005): initialize cell type + fill level from z_surf.
+    void fslbm_init_cell_type(const int lev);
+
+    // FSLBM: one free-surface sweep (streaming with ABB + φ update + conversions).
+    // Replaces both advance_phi(lev) and stream(lev, m_f).
+    void fslbm_advance_surface(const int lev);
+
+    // FSLBM: derive IS_FLUID_IDX (and boundary markers) from m_cell_type.
+    // Replaces update_is_fluid_from_fraction_and_mark for FSLBM to avoid
+    // conflict with the moving-body SDF that also lives in m_is_fluid_fraction.
+    void fslbm_sync_isfluid_markers(const int lev);
+
     // Initialize masks
     void initialize_mask(const int lev);
 
@@ -303,6 +315,14 @@ private:
     // Stationary body reference data
     amrex::Vector<amrex::iMultiFab> m_stationary_mask;
     bool m_has_stationary_body = false;
+
+    // FSLBM cell type per cell: CELL_SOLID(0), CELL_GAS(1), CELL_INTERFACE(2), CELL_LIQUID(3)
+    amrex::Vector<amrex::iMultiFab> m_cell_type;
+
+    // FSLBM fill level φ ∈ [0,1] — separate from m_is_fluid_fraction which is
+    // used by the moving-body SDF / refill_and_spill and must not be modified
+    // by FSLBM code.
+    amrex::Vector<amrex::MultiFab> m_phi_fslbm;
  
     const int m_macrodata_nghost = 1;
     const int m_f_nghost = 3;

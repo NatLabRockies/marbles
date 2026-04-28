@@ -83,8 +83,8 @@ amr.max_grid_size = 32
 amr.blocking_factor_x = 2
 amr.blocking_factor_y = 1
 amr.blocking_factor_z = 1
-amr.plot_int = 4000         # every ~0.048 s physical
-amr.print_int = 800
+amr.plot_int = 1         # every ~0.048 s physical
+amr.print_int = 1
 amr.chk_int = 200000        # checkpoint every ~2.4 s physical
 amr.file_name_digits = 5
 
