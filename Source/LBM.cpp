@@ -395,10 +395,15 @@ void LBM::read_parameters()
         pp.query("free_surface_z",        m_free_surface_z);
         pp.query("free_surface_gamma",    m_phi_gamma_coeff);
         if (m_free_surface) {
-            amrex::Print() << "\n=== Free Surface Configuration ===" << std::endl;
-            amrex::Print() << "  Chiu & Lin (2011) conservative phase-field" << std::endl;
+            // Read reference density from the initial-condition block so that
+            // FSLBM seeding, ABB, and repair thresholds scale with the actual
+            // bulk density rather than assuming ρ = 1.
+            amrex::ParmParse ppic("ic_constant");
+            ppic.query("density", m_fslbm_rho_ref);
+
+            amrex::Print() << "\n=== Free Surface Configuration (FSLBM) ===" << std::endl;
             amrex::Print() << "  Interface z (LB cells)   : " << m_free_surface_z << std::endl;
-            amrex::Print() << "  gamma coefficient        : " << m_phi_gamma_coeff << std::endl;
+            amrex::Print() << "  Reference density ρ_ref  : " << m_fslbm_rho_ref << std::endl;
         }
     }
 
@@ -5590,9 +5595,19 @@ void LBM::fslbm_advance_surface(const int lev)
     const auto& evs          = stencil.evs;
     const auto& bounce_dirs  = stencil.bounce_dirs;
     const auto& weights      = stencil.weights;
-    const amrex::Real l_mesh_speed = m_mesh_speed;
-    const amrex::Real l_R_u        = m_R_u;
-    const amrex::Real l_m_bar      = m_m_bar;
+    const amrex::Real l_mesh_speed    = m_mesh_speed;
+    const amrex::Real l_R_u           = m_R_u;
+    const amrex::Real l_m_bar         = m_m_bar;
+    // Reference density from ic_constant.density — used for ABB ρ₀, seeding
+    // targets (feq), and repair threshold so all FSLBM numerics scale with
+    // the actual initial bulk density rather than being hard-coded to 1.
+    const amrex::Real l_fslbm_rho_ref = m_fslbm_rho_ref;
+    // Reference pressure-tensor diagonal for seeding: pdiag = (R/m_bar) * T_ref.
+    // This is what collide() uses as p_by_rho = spec_gas_const * temperature,
+    // so seeded cells produce feq consistent with the rest of the solver.
+    // Using mesh_speed² instead would seed at T = gamma * T_ref (~30 × T_ref
+    // for this case), causing a transient temperature spike in newly activated cells.
+    const amrex::Real l_fslbm_pdiag_ref = (m_R_u / m_m_bar) * m_initialTemperature;
 
     // -----------------------------------------------------------------------
     // Body-motion sync: reconcile m_cell_type / m_is_fluid_fraction with the
@@ -5646,13 +5661,14 @@ void LBM::fslbm_advance_surface(const int lev)
                     phi_s[nbx](i, j, k, 0) = (new_ct == CELL_LIQUID)
                         ? amrex::Real(1.0) : amrex::Real(0.0);
 
-                    // Seed f and g to feq(rho=1, u=0, T_ref) using cs²=mesh_speed²
+                    // Seed f and g to feq(rho_ref, u=0, T_ref) using
+                    // pdiag = (R/m_bar)*T_ref (consistent with collide's p_by_rho)
                     // to avoid T=0 from stale macrodata causing entropic H divergence.
-                    const amrex::Real pdiag   = l_mesh_speed * l_mesh_speed;
+                    const amrex::Real pdiag   = l_fslbm_pdiag_ref;
                     const amrex::RealVect zero_vel(AMREX_D_DECL(0, 0, 0));
                     for (int q = 0; q < N_MICRO_STATES; ++q) {
                         const amrex::Real feq_val = set_extended_equilibrium_value(
-                            amrex::Real(1.0), zero_vel, pdiag, pdiag, pdiag,
+                            l_fslbm_rho_ref, zero_vel, pdiag, pdiag, pdiag,
                             l_mesh_speed, l_weights[q], l_evs[q]);
                         f_s[nbx](i, j, k, q) = feq_val;
                         g_s[nbx](i, j, k, q) = feq_val;  // seed g so T≠0 in collide
@@ -5677,14 +5693,15 @@ void LBM::fslbm_advance_surface(const int lev)
     // growing dm and collapse the free surface within 4-5 steps.
     // -----------------------------------------------------------------------
     {
-        const amrex::Real rho_repair_threshold = amrex::Real(0.01);
+        const amrex::Real rho_repair_threshold = amrex::Real(0.01) * l_fslbm_rho_ref;
         auto const& ct_r   = m_cell_type[lev].const_arrays();
         auto const& f_r    = m_f[lev].arrays();
         auto const& g_r    = m_g[lev].arrays();
         const auto& l_evs_r     = evs;
         const auto& l_weights_r = weights;
-        // Use pdiag = cs² = l_mesh_speed² (T_ref) to avoid stale/zero T from macrodata.
-        const amrex::Real pdiag_repair = l_mesh_speed * l_mesh_speed;
+        // Use pdiag = (R/m_bar)*T_ref to avoid stale/zero T from macrodata.
+        // Consistent with collide's p_by_rho = spec_gas_const * temperature.
+        const amrex::Real pdiag_repair = l_fslbm_pdiag_ref;
         amrex::ParallelFor(
             m_f[lev], m_f[lev].nGrowVect(),
             [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
@@ -5699,7 +5716,7 @@ void LBM::fslbm_advance_surface(const int lev)
                 const amrex::RealVect zero_vel(AMREX_D_DECL(0, 0, 0));
                 for (int q = 0; q < N_MICRO_STATES; ++q) {
                     const amrex::Real feq_val = set_extended_equilibrium_value(
-                        amrex::Real(1.0), zero_vel, pdiag_repair, pdiag_repair, pdiag_repair,
+                        l_fslbm_rho_ref, zero_vel, pdiag_repair, pdiag_repair, pdiag_repair,
                         l_mesh_speed, l_weights_r[q], l_evs_r[q]);
                     f_r[nbx](i, j, k, q) = feq_val;
                     g_r[nbx](i, j, k, q) = feq_val;
@@ -5842,7 +5859,7 @@ void LBM::fslbm_advance_surface(const int lev)
                     rho_iv += f_ro[nbx](iv, qq);
                 // For rho < 1: fall back to Körner reference (rho=1, same as original).
                 // For rho > 1: use actual density so feq_bq+feq_q ≥ f_pre[bq].
-                rho_iv = amrex::max(rho_iv, amrex::Real(1.0));
+                rho_iv = amrex::max(rho_iv, l_fslbm_rho_ref);
                 const amrex::Real spec_gas_const = l_R_u / l_m_bar;
                 const amrex::Real pxx = ux * ux + spec_gas_const * T_iv;
                 const amrex::Real pyy = uy * uy + spec_gas_const * T_iv;
@@ -5972,7 +5989,7 @@ void LBM::fslbm_advance_surface(const int lev)
                 amrex::Real rho = amrex::Real(0.0);
                 for (int q = 0; q < N_MICRO_STATES; ++q)
                     rho += f_ro_cur[nbx](iv, q);
-                rho = amrex::max(rho, amrex::Real(1.0e-4));
+                rho = amrex::max(rho, amrex::Real(1.0e-4) * l_fslbm_rho_ref);
                 const amrex::Real phi_new =
                     phi_arrs[nbx](iv, 0) + dm_arrs[nbx](iv, 0) / rho;
                 phi_arrs[nbx](iv, 0) =
@@ -6080,7 +6097,9 @@ void LBM::fslbm_advance_surface(const int lev)
                                 for (int q = 0; q < N_MICRO_STATES; ++q)
                                     rho_ivn += f_arrs[nbx](ivn, q);
                                 rho_ivn = amrex::max(rho_ivn, amrex::Real(1.0e-10));
-                                const amrex::Real inv_rho = amrex::Real(1.0) / rho_ivn;
+                                // Normalize to l_fslbm_rho_ref (not 1) so the
+                                // spawned cell enters streaming at the correct bulk density.
+                                const amrex::Real inv_rho = l_fslbm_rho_ref / rho_ivn;
                                 for (int q = 0; q < N_MICRO_STATES; ++q) {
                                     f_arrs[nbx](iv, q) = f_arrs[nbx](ivn, q) * inv_rho;
                                     g_arrs[nbx](iv, q) = g_arrs[nbx](ivn, q) * inv_rho;

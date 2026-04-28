@@ -450,6 +450,11 @@ private:
     amrex::Real m_free_surface_eps   = 0.0;   // interface half-width  (~1.5*dx, set by init)
     amrex::Real m_phi_M0             = 0.0;   // initial total Phi mass for mass redistribution
     amrex::Real m_phi_gamma_coeff    = 1.0;   // multiplier on gamma = gamma_coeff * |u|
+    // FSLBM reference density: read from ic_constant.density at startup.
+    // Used for ABB ρ₀, repair/spawn seeding (feq target), and repair threshold.
+    // Defaults to 1.0 (the conventional LBM reference) but scales correctly when
+    // the initial bulk density differs from 1.
+    amrex::Real m_fslbm_rho_ref      = 1.0;
 
     // Moving body parameters
     bool m_body_is_moving = false;
