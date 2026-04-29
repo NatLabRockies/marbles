@@ -819,6 +819,16 @@ void LBM::advance(
         }
 
         // Apply bubble body force to fluid distributions (He-Luo scheme)
+        // Diagnostic: print max force magnitude to catch anomalous deposits.
+        if (m_isteps[lev] < 200 || m_isteps[lev] % 100 == 0) {
+            const amrex::Real Fx_max = bubble_force.norm0(0);
+            const amrex::Real Fy_max = bubble_force.norm0(1);
+            const amrex::Real Fz_max = bubble_force.norm0(2);
+            amrex::Print() << "[bubble_force step=" << m_isteps[lev]
+                           << "] max|Fx|=" << Fx_max
+                           << "  max|Fy|=" << Fy_max
+                           << "  max|Fz|=" << Fz_max << "\n";
+        }
         apply_bubble_body_force(lev, bubble_force);
 
         // Apply O2 source to component-0 lattice
@@ -5267,6 +5277,13 @@ void LBM::apply_bubble_body_force(int lev, const amrex::MultiFab& force_mf)
             const amrex::Real ux1 = ux + Fx * dt * inv_rho;
             const amrex::Real uy1 = uy + Fy * dt * inv_rho;
             const amrex::Real uz1 = uz + Fz * dt * inv_rho;
+
+            // Safety guard: skip if the velocity perturbation is unphysically
+            // large (> 0.5 LB/step).  This should never trigger in a correct run;
+            // if it does it indicates a unit-conversion bug in the force deposition
+            // and is better treated as a NaN-guard than as a silent clamp.
+            const amrex::Real du2 = (ux1-ux)*(ux1-ux) + (uy1-uy)*(uy1-uy) + (uz1-uz)*(uz1-uz);
+            if (du2 > 0.25) { return; }  // |δu| > 0.5 — skip this cell
 
             // Extended stress tensor at shifted state
             // (kinematic u^2 changes; r_temperature and SGS D_CORR unchanged)

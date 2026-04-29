@@ -1012,19 +1012,35 @@ void BubbleManager::advance(
     compute_forces(macrodata, derived, geom);
 
     // ------------------------------------------------------------------
-    // 3. Velocity Verlet integration
+    // 3. Deposit two-way coupling body forces on fluid.
+    //    MUST happen BEFORE any Redistribute() call so that m_forces[]
+    //    remains indexed in the same particle-iteration order as step 2.
+    //    Redistribute (called below in Verlet, remove_exited_bubbles, and
+    //    do_breakup) may reorder particles within tiles, breaking the fi
+    //    index alignment if deposits were done after those calls.
+    // ------------------------------------------------------------------
+    deposit_fluid_forces(fluid_force_mf, geom);
+
+    // ------------------------------------------------------------------
+    // 4. Mass transfer O2 source + bubble shrinkage.
+    //    Also done before Redistribute for the same index-safety reason.
+    // ------------------------------------------------------------------
+    deposit_o2_sources(o2_src_mf, o2_conc_mf, derived, geom);
+
+    // ------------------------------------------------------------------
+    // 5. Velocity Verlet integration
     //    x(t+dt) = x(t) + v(t)*dt_phys + 0.5*a(t)*dt_phys²  [LB cells]
     //    v(t+dt) = v(t) + a(t)*dt_phys                       [m/s, SI]
     //    (Full 2nd-order Verlet; a from compute_forces above)
+    //    Redistribute after this call may reorder particle storage.
     // ------------------------------------------------------------------
     {
-        int fi = 0;
         for (int lev = 0; lev <= m_container.finestLevel(); ++lev) {
             for (auto& kv : m_container.GetParticles(lev)) {
                 auto& pbox = kv.second;
                 auto& aos  = pbox.GetArrayOfStructs();
                 for (auto& p : aos()) {
-                    if (!p.id().is_valid()) { ++fi; continue; }
+                    if (!p.id().is_valid()) { continue; }
 
                     const amrex::Real ax = p.rdata(BubbleIdx::AX);
                     const amrex::Real ay = p.rdata(BubbleIdx::AY);
@@ -1043,8 +1059,6 @@ void BubbleManager::advance(
                     p.rdata(BubbleIdx::VX) = vx + ax * dt_phys;
                     p.rdata(BubbleIdx::VY) = vy + ay * dt_phys;
                     p.rdata(BubbleIdx::VZ) = vz + az * dt_phys;
-
-                    ++fi;
                 }
             }
         }
@@ -1052,7 +1066,7 @@ void BubbleManager::advance(
     m_container.Redistribute();
 
     // ------------------------------------------------------------------
-    // 4. Remove bubbles that have crossed the free surface.
+    // 6. Remove bubbles that have crossed the free surface.
     //    When phi_mf is provided (Chiu & Lin phase-field active), use
     //    Φ < 0.5 at the bubble's cell as the exit criterion — consistent
     //    with the dynamic interface position.  Otherwise fall back to
@@ -1061,19 +1075,9 @@ void BubbleManager::advance(
     remove_exited_bubbles(geom, phi_mf);
 
     // ------------------------------------------------------------------
-    // 5. Breakup check at new positions
+    // 7. Breakup check at new positions
     // ------------------------------------------------------------------
     do_breakup(derived, geom);
-
-    // ------------------------------------------------------------------
-    // 6. Deposit two-way coupling body forces on fluid
-    // ------------------------------------------------------------------
-    deposit_fluid_forces(fluid_force_mf, geom);
-
-    // ------------------------------------------------------------------
-    // 7. Mass transfer O2 source + bubble shrinkage
-    // ------------------------------------------------------------------
-    deposit_o2_sources(o2_src_mf, o2_conc_mf, derived, geom);
 }
 
 // ============================================================================
