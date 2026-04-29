@@ -5745,6 +5745,52 @@ void LBM::fslbm_advance_surface(const int lev)
     m_g[lev].FillBoundary(Geom(lev).periodicity());
 
     // -----------------------------------------------------------------------
+    // Step 0b: Overshoot repair — reset any CELL_LIQUID or CELL_INTERFACE
+    // cell whose rho exceeds a large ceiling back to feq(rho_ref, 0, T_ref).
+    //
+    // Root cause: near the rotating impeller root, cells that transition
+    // rapidly between SOLID↔LIQUID can accumulate excess mass via the spill
+    // mechanism (which deposits f from newly-solid cells to fluid neighbors)
+    // or via trapped-bounce-back (all neighbors SOLID → all f reflects back,
+    // keeping the cell's rho locked at whatever large value was deposited).
+    // When the impeller eventually rotates away, the over-dense cell leaks
+    // its ∞ into newly-active LIQUID neighbors, cascading to blow-up.
+    //
+    // Ceiling: 5 × rho_ref.  Healthy bulk density is rho_ref ± O(Ma²), so
+    // values > 5×rho_ref are unambiguously pathological near the impeller.
+    // -----------------------------------------------------------------------
+    {
+        const amrex::Real rho_ceil = amrex::Real(5.0) * l_fslbm_rho_ref;
+        auto const& ct_ob   = m_cell_type[lev].const_arrays();
+        auto const& f_ob    = m_f[lev].arrays();
+        auto const& g_ob    = m_g[lev].arrays();
+        const auto& l_evs_ob     = evs;
+        const auto& l_weights_ob = weights;
+        const amrex::Real pdiag_ob = l_fslbm_pdiag_ref;
+        amrex::ParallelFor(
+            m_f[lev], m_f[lev].nGrowVect(),
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                const int ct = ct_ob[nbx](i, j, k, 0);
+                if (ct != CELL_INTERFACE && ct != CELL_LIQUID) { return; }
+                amrex::Real rho = amrex::Real(0.0);
+                for (int q = 0; q < N_MICRO_STATES; ++q) rho += f_ob[nbx](i, j, k, q);
+                // Also catches NaN (NaN comparisons are false, so !(rho <= rho_ceil) catches NaN too)
+                if (!(rho > rho_ceil)) { return; }
+                const amrex::RealVect zero_vel(AMREX_D_DECL(0, 0, 0));
+                for (int q = 0; q < N_MICRO_STATES; ++q) {
+                    const amrex::Real feq_val = set_extended_equilibrium_value(
+                        l_fslbm_rho_ref, zero_vel, pdiag_ob, pdiag_ob, pdiag_ob,
+                        l_mesh_speed, l_weights_ob[q], l_evs_ob[q]);
+                    f_ob[nbx](i, j, k, q) = feq_val;
+                    g_ob[nbx](i, j, k, q) = feq_val;
+                }
+            });
+        amrex::Gpu::synchronize();
+    }
+    m_f[lev].FillBoundary(Geom(lev).periodicity());
+    m_g[lev].FillBoundary(Geom(lev).periodicity());
+
+    // -----------------------------------------------------------------------
     // Allocate working storage
     // f_star     : post-stream PDFs
     // mass_flux  : mass increment Δm per interface cell
@@ -5926,6 +5972,10 @@ void LBM::fslbm_advance_surface(const int lev)
         amrex::Print() << "FSLBM rho step=" << m_isteps[0]
                        << " liq=[" << rho_diag.min(0) << "," << rho_diag.max(0) << "]"
                        << " ifc=[" << rho_diag.min(1) << "," << rho_diag.max(1) << "]\n";
+        if (rho_diag.max(0) > amrex::Real(2.0)) {
+            amrex::IntVect mx = rho_diag.maxIndex(0);
+            amrex::Print() << "  liq rho_max cell=" << mx << " step=" << m_isteps[0] << "\n";
+        }
         if (rho_diag.max(1) > amrex::Real(2.0)) {
             amrex::IntVect mx = rho_diag.maxIndex(1);
             amrex::Print() << "  ifc rho_max cell=" << mx << " step=" << m_isteps[0] << "\n";
