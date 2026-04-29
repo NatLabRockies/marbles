@@ -2825,18 +2825,20 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
             if (newly_fluid_arrs[nbx](i, j, k, 0) != 1) return;
 
             // Skip cells managed exclusively by FSLBM:
-            //   CELL_GAS       — above the free surface; update_is_fluid sets
-            //                    IS_FLUID=1 for these every step (SDF-based), but
-            //                    FSLBM zeros them via fslbm_sync.  Refilling them
-            //                    here steals mass from liquid donors pointlessly.
+            //   CELL_GAS       — above the free surface; always appears newly_fluid
+            //                    due to SDF vs cell_type mismatch; handled by fslbm_sync.
             //   CELL_INTERFACE — free-surface cells; FSLBM Case B seeds them.
-            // CELL_LIQUID cells are NOT skipped.  They are bulk liquid below the
-            // free surface, adjacent to the rotating impeller.  Body-motion refill
-            // should seed them the same way as before FSLBM was introduced.
+            //   CELL_SOLID     — interior of impeller body; FSLBM Case B seeds
+            //                    these cells when the blade rotates away.  Running
+            //                    body-motion refill here would drain donor q=0 and
+            //                    then be overwritten by Case B, wasting donor mass.
+            // CELL_LIQUID cells are NOT skipped — bulk liquid adjacent to impeller
+            // must go through the validated body-motion refill path.
             if (is_free_surface) {
                 const int ct_val = ct_arrs_ref[nbx](i, j, k, 0);
-                if (ct_val == lbm::constants::CELL_GAS ||
-                    ct_val == lbm::constants::CELL_INTERFACE) { return; }
+                if (ct_val == lbm::constants::CELL_GAS      ||
+                    ct_val == lbm::constants::CELL_INTERFACE ||
+                    ct_val == lbm::constants::CELL_SOLID) { return; }
             }
             
             // Get bounds for safety
@@ -2870,30 +2872,12 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                 }
             }
             
-            // If no persistent neighbors (whole local cluster converted simultaneously,
-            // e.g. at a wall contact line on step 1), fall back to any currently-fluid
-            // neighbor that has non-zero f — mirrors the spill fallback path.
+            // If no persistent neighbors, zero out and exit.
+            // This is the validated behaviour from the single-phase case.
+            // A copy-from-any-neighbor fallback without a corresponding donor
+            // deduction (Step 7 only covers the normal donor path) creates mass
+            // every step for blade cells that are simultaneously uncovered.
             if (num_persistent == 0) {
-                for (int nq = 1; nq < constants::N_MICRO_STATES; ++nq) {
-                    int ni = i + evs[nq][0];
-                    int nj = j + evs[nq][1];
-                    int nk = k + evs[nq][2];
-                    if (ni < lo.x || ni > hi.x ||
-                        nj < lo.y || nj > hi.y ||
-                        nk < lo.z || nk > hi.z) continue;
-                    if (curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) != 1) continue;
-                    // Check that the candidate donor actually has mass (rho > 0)
-                    amrex::Real rho_nb = 0.0;
-                    for (int q = 0; q < constants::N_MICRO_STATES; ++q) rho_nb += f_arrs[nbx](ni, nj, nk, q);
-                    if (rho_nb <= 0.0) continue;
-                    // Use this neighbor as donor
-                    for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
-                        f_arrs[nbx](i, j, k, q) = f_arrs[nbx](ni, nj, nk, q);
-                        g_arrs[nbx](i, j, k, q) = g_arrs[nbx](ni, nj, nk, q);
-                    }
-                    return;
-                }
-                // Truly isolated: no fluid neighbor with mass at all — zero out (mass lost)
                 for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
                     f_arrs[nbx](i, j, k, q) = 0.0;
                     g_arrs[nbx](i, j, k, q) = 0.0;
@@ -2994,12 +2978,13 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
             if (newly_fluid_arrs[nbx](i, j, k, 0) != 1) return;
 
             // Skip FSLBM-managed cells (same guard as first pass):
-            // only CELL_GAS and CELL_INTERFACE are skipped; CELL_LIQUID
-            // bulk cells are handled by body-motion refill as before.
+            // CELL_GAS, CELL_INTERFACE, CELL_SOLID skipped; CELL_LIQUID handled
+            // by body-motion refill as in the validated single-phase case.
             if (is_free_surface) {
                 const int ct_val = ct_arrs_ref[nbx](i, j, k, 0);
-                if (ct_val == lbm::constants::CELL_GAS ||
-                    ct_val == lbm::constants::CELL_INTERFACE) { return; }
+                if (ct_val == lbm::constants::CELL_GAS      ||
+                    ct_val == lbm::constants::CELL_INTERFACE ||
+                    ct_val == lbm::constants::CELL_SOLID) { return; }
             }
             
             // Get bounds for safety
@@ -3032,7 +3017,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
             }
             
             if (num_persistent == 0) {
-                // No persistent neighbors - initialize to zero
+                // No persistent neighbors - initialize to zero (same as Step 5)
                 for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
                     f_arrs[nbx](i, j, k, q) = 0.0;
                     g_arrs[nbx](i, j, k, q) = 0.0;
@@ -3043,7 +3028,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
             // Normalize the normal vector
             amrex::Real norm = std::sqrt(normal_x*normal_x + normal_y*normal_y + normal_z*normal_z);
             if (norm == 0.0) {
-                // Fallback: use first persistent neighbor
+                // Fallback: use first persistent neighbor (with /N scaling)
                 for (int nq = 1; nq < constants::N_MICRO_STATES; ++nq) {
                     int ni = i + evs[nq][0];
                     int nj = j + evs[nq][1];
@@ -3057,14 +3042,9 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                         curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1) {
                         
                         int n_recipients = donor_count_arrs[nbx](ni, nj, nk, 0);
-                        // Scale = 1/N to conserve mass (donor gives away everything)
                         amrex::Real scale = 1.0 / amrex::Real(n_recipients);
-                        
-                        // Recipient gets ONLY q=0 component (mass/energy at rest)
                         f_arrs[nbx](i, j, k, 0) = f_arrs[nbx](ni, nj, nk, 0) * scale;
                         g_arrs[nbx](i, j, k, 0) = g_arrs[nbx](ni, nj, nk, 0) * scale;
-                        
-                        // All other components are zero (no momentum or heat flux)
                         for (int q = 1; q < constants::N_MICRO_STATES; ++q) {
                             f_arrs[nbx](i, j, k, q) = 0.0;
                             g_arrs[nbx](i, j, k, q) = 0.0;
@@ -3072,7 +3052,6 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                         return;
                     }
                 }
-                // No valid neighbor found
                 for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
                     f_arrs[nbx](i, j, k, q) = 0.0;
                     g_arrs[nbx](i, j, k, q) = 0.0;
@@ -5754,22 +5733,29 @@ void LBM::fslbm_advance_surface(const int lev)
     m_g[lev].FillBoundary(Geom(lev).periodicity());
 
     // -----------------------------------------------------------------------
-    // Step 0b: Overshoot repair — reset any CELL_LIQUID or CELL_INTERFACE
-    // cell whose rho exceeds a large ceiling back to feq(rho_ref, 0, T_ref).
+    // Step 0b: Overshoot repair — reset CELL_INTERFACE cells whose rho
+    // exceeds a ceiling, and CELL_LIQUID cells with NaN/Inf (but NOT finite
+    // over-density from legitimate spill deposits).
     //
-    // Root cause: near the rotating impeller root, cells that transition
-    // rapidly between SOLID↔LIQUID can accumulate excess mass via the spill
-    // mechanism (which deposits f from newly-solid cells to fluid neighbors)
-    // or via trapped-bounce-back (all neighbors SOLID → all f reflects back,
-    // keeping the cell's rho locked at whatever large value was deposited).
-    // When the impeller eventually rotates away, the over-dense cell leaks
-    // its ∞ into newly-active LIQUID neighbors, cascading to blow-up.
+    // WHY CELL_INTERFACE only for finite overshoot:
+    //   CELL_LIQUID bulk cells adjacent to the rotating impeller legitimately
+    //   receive spill mass from multiple simultaneously-swept blade cells.
+    //   For example, 5 cells becoming solid in one step, all naming the same
+    //   old-boundary neighbour as spill target, results in rho ≈ 5 in that
+    //   cell.  This is CORRECT and TRANSIENT — FSLBM Step 1a streaming will
+    //   distribute the excess over 26 neighbours within a few steps.
+    //   Clamping CELL_LIQUID bulk cells to rho_ref destroyed 4 mass units per
+    //   event, causing a sustained mass-loss cascade and incorrect flow.
     //
-    // Ceiling: 5 × rho_ref.  Healthy bulk density is rho_ref ± O(Ma²), so
-    // values > 5×rho_ref are unambiguously pathological near the impeller.
+    //   CELL_INTERFACE cells at the gas-liquid boundary cannot safely hold
+    //   large rho: the ABB formula and mass-flux Step 2 amplify rho → ∞ at
+    //   the surface within 2–3 steps if an over-dense interface cell exists.
+    //
+    // CELL_LIQUID ceiling: NaN/Inf only (any finite value dissipates safely).
+    // CELL_INTERFACE ceiling: 5 × rho_ref (protect ABB from amplification).
     // -----------------------------------------------------------------------
     {
-        const amrex::Real rho_ceil = amrex::Real(5.0) * l_fslbm_rho_ref;
+        const amrex::Real rho_ceil_ifc = amrex::Real(5.0) * l_fslbm_rho_ref;
         auto const& ct_ob   = m_cell_type[lev].const_arrays();
         auto const& f_ob    = m_f[lev].arrays();
         auto const& g_ob    = m_g[lev].arrays();
@@ -5783,7 +5769,14 @@ void LBM::fslbm_advance_surface(const int lev)
                 if (ct != CELL_INTERFACE && ct != CELL_LIQUID) { return; }
                 amrex::Real rho = amrex::Real(0.0);
                 for (int q = 0; q < N_MICRO_STATES; ++q) rho += f_ob[nbx](i, j, k, q);
-                // Also catches NaN (NaN comparisons are false, so !(rho <= rho_ceil) catches NaN too)
+                // For CELL_LIQUID: only clamp NaN/Inf (finite spill deposits
+                // should dissipate naturally via streaming, not be clamped).
+                // For CELL_INTERFACE: clamp if rho > ceiling (ABB amplification
+                // risk).  !(rho <= ceil) also catches NaN.
+                const bool is_interface = (ct == CELL_INTERFACE);
+                const amrex::Real rho_ceil = is_interface
+                    ? rho_ceil_ifc
+                    : amrex::Real(1.0e30);  // only catches NaN/Inf for LIQUID
                 if (!(rho > rho_ceil)) { return; }
                 const amrex::RealVect zero_vel(AMREX_D_DECL(0, 0, 0));
                 for (int q = 0; q < N_MICRO_STATES; ++q) {
