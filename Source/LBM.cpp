@@ -2543,11 +2543,17 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                 // Only process cells that became solid AND are covered by EB
                 if (newly_solid_arrs[nbx](i, j, k, 0) != 1) return;
                 
-                // Skip FSLBM-managed cells (interface/liquid/gas) — their f is
-                // managed by fslbm_advance_surface, not by body-motion spill.
+                // Skip cells whose f is exclusively managed by FSLBM:
+                //   CELL_INTERFACE — free-surface cells managed by ABB/mass-flux
+                //   CELL_GAS       — above the free surface; f stays zero
+                // CELL_LIQUID cells (bulk liquid below the surface) are NOT
+                // skipped: they neighbour the rotating impeller and must be
+                // handled by the same validated body-motion spill path that
+                // worked before FSLBM was added.  Skipping them left their
+                // f unzeroed after becoming solid, which then got deposited
+                // by Case A without clearing, causing over-density accumulation.
                 const int ct_cell = ct_arrs_sp[nbx](i, j, k, 0);
                 if (ct_cell == lbm::constants::CELL_INTERFACE ||
-                    ct_cell == lbm::constants::CELL_LIQUID    ||
                     ct_cell == lbm::constants::CELL_GAS) { return; }
                 
                 amrex::Real frac = frac_arrs[nbx](i, j, k, 0);
@@ -2818,17 +2824,19 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
             // Only process newly fluid cells
             if (newly_fluid_arrs[nbx](i, j, k, 0) != 1) return;
 
-            // Skip FSLBM-managed cells: GAS cells above the free surface appear
-            // as "newly_fluid" every step because update_is_fluid (body-SDF based)
-            // sets IS_FLUID=1 for any cell inside the tank not covered by a body,
-            // while fslbm_sync set IS_FLUID=0 for CELL_GAS last step.  Running
-            // refill on them each step steals mass from liquid donors without
-            // putting it anywhere useful (Step 8 will zero these cells' later).
+            // Skip cells managed exclusively by FSLBM:
+            //   CELL_GAS       — above the free surface; update_is_fluid sets
+            //                    IS_FLUID=1 for these every step (SDF-based), but
+            //                    FSLBM zeros them via fslbm_sync.  Refilling them
+            //                    here steals mass from liquid donors pointlessly.
+            //   CELL_INTERFACE — free-surface cells; FSLBM Case B seeds them.
+            // CELL_LIQUID cells are NOT skipped.  They are bulk liquid below the
+            // free surface, adjacent to the rotating impeller.  Body-motion refill
+            // should seed them the same way as before FSLBM was introduced.
             if (is_free_surface) {
                 const int ct_val = ct_arrs_ref[nbx](i, j, k, 0);
                 if (ct_val == lbm::constants::CELL_GAS ||
-                    ct_val == lbm::constants::CELL_INTERFACE ||
-                    ct_val == lbm::constants::CELL_LIQUID) { return; }
+                    ct_val == lbm::constants::CELL_INTERFACE) { return; }
             }
             
             // Get bounds for safety
@@ -2985,12 +2993,13 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
             // Only process newly fluid cells
             if (newly_fluid_arrs[nbx](i, j, k, 0) != 1) return;
 
-            // Skip FSLBM-managed cells (same guard as first pass)
+            // Skip FSLBM-managed cells (same guard as first pass):
+            // only CELL_GAS and CELL_INTERFACE are skipped; CELL_LIQUID
+            // bulk cells are handled by body-motion refill as before.
             if (is_free_surface) {
                 const int ct_val = ct_arrs_ref[nbx](i, j, k, 0);
                 if (ct_val == lbm::constants::CELL_GAS ||
-                    ct_val == lbm::constants::CELL_INTERFACE ||
-                    ct_val == lbm::constants::CELL_LIQUID) { return; }
+                    ct_val == lbm::constants::CELL_INTERFACE) { return; }
             }
             
             // Get bounds for safety
