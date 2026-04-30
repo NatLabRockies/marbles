@@ -4002,27 +4002,41 @@ void LBM::write_plot_file()
     // ParaView's "AMReX/BoxLib Particles Reader" can load them alongside the
     // mesh fields.  The subdirectory will be plt00000/Bubbles/.
     if (m_enable_bubbles) {
-        // Convert diameter from SI [m] to LB cells for output so ParaView
-        // glyph scaling works directly (scale factor = 1.0).
-        const amrex::Real inv_dx = 1.0 / m_bubble_params.dx_phys;
+        // Before writing, convert rdata to more meaningful output units:
+        //   diameter : SI [m]  → LB cells  (scale factor 1.0 in ParaView)
+        //   n_o2     : mol     → C_g = n_O2/V_b [mol/m³]  (starts ~44.6, drops to 0)
+        const amrex::Real inv_dx  = 1.0 / m_bubble_params.dx_phys;
+        const amrex::Real pi_over_6 = amrex::Math::pi<amrex::Real>() / 6.0;
         auto& container = m_bubbles.container();
         for (int lev = 0; lev <= container.finestLevel(); ++lev) {
             for (auto& kv : container.GetParticles(lev)) {
                 for (auto& p : kv.second.GetArrayOfStructs()()) {
-                    if (p.id().is_valid())
-                        p.rdata(lbm::BubbleIdx::DIAMETER) *= inv_dx;
+                    if (!p.id().is_valid()) continue;
+                    const amrex::Real d  = p.rdata(lbm::BubbleIdx::DIAMETER);  // SI [m]
+                    const amrex::Real Vb = pi_over_6 * d * d * d;              // m³
+                    // n_o2 → C_g [mol/m³]
+                    p.rdata(lbm::BubbleIdx::N_O2) = (Vb > 0.0)
+                        ? p.rdata(lbm::BubbleIdx::N_O2) / Vb : 0.0;
+                    // diameter → LB cells
+                    p.rdata(lbm::BubbleIdx::DIAMETER) *= inv_dx;
                 }
             }
         }
         container.WritePlotFile(
             plotfilename, "Bubbles",
-            {"vx", "vy", "vz", "diameter", "n_o2", "ax", "ay", "az"});
-        // Restore SI diameter
+            {"vx", "vy", "vz", "diameter", "C_g_mol_m3", "ax", "ay", "az"});
+        // Restore original rdata (diameter → SI, C_g → n_o2)
+        const amrex::Real dx = m_bubble_params.dx_phys;
         for (int lev = 0; lev <= container.finestLevel(); ++lev) {
             for (auto& kv : container.GetParticles(lev)) {
                 for (auto& p : kv.second.GetArrayOfStructs()()) {
-                    if (p.id().is_valid())
-                        p.rdata(lbm::BubbleIdx::DIAMETER) *= m_bubble_params.dx_phys;
+                    if (!p.id().is_valid()) continue;
+                    // diameter: LB cells → SI [m]
+                    p.rdata(lbm::BubbleIdx::DIAMETER) *= dx;
+                    const amrex::Real d  = p.rdata(lbm::BubbleIdx::DIAMETER);
+                    const amrex::Real Vb = pi_over_6 * d * d * d;
+                    // C_g → n_o2 [mol]
+                    p.rdata(lbm::BubbleIdx::N_O2) *= Vb;
                 }
             }
         }
