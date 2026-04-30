@@ -240,6 +240,8 @@ void BubbleManager::read_params(BubbleParams& p)
         if      (bmodel == "equal" )   { p.breakup_model = 1; }
         else if (bmodel == "random")   { p.breakup_model = 2; }
         else                           { p.breakup_model = 0; } // triangle
+        pp.query("min_diameter", p.min_diameter);
+        pp.query("eps_max",      p.eps_max);
 
         pp.query("stats_int",  p.stats_int);
         pp.query("stats_file", p.stats_file);
@@ -520,18 +522,22 @@ void BubbleManager::do_breakup(
                 const amrex::Real eps_lb = trilinear_interp(
                     derived, constants::EPSILON_IDX,
                     geom, p.pos(0), p.pos(1), p.pos(2));
-                const amrex::Real eps_SI = std::max(eps_lb * eps_conv, 1.0e-10);
+                const amrex::Real eps_SI = std::min(
+                    std::max(eps_lb * eps_conv, 1.0e-10),
+                    m_params.eps_max);  // cap: prevent boundary-layer over-fragmentation
 
                 const amrex::Real d  = p.rdata(BubbleIdx::DIAMETER);
+
+                // Skip if bubble is already at or below minimum allowed size
+                if (d <= m_params.min_diameter) { continue; }
+
                 const amrex::Real D_e = std::pow(sigma / rho_f, 0.6) *
                                         std::pow(eps_SI, -0.4);
 
                 if (d <= D_e) { continue; }  // no breakup
 
-                // Mark this bubble as invalid; create two daughters
-                p.id() = -1;
-
-                // Daughter volume fraction fv ∈ (0, 0.5) using selected model
+                // Compute daughter sizes BEFORE invalidating the parent so we
+                // can skip gracefully if either daughter falls below min_diameter.
                 amrex::Real fv = 0.5;
                 if      (m_params.breakup_model == 0) {
                     // Triangle distribution: lower=0, upper=0.5, mode=0.2
@@ -558,6 +564,15 @@ void BubbleManager::do_breakup(
                 const amrex::Real d2 = std::cbrt(6.0 * V2 / amrex::Math::pi<amrex::Real>());
                 const amrex::Real n1 = p.rdata(BubbleIdx::N_O2) * fv;
                 const amrex::Real n2 = p.rdata(BubbleIdx::N_O2) * (1.0 - fv);
+
+                // Skip breakup if either daughter would fall below min_diameter.
+                // Prevents runaway fragmentation from near-wall epsilon spikes.
+                if (d1 < m_params.min_diameter || d2 < m_params.min_diameter) {
+                    continue;
+                }
+
+                // All checks passed — invalidate the parent and create two daughters
+                p.id() = -1;
 
                 // Create daughter bubbles (add to new_bubbles list)
                 for (int id = 0; id < 2; ++id) {

@@ -106,6 +106,8 @@ struct BubbleParams
     // Breakup
     bool        enable_breakup        = true;
     int         breakup_model         = 0;  ///< 0=triangle, 1=equal, 2=random
+    amrex::Real min_diameter          = 1.0e-4; ///< minimum bubble diameter [m]; daughters below this are not created
+    amrex::Real eps_max               = 5000.0; ///< cap on local eps_SI [m²/s³] fed to Hinze criterion; prevents boundary-layer over-fragmentation
 
     // Concentration reference: 1 LB_rho ≡ C_ref mol/m³ dissolved O2
     // Set by LBM after reading lbm.O2_concentration_reference.
