@@ -820,7 +820,7 @@ void LBM::advance(
 
         // Apply bubble body force to fluid distributions (He-Luo scheme)
         // Diagnostic: print max force magnitude to catch anomalous deposits.
-        if (m_isteps[lev] < 200 || m_isteps[lev] % 100 == 0) {
+        if (m_print_int > 0 && m_isteps[lev] % m_print_int == 0) {
             const amrex::Real Fx_max = bubble_force.norm0(0);
             const amrex::Real Fy_max = bubble_force.norm0(1);
             const amrex::Real Fz_max = bubble_force.norm0(2);
@@ -5971,16 +5971,18 @@ void LBM::fslbm_advance_surface(const int lev)
                 });
             amrex::Gpu::synchronize();
         }
-        amrex::Print() << "FSLBM rho step=" << m_isteps[0]
-                       << " liq=[" << rho_diag.min(0) << "," << rho_diag.max(0) << "]"
-                       << " ifc=[" << rho_diag.min(1) << "," << rho_diag.max(1) << "]\n";
-        if (rho_diag.max(0) > amrex::Real(2.0)) {
-            amrex::IntVect mx = rho_diag.maxIndex(0);
-            amrex::Print() << "  liq rho_max cell=" << mx << " step=" << m_isteps[0] << "\n";
-        }
-        if (rho_diag.max(1) > amrex::Real(2.0)) {
-            amrex::IntVect mx = rho_diag.maxIndex(1);
-            amrex::Print() << "  ifc rho_max cell=" << mx << " step=" << m_isteps[0] << "\n";
+        if (m_print_int > 0 && m_isteps[0] % m_print_int == 0) {
+            amrex::Print() << "FSLBM rho step=" << m_isteps[0]
+                           << " liq=[" << rho_diag.min(0) << "," << rho_diag.max(0) << "]"
+                           << " ifc=[" << rho_diag.min(1) << "," << rho_diag.max(1) << "]\n";
+            if (rho_diag.max(0) > amrex::Real(2.0)) {
+                amrex::IntVect mx = rho_diag.maxIndex(0);
+                amrex::Print() << "  liq rho_max cell=" << mx << " step=" << m_isteps[0] << "\n";
+            }
+            if (rho_diag.max(1) > amrex::Real(2.0)) {
+                amrex::IntVect mx = rho_diag.maxIndex(1);
+                amrex::Print() << "  ifc rho_max cell=" << mx << " step=" << m_isteps[0] << "\n";
+            }
         }
     }
     {
