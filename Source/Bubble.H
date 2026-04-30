@@ -285,7 +285,7 @@ private:
     amrex::Vector<BubbleForces> m_forces;
 
     // Fractional injection counter (accumulated between integer events)
-    amrex::Real m_injection_residual = 0.0;
+    amrex::Vector<amrex::Real> m_injection_residuals;  ///< per-hole fractional bubble accumulator
 
     bool       m_initialized            = false;
     bool       m_particles_ever_injected = false;  ///< true after first Redistribute with particles

@@ -262,7 +262,8 @@ void BubbleManager::initialize(
     m_container.resizeData();        // resizes m_particles to finestLevel()+1 levels
                                      // (Define() only sets GDB; constructors call
                                      //  resizeData() automatically but Define() does not)
-    m_injection_residual = 1.0;  // pre-seed: guarantee injection on first step
+    // Per-hole residuals, pre-seeded to 1.0 so the first call always injects.
+    m_injection_residuals.assign(m_params.n_sparger_points, 1.0);
     m_initialized = true;
     open_stats_file();
     amrex::Print() << "[BubbleManager] Initialized. n_sparger_points = "
@@ -282,30 +283,25 @@ void BubbleManager::inject_bubbles(amrex::Real dt_phys)
 
     const amrex::Real V0 = (amrex::Math::pi<amrex::Real>() / 6.0) *
                            std::pow(m_params.d0, 3.0); // m³ per initial bubble
-    // Bubbles per second (total, all holes)
-    const amrex::Real rate_total =
-        m_params.flow_rate / V0;
+    // Bubbles per second per hole
+    const amrex::Real rate_per_hole =
+        (m_params.flow_rate / V0) / m_params.n_sparger_points;
 
-    // Accumulate fractional bubbles.
-    // Pre-seeded to 1.0 in initialize() so the very first call always injects,
-    // ensuring the container tile map is populated before any particle iteration.
-    m_injection_residual += rate_total * dt_phys;
-    int n_inject = static_cast<int>(m_injection_residual);
-    m_injection_residual -= static_cast<amrex::Real>(n_inject);
+    // Each hole independently accumulates its fractional bubble count so that
+    // at low injection rates every hole fires equally rather than only hole 0.
+    bool any_inject = false;
+    for (int ih = 0; ih < m_params.n_sparger_points; ++ih) {
+        m_injection_residuals[ih] += rate_per_hole * dt_phys;
+        if (static_cast<int>(m_injection_residuals[ih]) > 0) any_inject = true;
+    }
 
-    if (n_inject == 0) {
+    if (!any_inject) {
         // Still call Redistribute to ensure tile map is populated even on steps
         // where no bubbles are injected (e.g. first step when residual < 1).
         if (!m_particles_ever_injected) { return; }  // m_particles not yet sized
         m_container.Redistribute();
         return;
     }
-
-    // Distribute injected bubbles across sparger holes
-
-    // Distribute injected bubbles across sparger holes
-    int per_hole = n_inject / m_params.n_sparger_points;
-    int remainder = n_inject % m_params.n_sparger_points;
 
     // All injection on rank 0; Redistribute() scatters to correct ranks
     if (amrex::ParallelDescriptor::IOProcessor()) {
@@ -317,7 +313,8 @@ void BubbleManager::inject_bubbles(amrex::Real dt_phys)
         const amrex::Real* phi  = geom.ProbHi();
 
         for (int ih = 0; ih < m_params.n_sparger_points; ++ih) {
-            int n_here = per_hole + (ih < remainder ? 1 : 0);
+            int n_here = static_cast<int>(m_injection_residuals[ih]);
+            m_injection_residuals[ih] -= static_cast<amrex::Real>(n_here);
             for (int ib = 0; ib < n_here; ++ib) {
                 BubbleParticle p;
                 p.id()  = BubbleParticle::NextID();
