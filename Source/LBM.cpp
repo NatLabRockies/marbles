@@ -4002,9 +4002,30 @@ void LBM::write_plot_file()
     // ParaView's "AMReX/BoxLib Particles Reader" can load them alongside the
     // mesh fields.  The subdirectory will be plt00000/Bubbles/.
     if (m_enable_bubbles) {
-        m_bubbles.container().WritePlotFile(
+        // Convert diameter from SI [m] to LB cells for output so ParaView
+        // glyph scaling works directly (scale factor = 1.0).
+        const amrex::Real inv_dx = 1.0 / m_bubble_params.dx_phys;
+        auto& container = m_bubbles.container();
+        for (int lev = 0; lev <= container.finestLevel(); ++lev) {
+            for (auto& kv : container.GetParticles(lev)) {
+                for (auto& p : kv.second.GetArrayOfStructs()()) {
+                    if (p.id().is_valid())
+                        p.rdata(lbm::BubbleIdx::DIAMETER) *= inv_dx;
+                }
+            }
+        }
+        container.WritePlotFile(
             plotfilename, "Bubbles",
             {"vx", "vy", "vz", "diameter", "n_o2", "ax", "ay", "az"});
+        // Restore SI diameter
+        for (int lev = 0; lev <= container.finestLevel(); ++lev) {
+            for (auto& kv : container.GetParticles(lev)) {
+                for (auto& p : kv.second.GetArrayOfStructs()()) {
+                    if (p.id().is_valid())
+                        p.rdata(lbm::BubbleIdx::DIAMETER) *= m_bubble_params.dx_phys;
+                }
+            }
+        }
     }
 }
 
