@@ -252,5 +252,5 @@ amrex.fpe_trap_overflow = 1
 # Bubble physics (apply_boyles_law, compute_forces, do_coalescence, etc.) iterate
 # over particle AoS on the CPU; with unmanaged device-only memory this segfaults.
 # Managed memory allows CPU access at the cost of some page-migration overhead.
-amrex.the_arena_is_managed = 0
+amrex.the_arena_is_managed = 1
 amrex.abort_on_out_of_gpu_memory = 1
