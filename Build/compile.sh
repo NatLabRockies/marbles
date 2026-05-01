@@ -10,13 +10,14 @@ module load craype-x86-milan
 echo "Loaded modules:"
 module list
 
-# AMReX: uses AMREX_HOME from your environment (set in ~/.bashrc or ~/.bash_profile).
-# To use the pinned submodule instead, run:
-#   git submodule update --init Submodules/AMReX
-# and temporarily set: export AMREX_HOME=$(realpath ../Submodules/AMReX)
+# AMReX: use the pinned submodule (Submodules/AMReX).
+# The GNUmakefile sets: AMREX_HOME ?= $(MARBLES_HOME)/Submodules/AMReX
+# Unsetting any env AMREX_HOME here ensures local builds use the submodule,
+# matching CI behavior exactly (GitHub Actions never has AMREX_HOME set).
+unset AMREX_HOME
 
 # Compile
 echo ""
-echo "Starting compilation with AMREX_HOME=${AMREX_HOME} ..."
+echo "Starting compilation with submodule AMReX ($(git -C ../Submodules/AMReX describe --tags 2>/dev/null)) ..."
 make -j8 USE_CUDA=TRUE
 
