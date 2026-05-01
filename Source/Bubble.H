@@ -56,10 +56,15 @@ namespace BubbleIdx {
     };
 } // namespace BubbleIdx
 
-// Traditional AoS ParticleContainer:
+// AoS ParticleContainer backed by pinned (host-pinned) memory so that all
+// CPU-side particle loops can access particle data without CUDA managed memory.
+// Pinned memory is DMA-accessible by the GPU and avoids the page-migration
+// overhead of managed memory while remaining directly readable/writable on CPU.
 //   NStructReal = 8  (vx, vy, vz, diameter, n_O2, ax, ay, az)
 //   NStructInt  = 0
-using BubbleContainer = amrex::ParticleContainer<BubbleIdx::NReal, 0>;
+using BubbleContainer = amrex::ParticleContainer<BubbleIdx::NReal, 0, 0, 0,
+                                                 amrex::PinnedArenaAllocator,
+                                                 amrex::DefaultAssignor>;
 using BubbleParticle  = typename BubbleContainer::ParticleType;
 
 // ---------------------------------------------------------------------------
