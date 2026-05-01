@@ -10,12 +10,10 @@ module load craype-x86-milan
 echo "Loaded modules:"
 module list
 
-# AMReX selection:
-#   - Installed 25.11 (Nov 2025, newer): /projects/hpcapps/nsawant/marblesLBM/amrex
-#   - Pinned submodule (Aug 2025): ../Submodules/AMReX  (run: git submodule update --init)
-# Unset AMREX_HOME to use the Makefile default (Submodules/AMReX if populated)
-# or set it explicitly to override.
-export AMREX_HOME=/projects/hpcapps/nsawant/marblesLBM/amrex
+# AMReX: uses AMREX_HOME from your environment (set in ~/.bashrc or ~/.bash_profile).
+# To use the pinned submodule instead, run:
+#   git submodule update --init Submodules/AMReX
+# and temporarily set: export AMREX_HOME=$(realpath ../Submodules/AMReX)
 
 # Compile
 echo ""
