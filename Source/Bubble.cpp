@@ -1013,7 +1013,53 @@ void BubbleManager::advance(
     const amrex::Real dx_phys = m_params.dx_phys;
 
     // ------------------------------------------------------------------
-    // 1. Boyle's law diameter correction
+    // 0. Copy device MultiFabs to host-pinned copies so that all CPU-side
+    //    particle loops (trilinear_interp, deposit_*) can read/write them
+    //    without requiring amrex.the_arena_is_managed=1.
+    //    Pinned memory is directly accessible from CPU and DMA-accessible
+    //    by the GPU, so the copies back to device are cheap H2D transfers.
+    // ------------------------------------------------------------------
+    auto make_pinned_copy = [](const amrex::MultiFab& src) {
+        amrex::MultiFab h(src.boxArray(), src.DistributionMap(),
+                          src.nComp(), 0,
+                          amrex::MFInfo().SetArena(amrex::The_Pinned_Arena()));
+        amrex::MultiFab::Copy(h, src, 0, 0, src.nComp(), 0);
+        return h;
+    };
+
+    // Input MFs: device → host-pinned
+    amrex::MultiFab macrodata_h = make_pinned_copy(macrodata);
+    amrex::MultiFab derived_h   = make_pinned_copy(derived);
+    amrex::MultiFab o2_conc_h   = make_pinned_copy(o2_conc_mf);
+    amrex::Gpu::streamSynchronize();  // ensure D2H copies are done before CPU reads
+
+    // Output MFs: zeroed host-pinned buffers (will be copied back to device)
+    amrex::MultiFab fluid_force_h(fluid_force_mf.boxArray(),
+                                  fluid_force_mf.DistributionMap(),
+                                  fluid_force_mf.nComp(), 0,
+                                  amrex::MFInfo().SetArena(amrex::The_Pinned_Arena()));
+    fluid_force_h.setVal(0.0);
+    amrex::MultiFab o2_src_h(o2_src_mf.boxArray(),
+                             o2_src_mf.DistributionMap(),
+                             o2_src_mf.nComp(), 0,
+                             amrex::MFInfo().SetArena(amrex::The_Pinned_Arena()));
+    o2_src_h.setVal(0.0);
+
+    // Optional phi_mf: copy if provided, otherwise leave null
+    std::unique_ptr<amrex::MultiFab> phi_h;
+    const amrex::MultiFab* phi_h_ptr = nullptr;
+    if (phi_mf != nullptr) {
+        phi_h = std::make_unique<amrex::MultiFab>(
+            phi_mf->boxArray(), phi_mf->DistributionMap(),
+            phi_mf->nComp(), 0,
+            amrex::MFInfo().SetArena(amrex::The_Pinned_Arena()));
+        amrex::MultiFab::Copy(*phi_h, *phi_mf, 0, 0, phi_mf->nComp(), 0);
+        amrex::Gpu::streamSynchronize();
+        phi_h_ptr = phi_h.get();
+    }
+
+    // ------------------------------------------------------------------
+    // 1. Boyle's law diameter correction (reads only particle data — pinned)
     // ------------------------------------------------------------------
     apply_boyles_law(geom);
 
@@ -1021,7 +1067,7 @@ void BubbleManager::advance(
     // 2. Compute forces at current positions (fills m_forces, stores 
     //    acceleration in particle rdata for velocity Verlet)
     // ------------------------------------------------------------------
-    compute_forces(macrodata, derived, geom);
+    compute_forces(macrodata_h, derived_h, geom);
 
     // ------------------------------------------------------------------
     // 3. Deposit two-way coupling body forces on fluid.
@@ -1031,13 +1077,13 @@ void BubbleManager::advance(
     //    do_breakup) may reorder particles within tiles, breaking the fi
     //    index alignment if deposits were done after those calls.
     // ------------------------------------------------------------------
-    deposit_fluid_forces(fluid_force_mf, geom);
+    deposit_fluid_forces(fluid_force_h, geom);
 
     // ------------------------------------------------------------------
     // 4. Mass transfer O2 source + bubble shrinkage.
     //    Also done before Redistribute for the same index-safety reason.
     // ------------------------------------------------------------------
-    deposit_o2_sources(o2_src_mf, o2_conc_mf, derived, geom);
+    deposit_o2_sources(o2_src_h, o2_conc_h, derived_h, geom);
 
     // ------------------------------------------------------------------
     // 5. Velocity Verlet integration
@@ -1084,12 +1130,23 @@ void BubbleManager::advance(
     //    with the dynamic interface position.  Otherwise fall back to
     //    the fixed free_surface_z z-coordinate threshold.
     // ------------------------------------------------------------------
-    remove_exited_bubbles(geom, phi_mf);
+    remove_exited_bubbles(geom, phi_h_ptr);
 
     // ------------------------------------------------------------------
     // 7. Breakup check at new positions
     // ------------------------------------------------------------------
-    do_breakup(derived, geom);
+    do_breakup(derived_h, geom);
+
+    // ------------------------------------------------------------------
+    // 8. Copy host-pinned output buffers back to device MultiFabs.
+    //    fluid_force_h and o2_src_h were filled by deposit_fluid_forces
+    //    and deposit_o2_sources above; add them into the device MFs so
+    //    the LBM step can apply them as body forces.
+    // ------------------------------------------------------------------
+    amrex::MultiFab::Add(fluid_force_mf, fluid_force_h, 0, 0,
+                         fluid_force_mf.nComp(), 0);
+    amrex::MultiFab::Add(o2_src_mf, o2_src_h, 0, 0,
+                         o2_src_mf.nComp(), 0);
 }
 
 // ============================================================================

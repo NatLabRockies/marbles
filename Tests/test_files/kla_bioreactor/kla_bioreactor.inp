@@ -249,8 +249,8 @@ amrex.fpe_trap_invalid = 1
 amrex.fpe_trap_zero = 1
 amrex.fpe_trap_overflow = 1
 # Managed (unified) memory required for CPU-side Lagrangian particle loops.
-# Bubble physics (apply_boyles_law, compute_forces, do_coalescence, etc.) iterate
-# over particle AoS on the CPU; with unmanaged device-only memory this segfaults.
-# Managed memory allows CPU access at the cost of some page-migration overhead.
-amrex.the_arena_is_managed = 1
+# Bubble physics runs on CPU with host-pinned copies of all MultiFabs (D2H before
+# advance, H2D after deposits).  Managed memory is therefore NOT required, and
+# disabling it avoids costly page-migration overhead on large GPU allocations.
+amrex.the_arena_is_managed = 0
 amrex.abort_on_out_of_gpu_memory = 1
