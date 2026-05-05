@@ -2467,6 +2467,8 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
     // Step 1: Fill boundary cells for all data we'll need
     m_is_fluid_fraction[lev].FillBoundary(Geom(lev).periodicity());
     m_is_fluid[lev].FillBoundary(Geom(lev).periodicity());
+    m_cell_type[lev].FillBoundary(Geom(lev).periodicity());
+    m_phi_fslbm[lev].FillBoundary(Geom(lev).periodicity());
     m_f[lev].FillBoundary(Geom(lev).periodicity());
     for (int i = 0; i < m_n_components; ++i) {
         m_component_lattices[i][lev].FillBoundary(Geom(lev).periodicity());
@@ -2543,18 +2545,14 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                 // Only process cells that became solid AND are covered by EB
                 if (newly_solid_arrs[nbx](i, j, k, 0) != 1) return;
                 
-                // Skip cells whose f is exclusively managed by FSLBM:
-                //   CELL_INTERFACE — free-surface cells managed by ABB/mass-flux
-                //   CELL_GAS       — above the free surface; f stays zero
-                // CELL_LIQUID cells (bulk liquid below the surface) are NOT
-                // skipped: they neighbour the rotating impeller and must be
-                // handled by the same validated body-motion spill path that
-                // worked before FSLBM was added.  Skipping them left their
-                // f unzeroed after becoming solid, which then got deposited
-                // by Case A without clearing, causing over-density accumulation.
+                // Skip cells whose f is zero by definition and have nothing to spill:
+                //   CELL_GAS — above the free surface; f is always zero.
+                // CELL_INTERFACE and CELL_LIQUID cells must be spilled: if the
+                // impeller blade sweeps into a free-surface or bulk-liquid cell,
+                // the f content must be redistributed to fluid neighbors instead
+                // of being silently discarded.
                 const int ct_cell = ct_arrs_sp[nbx](i, j, k, 0);
-                if (ct_cell == lbm::constants::CELL_INTERFACE ||
-                    ct_cell == lbm::constants::CELL_GAS) { return; }
+                if (ct_cell == lbm::constants::CELL_GAS) { return; }
                 
                 amrex::Real frac = frac_arrs[nbx](i, j, k, 0);
                 if (frac >= 1.0) return; // Not an EB cell
@@ -2801,9 +2799,11 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
     auto const& curr_fluid_arrs_outer = m_is_fluid[lev].const_arrays();
     auto const& ct_arrs_refill = m_cell_type[lev].const_arrays();
     const bool is_free_surface_refill = m_free_surface;
+    // phi arrays used to classify body-vacated CELL_SOLID cells: average neighbor
+    // phi > 0.5 → cell will become CELL_LIQUID (let refill seed it from neighbors);
+    // average phi <= 0.5 → cell will become CELL_GAS (Case B zeros f/g, skip here).
+    auto const& phi_fslbm_arrs_ref = m_phi_fslbm[lev].const_arrays();
     auto const& donor_count_arrs_outer = donor_recipient_count.arrays();
-    const stencil::Stencil stencil_refill5;
-    const auto& evs_refill5 = stencil_refill5.evs;
 
     {
         auto const& newly_fluid_arrs = newly_fluid_arrs_outer;
@@ -2813,6 +2813,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
         auto const& curr_fluid_arrs = curr_fluid_arrs_outer;
         auto const& donor_count_arrs = donor_recipient_count.arrays();
         auto const& ct_arrs_ref = ct_arrs_refill;
+        auto const& phi_arrs_ref = phi_fslbm_arrs_ref;
         const bool is_free_surface = is_free_surface_refill;
         
         const stencil::Stencil stencil;
@@ -2825,20 +2826,41 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
             if (newly_fluid_arrs[nbx](i, j, k, 0) != 1) return;
 
             // Skip cells managed exclusively by FSLBM:
-            //   CELL_GAS       — above the free surface; always appears newly_fluid
-            //                    due to SDF vs cell_type mismatch; handled by fslbm_sync.
-            //   CELL_INTERFACE — free-surface cells; FSLBM Case B seeds them.
-            //   CELL_SOLID     — interior of impeller body; FSLBM Case B seeds
-            //                    these cells when the blade rotates away.  Running
-            //                    body-motion refill here would drain donor q=0 and
-            //                    then be overwritten by Case B, wasting donor mass.
-            // CELL_LIQUID cells are NOT skipped — bulk liquid adjacent to impeller
-            // must go through the validated body-motion refill path.
+            //   CELL_GAS       — f=0 by definition; no liquid neighbors to donate from.
+            //   CELL_INTERFACE — managed by FSLBM ABB/mass-flux.
+            //   CELL_SOLID     — body just vacated this cell. Use neighbor-phi average
+            //     to predict the outcome of Case B in fslbm_advance_surface:
+            //       avg_phi > 0.5  → will become CELL_LIQUID: fall through to
+            //                        neighbor-interpolation refill.
+            //       avg_phi ≤ 0.5  → will become CELL_GAS: skip (Case B zeros f/g).
+            // CELL_LIQUID cells (bulk liquid adjacent to impeller) always refilled.
             if (is_free_surface) {
                 const int ct_val = ct_arrs_ref[nbx](i, j, k, 0);
-                if (ct_val == lbm::constants::CELL_GAS      ||
-                    ct_val == lbm::constants::CELL_INTERFACE ||
-                    ct_val == lbm::constants::CELL_SOLID) { return; }
+                if (ct_val == lbm::constants::CELL_GAS ||
+                    ct_val == lbm::constants::CELL_INTERFACE) { return; }
+                if (ct_val == lbm::constants::CELL_SOLID) {
+                    // Average phi of non-solid neighbors to predict Case B outcome.
+                    const auto& phi_arr = phi_arrs_ref[nbx];
+                    const auto lo = amrex::lbound(phi_arr);
+                    const auto hi = amrex::ubound(phi_arr);
+                    amrex::Real phi_sum = amrex::Real(0.0);
+                    int phi_cnt = 0;
+                    for (int nq = 1; nq < constants::N_MICRO_STATES; ++nq) {
+                        const int ni = i + evs[nq][0];
+                        const int nj = j + evs[nq][1];
+                        const int nk = k + evs[nq][2];
+                        if (ni < lo.x || ni > hi.x ||
+                            nj < lo.y || nj > hi.y ||
+                            nk < lo.z || nk > hi.z) { continue; }
+                        if (ct_arrs_ref[nbx](ni, nj, nk, 0) == lbm::constants::CELL_SOLID) { continue; }
+                        phi_sum += phi_arr(ni, nj, nk, 0);
+                        ++phi_cnt;
+                    }
+                    const amrex::Real avg_phi = (phi_cnt > 0)
+                        ? (phi_sum / phi_cnt) : amrex::Real(1.0);
+                    if (avg_phi <= amrex::Real(0.5)) { return; }  // will become CELL_GAS
+                    // avg_phi > 0.5: will become CELL_LIQUID — fall through to refill
+                }
             }
             
             // Get bounds for safety
@@ -5648,6 +5670,13 @@ void LBM::fslbm_advance_surface(const int lev)
     // Using mesh_speed² instead would seed at T = gamma * T_ref (~30 × T_ref
     // for this case), causing a transient temperature spike in newly activated cells.
     const amrex::Real l_fslbm_pdiag_ref = (m_R_u / m_m_bar) * m_initialTemperature;
+    // Thermal constants needed to build the correct g equilibrium when seeding
+    // newly-activated / repaired cells.  g_eq is NOT the same as f_eq — its
+    // zeroth moment is 2ρe = 2ρ·cv·T, not ρ.
+    const amrex::Real l_Rg     = m_R_u / m_m_bar;
+    const amrex::Real l_cv     = l_Rg / (m_adiabaticExponent - amrex::Real(1.0));
+    const amrex::Real l_T_ref  = m_initialTemperature;
+    const amrex::Real l_theta0 = stencil::Stencil::THETA0;
 
     // -----------------------------------------------------------------------
     // Body-motion sync: reconcile m_cell_type / m_is_fluid_fraction with the
@@ -5659,24 +5688,25 @@ void LBM::fslbm_advance_surface(const int lev)
     //    (5e-5) would re-activate it as fluid, overriding the body's IS_FLUID=0.
     //
     //  Case B — body swept OUT of a cell (ct=SOLID, IS_FLUID=1):
-    //    Reclassify from z_cell vs z_surf → CELL_LIQUID (φ=1) or CELL_GAS (φ=0).
-    //    Without this, the cell stays CELL_SOLID and never re-enters FSLBM streaming.
+    //    Reclassify by averaging φ of neighboring non-solid cells:
+    //      avg_phi > 0.5  →  CELL_LIQUID (φ=1); f/g already set by refill_and_spill.
+    //      avg_phi ≤ 0.5  →  CELL_GAS   (φ=0); zero f/g (gas cells have f=0).
+    //    This tracks the actual deformed interface, not the initial flat z_surf.
+    //    Step 0 repair below catches any CELL_LIQUID cell left at low rho.
     // -----------------------------------------------------------------------
     {
         const auto& geom_sync = Geom(lev);
-        const auto  plo_s     = geom_sync.ProbLoArray();
-        const auto  dx_s      = geom_sync.CellSizeArray();
-        const amrex::Real z_surf_s = m_free_surface_z;
-        const amrex::Real dz_s     = dx_s[2];
+
+        // Ensure phi ghost cells are up-to-date before reading neighbor values.
+        m_phi_fslbm[lev].FillBoundary(geom_sync.periodicity());
+        m_cell_type[lev].FillBoundary(geom_sync.periodicity());
 
         auto const& ct_s   = m_cell_type[lev].arrays();
         auto const& phi_s  = m_phi_fslbm[lev].arrays();
         auto const& isf_s  = m_is_fluid[lev].const_arrays();
         auto const& f_s    = m_f[lev].arrays();
         auto const& g_s    = m_g[lev].arrays();
-        auto const& md_s   = m_macrodata[lev].const_arrays();
-        const auto& l_evs     = evs;
-        const auto& l_weights = weights;
+        const auto& l_evs_ab  = evs;
 
         amrex::ParallelFor(
             m_cell_type[lev], m_cell_type[lev].nGrowVect(),
@@ -5691,28 +5721,47 @@ void LBM::fslbm_advance_surface(const int lev)
 
                 } else if (ct == CELL_SOLID && isf == 1) {
                     // Case B: body has swept out of this cell this step.
-                    // The f arrays contain stale bounce-back values from when
-                    // this cell was inside the solid — initialize to feq(rho=1,
-                    // u=0, T_ref) so that neighboring interface cells' mass-flux
-                    // pull (Step 2) does not read garbage f values.
-                    const amrex::Real z_c = plo_s[2] + (k + amrex::Real(0.5)) * dz_s;
-                    const int new_ct = (z_c < z_surf_s) ? CELL_LIQUID : CELL_GAS;
+                    // Classify as CELL_LIQUID or CELL_GAS by averaging phi of
+                    // neighboring non-solid cells.  This tracks the actual
+                    // (possibly deformed) interface position rather than the
+                    // initial flat z_surf threshold.
+                    //   avg_phi > 0.5  →  cell is inside the liquid bulk  → CELL_LIQUID
+                    //   avg_phi <= 0.5 →  cell is in / above the gas region → CELL_GAS
+                    // Fallback: no non-solid neighbors found → CELL_LIQUID (conservative:
+                    // Step 0 repair handles low-rho; FSLBM will re-classify next step).
+                    const auto& phi_arr = phi_s[nbx];
+                    const auto lo = amrex::lbound(phi_arr);
+                    const auto hi = amrex::ubound(phi_arr);
+                    amrex::Real phi_sum = amrex::Real(0.0);
+                    int phi_count = 0;
+                    for (int nq = 1; nq < N_MICRO_STATES; ++nq) {
+                        const int ni = i + l_evs_ab[nq][0];
+                        const int nj = j + l_evs_ab[nq][1];
+                        const int nk = k + l_evs_ab[nq][2];
+                        if (ni < lo.x || ni > hi.x ||
+                            nj < lo.y || nj > hi.y ||
+                            nk < lo.z || nk > hi.z) { continue; }
+                        const int nct = ct_s[nbx](ni, nj, nk, 0);
+                        if (nct == CELL_SOLID) { continue; }
+                        phi_sum += phi_arr(ni, nj, nk, 0);
+                        ++phi_count;
+                    }
+                    const amrex::Real avg_phi = (phi_count > 0)
+                        ? (phi_sum / phi_count) : amrex::Real(1.0);
+                    const int new_ct = (avg_phi > amrex::Real(0.5))
+                        ? CELL_LIQUID : CELL_GAS;
                     ct_s[nbx](i, j, k, 0)  = new_ct;
                     phi_s[nbx](i, j, k, 0) = (new_ct == CELL_LIQUID)
                         ? amrex::Real(1.0) : amrex::Real(0.0);
 
-                    // Seed f and g to feq(rho_ref, u=0, T_ref) using
-                    // pdiag = (R/m_bar)*T_ref (consistent with collide's p_by_rho)
-                    // to avoid T=0 from stale macrodata causing entropic H divergence.
-                    const amrex::Real pdiag   = l_fslbm_pdiag_ref;
-                    const amrex::RealVect zero_vel(AMREX_D_DECL(0, 0, 0));
-                    for (int q = 0; q < N_MICRO_STATES; ++q) {
-                        const amrex::Real feq_val = set_extended_equilibrium_value(
-                            l_fslbm_rho_ref, zero_vel, pdiag, pdiag, pdiag,
-                            l_mesh_speed, l_weights[q], l_evs[q]);
-                        f_s[nbx](i, j, k, q) = feq_val;
-                        g_s[nbx](i, j, k, q) = feq_val;  // seed g so T≠0 in collide
+                    if (new_ct == CELL_GAS) {
+                        for (int q = 0; q < N_MICRO_STATES; ++q) {
+                            f_s[nbx](i, j, k, q) = amrex::Real(0.0);
+                            g_s[nbx](i, j, k, q) = amrex::Real(0.0);
+                        }
                     }
+                    // CELL_LIQUID: f/g already set by refill_and_spill.
+                    // Step 0 repair catches any low-rho residual cases.
                 }
             });
         amrex::Gpu::synchronize();
@@ -5750,16 +5799,28 @@ void LBM::fslbm_advance_surface(const int lev)
                 amrex::Real rho = amrex::Real(0.0);
                 for (int q = 0; q < N_MICRO_STATES; ++q) rho += f_r[nbx](i, j, k, q);
                 if (rho >= rho_repair_threshold) { return; }
-                // Seed to feq(rho=1, u=0, T_ref) so the cell enters streaming
-                // with a physically valid, mass-conserving distribution.
-                // Also seed g so collide's entropic H-function sees T>0.
+                // Seed f to feq(rho_ref, u=0, T_ref) and g to the correct
+                // thermal equilibrium g_eq(2ρe_ref, u=0, T_ref).
                 const amrex::RealVect zero_vel(AMREX_D_DECL(0, 0, 0));
+                amrex::RealVect heat_flux_seed(AMREX_D_DECL(0, 0, 0));
+                const amrex::Real two_rho_e_rep = get_energy(
+                    l_T_ref, l_fslbm_rho_ref, 0.0, 0.0, 0.0, l_cv);
+                amrex::Real rxx_r(0), ryy_r(0), rzz_r(0),
+                            rxy_r(0), rxz_r(0), ryz_r(0);
+                get_equilibrium_moments(l_fslbm_rho_ref, zero_vel,
+                    two_rho_e_rep, l_cv, l_Rg, heat_flux_seed,
+                    rxx_r, ryy_r, rzz_r, rxy_r, rxz_r, ryz_r);
+                const amrex::GpuArray<amrex::Real, 6> hf_eq_rep = {
+                    rxx_r, ryy_r, rzz_r, rxy_r, rxz_r, ryz_r};
                 for (int q = 0; q < N_MICRO_STATES; ++q) {
                     const amrex::Real feq_val = set_extended_equilibrium_value(
                         l_fslbm_rho_ref, zero_vel, pdiag_repair, pdiag_repair, pdiag_repair,
                         l_mesh_speed, l_weights_r[q], l_evs_r[q]);
                     f_r[nbx](i, j, k, q) = feq_val;
-                    g_r[nbx](i, j, k, q) = feq_val;
+                    g_r[nbx](i, j, k, q) = set_extended_grad_expansion_generic(
+                        two_rho_e_rep, heat_flux_seed, hf_eq_rep,
+                        l_mesh_speed, l_weights_r[q], l_evs_r[q],
+                        l_theta0, zero_vel, amrex::Real(1.0));
                 }
             });
         amrex::Gpu::synchronize();
@@ -5814,12 +5875,25 @@ void LBM::fslbm_advance_surface(const int lev)
                     : amrex::Real(1.0e30);  // only catches NaN/Inf for LIQUID
                 if (!(rho > rho_ceil)) { return; }
                 const amrex::RealVect zero_vel(AMREX_D_DECL(0, 0, 0));
+                amrex::RealVect heat_flux_ob(AMREX_D_DECL(0, 0, 0));
+                const amrex::Real two_rho_e_ob = get_energy(
+                    l_T_ref, l_fslbm_rho_ref, 0.0, 0.0, 0.0, l_cv);
+                amrex::Real rxx_ob(0), ryy_ob(0), rzz_ob(0),
+                            rxy_ob(0), rxz_ob(0), ryz_ob(0);
+                get_equilibrium_moments(l_fslbm_rho_ref, zero_vel,
+                    two_rho_e_ob, l_cv, l_Rg, heat_flux_ob,
+                    rxx_ob, ryy_ob, rzz_ob, rxy_ob, rxz_ob, ryz_ob);
+                const amrex::GpuArray<amrex::Real, 6> hf_eq_ob = {
+                    rxx_ob, ryy_ob, rzz_ob, rxy_ob, rxz_ob, ryz_ob};
                 for (int q = 0; q < N_MICRO_STATES; ++q) {
                     const amrex::Real feq_val = set_extended_equilibrium_value(
                         l_fslbm_rho_ref, zero_vel, pdiag_ob, pdiag_ob, pdiag_ob,
                         l_mesh_speed, l_weights_ob[q], l_evs_ob[q]);
                     f_ob[nbx](i, j, k, q) = feq_val;
-                    g_ob[nbx](i, j, k, q) = feq_val;
+                    g_ob[nbx](i, j, k, q) = set_extended_grad_expansion_generic(
+                        two_rho_e_ob, heat_flux_ob, hf_eq_ob,
+                        l_mesh_speed, l_weights_ob[q], l_evs_ob[q],
+                        l_theta0, zero_vel, amrex::Real(1.0));
                 }
             });
         amrex::Gpu::synchronize();
