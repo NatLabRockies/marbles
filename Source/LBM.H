@@ -460,6 +460,11 @@ private:
     // Default 0 = flat interface (no Laplace pressure).
     // Set via lbm.fslbm_sigma in the input file.
     amrex::Real m_fslbm_sigma        = 0.0;
+    // Static contact angle for all solid walls [degrees].
+    // 90 = neutral wetting (default, same as original Körner model).
+    // < 90 = hydrophilic  ;  > 90 = hydrophobic.
+    // Set via lbm.fslbm_contact_angle in the input file.
+    amrex::Real m_fslbm_contact_angle_deg = 90.0;
 
     // Moving body parameters
     bool m_body_is_moving = false;

@@ -400,13 +400,17 @@ void LBM::read_parameters()
             // bulk density rather than assuming ρ = 1.
             amrex::ParmParse ppic("ic_constant");
             ppic.query("density", m_fslbm_rho_ref);
-            pp.query("fslbm_sigma",  m_fslbm_sigma);
+            pp.query("fslbm_sigma",          m_fslbm_sigma);
+            pp.query("fslbm_contact_angle",  m_fslbm_contact_angle_deg);
 
             amrex::Print() << "\n=== Free Surface Configuration (FSLBM) ===" << std::endl;
             amrex::Print() << "  Interface z (LB cells)   : " << m_free_surface_z << std::endl;
             amrex::Print() << "  Reference density ρ_ref  : " << m_fslbm_rho_ref << std::endl;
             amrex::Print() << "  Surface tension σ (LB)   : " << m_fslbm_sigma
                            << (m_fslbm_sigma == 0.0 ? "  (flat interface)" : "") << std::endl;
+            amrex::Print() << "  Contact angle θ (deg)    : " << m_fslbm_contact_angle_deg
+                           << (std::abs(m_fslbm_contact_angle_deg - 90.0) < 0.01 ? "  (neutral wetting)" : "")
+                           << std::endl;
         }
     }
 
@@ -5682,7 +5686,12 @@ void LBM::fslbm_advance_surface(const int lev)
     const amrex::Real l_theta0 = stencil::Stencil::THETA0;
     // Surface tension + Laplace-pressure density correction for ABB BC.
     // Δρ_G = -2*sigma*kappa / (Rg * T_interface); when sigma=0 this is zero.
-    const amrex::Real l_sigma      = m_fslbm_sigma;
+    const amrex::Real l_sigma              = m_fslbm_sigma;
+    // Contact angle θ_W: cos(θ) used as ghost-phi modifier for solid neighbors.
+    // φ_ghost = φ_fluid + cos(θ) * |∇_tangential φ|
+    // θ=90° → cos=0 → φ_ghost = φ_fluid (neutral wetting, original Körner).
+    const amrex::Real l_cos_contact_angle  =
+        std::cos(m_fslbm_contact_angle_deg * amrex::Real(M_PI) / amrex::Real(180.0));
 
     // -----------------------------------------------------------------------
     // Body-motion sync: reconcile m_cell_type / m_is_fluid_fraction with the
@@ -6000,10 +6009,28 @@ void LBM::fslbm_advance_surface(const int lev)
             [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
                 if (ct_nh[nbx](i, j, k, 0) == CELL_SOLID) { return; }
                 const amrex::Real phi = phi_arr[nbx](i, j, k, 0);
-                // Wall correction: solid neighbor → use current cell's φ
-                auto phi_w = [&](int ii, int jj, int kk) -> amrex::Real {
+                // Helper: phi of neighbor using current-cell phi for SOLID (90° base)
+                auto pf = [&](int ii, int jj, int kk) -> amrex::Real {
                     return (ct_nh[nbx](ii, jj, kk, 0) == CELL_SOLID)
                         ? phi : phi_arr[nbx](ii, jj, kk, 0);
+                };
+                // Pre-compute tangential gradients (using 90° ghost for any solid nbr)
+                const amrex::Real gx0 = amrex::Real(0.5) * (pf(i+1,j,k) - pf(i-1,j,k));
+                const amrex::Real gy0 = amrex::Real(0.5) * (pf(i,j+1,k) - pf(i,j-1,k));
+                const amrex::Real gz0 = amrex::Real(0.5) * (pf(i,j,k+1) - pf(i,j,k-1));
+                // Wall correction with contact angle θ: for solid in direction (di,dj,dk),
+                // φ_ghost = φ + cos(θ) * |∇_tangential φ|.
+                // At θ=90°: cos=0 → φ_ghost = φ  (neutral wetting, original Körner).
+                auto phi_w = [&](int ii, int jj, int kk) -> amrex::Real {
+                    if (ct_nh[nbx](ii, jj, kk, 0) != CELL_SOLID) {
+                        return phi_arr[nbx](ii, jj, kk, 0);
+                    }
+                    int di = ii - i, dj = jj - j, dk = kk - k;
+                    amrex::Real gt;
+                    if      (di != 0) { gt = std::sqrt(gy0*gy0 + gz0*gz0); }
+                    else if (dj != 0) { gt = std::sqrt(gx0*gx0 + gz0*gz0); }
+                    else              { gt = std::sqrt(gx0*gx0 + gy0*gy0); }
+                    return phi + l_cos_contact_angle * gt;
                 };
                 const amrex::Real gpx = amrex::Real(0.5) * (phi_w(i+1,j,k) - phi_w(i-1,j,k));
                 const amrex::Real gpy = amrex::Real(0.5) * (phi_w(i,j+1,k) - phi_w(i,j-1,k));
