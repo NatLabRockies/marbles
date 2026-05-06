@@ -455,6 +455,11 @@ private:
     // Defaults to 1.0 (the conventional LBM reference) but scales correctly when
     // the initial bulk density differs from 1.
     amrex::Real m_fslbm_rho_ref      = 1.0;
+    // Surface tension in LB units for the ABB gas-pressure BC.
+    // p_G = p_atm - 2*sigma*kappa;  rho_G = p_G / (Rg*T_interface).
+    // Default 0 = flat interface (no Laplace pressure).
+    // Set via lbm.fslbm_sigma in the input file.
+    amrex::Real m_fslbm_sigma        = 0.0;
 
     // Moving body parameters
     bool m_body_is_moving = false;

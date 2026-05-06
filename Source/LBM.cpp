@@ -400,10 +400,13 @@ void LBM::read_parameters()
             // bulk density rather than assuming ρ = 1.
             amrex::ParmParse ppic("ic_constant");
             ppic.query("density", m_fslbm_rho_ref);
+            pp.query("fslbm_sigma",  m_fslbm_sigma);
 
             amrex::Print() << "\n=== Free Surface Configuration (FSLBM) ===" << std::endl;
             amrex::Print() << "  Interface z (LB cells)   : " << m_free_surface_z << std::endl;
             amrex::Print() << "  Reference density ρ_ref  : " << m_fslbm_rho_ref << std::endl;
+            amrex::Print() << "  Surface tension σ (LB)   : " << m_fslbm_sigma
+                           << (m_fslbm_sigma == 0.0 ? "  (flat interface)" : "") << std::endl;
         }
     }
 
@@ -5677,6 +5680,9 @@ void LBM::fslbm_advance_surface(const int lev)
     const amrex::Real l_cv     = l_Rg / (m_adiabaticExponent - amrex::Real(1.0));
     const amrex::Real l_T_ref  = m_initialTemperature;
     const amrex::Real l_theta0 = stencil::Stencil::THETA0;
+    // Surface tension + Laplace-pressure density correction for ABB BC.
+    // Δρ_G = -2*sigma*kappa / (Rg * T_interface); when sigma=0 this is zero.
+    const amrex::Real l_sigma      = m_fslbm_sigma;
 
     // -----------------------------------------------------------------------
     // Body-motion sync: reconcile m_cell_type / m_is_fluid_fraction with the
@@ -5969,6 +5975,84 @@ void LBM::fslbm_advance_surface(const int lev)
     }
 
     // -----------------------------------------------------------------------
+    // Pre-Step-1b: Interface normals and curvature for gas-pressure ABB BC.
+    //
+    // Pass 1 — unit normal n̂ = ∇φ / |∇φ|  (1 ghost layer, FillBoundary'd).
+    //   Wall correction (Donath [52]): solid neighbor → substitute current
+    //   cell's φ, enforcing a 90° contact angle.  This prevents the interface
+    //   normal from being dragged toward the wall when the surface touches it,
+    //   which was the cause of instability when the interface hit the tank wall.
+    //
+    // Pass 2 — curvature  κ = −∇·n̂  (central differences, same wall correction
+    //   for n̂ at solid neighbors).  Only computed for CELL_INTERFACE cells.
+    //   In LB units Δx=1, so no division by dx is needed.
+    // -----------------------------------------------------------------------
+    amrex::MultiFab nhat_mf(boxArray(lev), DistributionMap(lev), 3, 1,
+                             amrex::MFInfo(), *(m_factory[lev]));
+    nhat_mf.setVal(0.0);
+    {
+        const amrex::Real nhat_reg = 1.0e-8;
+        auto const& nh_w    = nhat_mf.arrays();
+        auto const& phi_arr = m_phi_fslbm[lev].const_arrays();
+        auto const& ct_nh   = m_cell_type[lev].const_arrays();
+        amrex::ParallelFor(
+            nhat_mf,
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                if (ct_nh[nbx](i, j, k, 0) == CELL_SOLID) { return; }
+                const amrex::Real phi = phi_arr[nbx](i, j, k, 0);
+                // Wall correction: solid neighbor → use current cell's φ
+                auto phi_w = [&](int ii, int jj, int kk) -> amrex::Real {
+                    return (ct_nh[nbx](ii, jj, kk, 0) == CELL_SOLID)
+                        ? phi : phi_arr[nbx](ii, jj, kk, 0);
+                };
+                const amrex::Real gpx = amrex::Real(0.5) * (phi_w(i+1,j,k) - phi_w(i-1,j,k));
+                const amrex::Real gpy = amrex::Real(0.5) * (phi_w(i,j+1,k) - phi_w(i,j-1,k));
+                const amrex::Real gpz = amrex::Real(0.5) * (phi_w(i,j,k+1) - phi_w(i,j,k-1));
+                const amrex::Real mag     = std::sqrt(gpx*gpx + gpy*gpy + gpz*gpz);
+                const amrex::Real inv_mag = amrex::Real(1.0) / amrex::max(mag, nhat_reg);
+                nh_w[nbx](i, j, k, 0) = gpx * inv_mag;
+                nh_w[nbx](i, j, k, 1) = gpy * inv_mag;
+                nh_w[nbx](i, j, k, 2) = gpz * inv_mag;
+            });
+        amrex::Gpu::synchronize();
+    }
+    nhat_mf.FillBoundary(Geom(lev).periodicity());
+
+    amrex::MultiFab kappa_mf(boxArray(lev), DistributionMap(lev), 1, 1,
+                              amrex::MFInfo(), *(m_factory[lev]));
+    kappa_mf.setVal(0.0);
+    {
+        auto const& kap_w  = kappa_mf.arrays();
+        auto const& nh_ro  = nhat_mf.const_arrays();
+        auto const& ct_k   = m_cell_type[lev].const_arrays();
+        amrex::ParallelFor(
+            kappa_mf,
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                if (ct_k[nbx](i, j, k, 0) != CELL_INTERFACE) { return; }
+                // Wall correction: solid neighbor → use current cell's n̂ component
+                auto nx_w = [&](int ii, int jj, int kk) -> amrex::Real {
+                    return (ct_k[nbx](ii,jj,kk,0) == CELL_SOLID)
+                        ? nh_ro[nbx](i,j,k,0) : nh_ro[nbx](ii,jj,kk,0);
+                };
+                auto ny_w = [&](int ii, int jj, int kk) -> amrex::Real {
+                    return (ct_k[nbx](ii,jj,kk,0) == CELL_SOLID)
+                        ? nh_ro[nbx](i,j,k,1) : nh_ro[nbx](ii,jj,kk,1);
+                };
+                auto nz_w = [&](int ii, int jj, int kk) -> amrex::Real {
+                    return (ct_k[nbx](ii,jj,kk,0) == CELL_SOLID)
+                        ? nh_ro[nbx](i,j,k,2) : nh_ro[nbx](ii,jj,kk,2);
+                };
+                const amrex::Real div_n =
+                    amrex::Real(0.5) * (nx_w(i+1,j,k) - nx_w(i-1,j,k))
+                  + amrex::Real(0.5) * (ny_w(i,j+1,k) - ny_w(i,j-1,k))
+                  + amrex::Real(0.5) * (nz_w(i,j,k+1) - nz_w(i,j,k-1));
+                kap_w[nbx](i, j, k, 0) = -div_n;  // κ = −∇·n̂
+            });
+        amrex::Gpu::synchronize();
+    }
+    kappa_mf.FillBoundary(Geom(lev).periodicity());
+
+    // -----------------------------------------------------------------------
     // Step 1b: Pull ABB for missing-from-gas incoming populations.
     //
     // For each INTERFACE cell iv, for each direction q where the source
@@ -5988,6 +6072,7 @@ void LBM::fslbm_advance_surface(const int lev)
         auto const& f_ro    = m_f[lev].const_arrays();
         auto const& ct_arrs = m_cell_type[lev].const_arrays();
         auto const& md_arrs = m_macrodata[lev].const_arrays();
+        auto const& kap_arr = kappa_mf.const_arrays();
 
         amrex::ParallelFor(
             m_f[lev], m_f[lev].nGrowVect(), N_MICRO_STATES,
@@ -6013,40 +6098,47 @@ void LBM::fslbm_advance_surface(const int lev)
                 // Only apply if the source neighbor is GAS
                 if (ct_arrs[nbx](src, 0) != CELL_GAS) { return; }
 
-                // ABB: f_star[iv][q] = f_eq_bq(rho_iv,u,T) + f_eq_q(rho_iv,u,T) - f_pre[iv][bq]
-                //
-                // Körner 2005 Eq.7 uses the LOCAL density of the interface cell.
-                // Using rho=1 (gas reference) instead causes f_star[q] < 0 when the
-                // cell's actual rho > 1 (driven by impeller flow), because
-                // f_pre[bq] ≈ feq_bq(rho_actual) > feq_bq(1) + feq_q(1) for rho_actual > 1.
-                // Compute rho_iv from Σf_pre; clamp from below to 1.0 (standard Körner
-                // reference) so that cells with rho < 1 use the original safe formula
-                // while cells with rho > 1 use their actual density.
                 const amrex::Real ux = md_arrs[nbx](iv, VELX_IDX);
                 const amrex::Real uy = md_arrs[nbx](iv, VELY_IDX);
                 const amrex::Real uz = md_arrs[nbx](iv, VELZ_IDX);
                 const amrex::RealVect vel(AMREX_D_DECL(ux, uy, uz));
                 const amrex::Real T_iv =
                     amrex::max(md_arrs[nbx](iv, TEMPERATURE_IDX), amrex::Real(1.0e-10));
+
+                // Gas-side density for ABB (Schwarzmeier 2023 Eq.11-14,
+                // thermal extension: ρ_G = p_G / (R_g T_interface)).
+                //
+                // Base (old Körner stability clamp): rho_iv = max(Σf_iv, rho_ref).
+                // This guarantees feq_bq + feq_q ≥ f_pre[bq] when the impeller
+                // drives ρ_iv > ρ_ref near the interface.
+                //
+                // Laplace correction (σ > 0): Δρ_G = -2σκ / (Rg·T_iv).
+                //   κ > 0 (concave toward gas) → Δρ < 0 → lower gas pressure.
+                //   κ < 0 (convex toward gas)  → Δρ > 0 → higher gas pressure.
+                // When σ = 0: Δρ = 0 → rho_G = rho_iv = EXACT old behaviour,
+                // regardless of local temperature T_iv.
+                //
+                // Wall-corrected κ (computed above) prevents instability when
+                // the interface contacts a solid wall (Donath [52]).
                 amrex::Real rho_iv = amrex::Real(0.0);
                 for (int qq = 0; qq < N_MICRO_STATES; ++qq)
                     rho_iv += f_ro[nbx](iv, qq);
-                // For rho < 1: fall back to Körner reference (rho=1, same as original).
-                // For rho > 1: use actual density so feq_bq+feq_q ≥ f_pre[bq].
                 rho_iv = amrex::max(rho_iv, l_fslbm_rho_ref);
-                const amrex::Real spec_gas_const = l_R_u / l_m_bar;
-                const amrex::Real pxx = ux * ux + spec_gas_const * T_iv;
-                const amrex::Real pyy = uy * uy + spec_gas_const * T_iv;
-                const amrex::Real pzz = uz * uz + spec_gas_const * T_iv;
+                const amrex::Real kappa_iv = kap_arr[nbx](iv, 0);
+                const amrex::Real delta_rho_laplace =
+                    -amrex::Real(2.0) * l_sigma * kappa_iv / (l_Rg * T_iv);
+                const amrex::Real rho_G = amrex::max(
+                    rho_iv + delta_rho_laplace,
+                    l_fslbm_rho_ref * amrex::Real(1.0e-3));
+
+                const amrex::Real pxx = ux * ux + l_Rg * T_iv;
+                const amrex::Real pyy = uy * uy + l_Rg * T_iv;
+                const amrex::Real pzz = uz * uz + l_Rg * T_iv;
                 const amrex::Real feq_q  = set_extended_equilibrium_value(
-                    rho_iv, vel, pxx, pyy, pzz, l_mesh_speed, weights[q],  evs[q]);
+                    rho_G, vel, pxx, pyy, pzz, l_mesh_speed, weights[q],  evs[q]);
                 const amrex::Real feq_bq = set_extended_equilibrium_value(
-                    rho_iv, vel, pxx, pyy, pzz, l_mesh_speed, weights[bq], evs[bq]);
-                // f_pre[iv][bq] is the pre-stream outgoing toward gas (read-only)
-                // Clamp to 0: LBM populations must be non-negative; the ABB
-                // formula can produce f<0 when f_pre[bq] > feq_bq+feq_q due to
-                // non-equilibrium stress.  Negative populations compound each step
-                // through collide (feq(rho<0) < 0) leading to exponential blow-up.
+                    rho_G, vel, pxx, pyy, pzz, l_mesh_speed, weights[bq], evs[bq]);
+                // Clamp to 0: ABB can in principle produce f<0 for large non-eq stress.
                 fs_w[nbx](iv, q) = amrex::max(
                     amrex::Real(0.0), feq_bq + feq_q - f_ro[nbx](iv, bq));
             });

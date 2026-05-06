@@ -126,6 +126,12 @@ lbm.body_is_isothermal = 0
 lbm.free_surface       = 1
 lbm.free_surface_z     = 70.0   # LB cell z-coordinate of the gas-liquid interface
 lbm.free_surface_gamma = 1.0    # multiplier: actual gamma = gamma_coeff * |u|
+# Surface tension (Laplace pressure ABB BC, Schwarzmeier 2023 Eq.11-14).
+# σ_LB = σ_phys * dt² / (ρ_phys * dx³)
+#       = 0.072 * (1.19365e-5)² / (1000 * (1e-3)³) ≈ 1.026e-5
+# Contact angle is currently fixed at 90° (neutral wetting, Donath [52] correction).
+# Bo ≈ 4400, We_tip ≈ 600,000 → surface tension negligible at tank scale (correct).
+lbm.fslbm_sigma        = 1.026e-5
 
 # ---------------------------------------------------------------
 # Bubble module
