@@ -979,13 +979,23 @@ void BubbleManager::deposit_o2_sources(
     }
 
     // Pass 2: deposit into o2_src_mf (MFIter outer loop)
+    amrex::Real dep_max = 0.0;
     for (amrex::MFIter mfi(o2_src_mf); mfi.isValid(); ++mfi) {
         const amrex::Box& bx = mfi.validbox();
         auto arr = o2_src_mf.array(mfi);
         for (const auto& d : deps) {
             if (bx.contains(amrex::IntVect(AMREX_D_DECL(d.ci, d.cj, d.ck)))) {
                 arr(d.ci, d.cj, d.ck, 0) += d.src;
+                dep_max = std::max(dep_max, std::abs(d.src));
             }
+        }
+    }
+    // Diagnostic: print deposit summary (controlled by a local print interval)
+    {
+        static int dbg_ctr = 0;
+        if (++dbg_ctr % 800 == 1) {
+            amrex::Print() << "[O2_deposit] n_deps=" << deps.size()
+                           << "  max_src_rate=" << dep_max << " mol/(m3*s)\n";
         }
     }
 

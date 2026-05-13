@@ -1,3 +1,5 @@
+#include <fstream>
+#include <iomanip>
 #include <memory>
 #include <AMReX_Parser.H>
 
@@ -804,19 +806,34 @@ void LBM::advance(
             amrex::Abort("lbm.enable_bubbles = 1 requires lbm.n_components >= 1 "
                          "(component 0 = dissolved O2).");
         }
-        const amrex::MultiFab& o2_conc = m_component_lattices[0][lev];
+
+        // Precompute macroscopic O2 density (sum over all N_MICRO_STATES populations)
+        // so that BubbleManager::deposit_o2_sources can interpolate the correct C_f.
+        // BUG FIX: previously passed m_component_lattices[0][lev] directly and
+        // trilinear_interp used comp=0 (q=0 rest population only, ≈ w_0 × rho_O2 ≈ rho_O2/3),
+        // underestimating C_f by ~3× and overestimating the driving force.
+        // Use MultiFab::Add in a loop to avoid __device__ lambdas in a private method.
+        amrex::MultiFab rho_o2(
+            m_f[lev].boxArray(), m_f[lev].DistributionMap(), 1, 0);
+        rho_o2.setVal(0.0);
+        for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+            amrex::MultiFab::Add(rho_o2, m_component_lattices[0][lev], q, 0, 1, 0);
+        }
 
         // Advance bubbles: forces, Verlet integration, mass transfer
         m_bubbles.advance(
             dt_lev,
             m_macrodata[lev],
             m_derived[lev],
-            o2_conc,
+            rho_o2,       // 1-component macroscopic O2 density [LB_rho]
             Geom(lev),
             bubble_force,
             o2_src,
             phys_time,
-            m_free_surface ? &m_is_fluid_fraction[lev] : nullptr);
+            // BUG FIX: was m_is_fluid_fraction[lev] (EB SDF, < 0.5 inside impeller EB cells)
+            // which falsely removed live bubbles passing through the impeller swept volume.
+            // Correct field: m_phi_fslbm[lev] (gas-liquid phase field, < 0.5 only in gas headspace).
+            m_free_surface ? &m_phi_fslbm[lev] : nullptr);
 
         // Coalescence check (every coal_interval steps)
         ++m_bubble_step_counter;
@@ -840,7 +857,20 @@ void LBM::advance(
 
         // Apply O2 source to component-0 lattice
         if (m_n_components > 0) {
+            // --- O2 diagnostic: print every print_int steps ---
+            if (m_print_int > 0 && m_isteps[lev] % m_print_int == 0) {
+                const amrex::Real src_max = o2_src.norm0();
+                const amrex::Real rho_o2_before = m_component_lattices[0][lev].norm0();
+                amrex::Print() << "[O2_debug step=" << m_isteps[lev]
+                               << "] o2_src.norm0=" << src_max
+                               << "  rho_O2_before=" << rho_o2_before << "\n";
+            }
             apply_bubble_o2_source(lev, o2_src);
+            if (m_print_int > 0 && m_isteps[lev] % m_print_int == 0) {
+                const amrex::Real rho_o2_after = m_component_lattices[0][lev].norm0();
+                amrex::Print() << "[O2_debug step=" << m_isteps[lev]
+                               << "] rho_O2_after=" << rho_o2_after << "\n";
+            }
         }
 
         // Statistics output
@@ -4054,6 +4084,17 @@ void LBM::write_plot_file()
         container.WritePlotFile(
             plotfilename, "Bubbles",
             {"vx", "vy", "vz", "diameter", "C_g_mol_m3", "ax", "ay", "az"});
+        // Write the simulation time into plt*/Bubbles/time so that the ParaView
+        // AMReX Grid Reader reports the same time for both the fluid fields and
+        // the bubble particles.  The AMReX particle sub-header (plt*/Bubbles/Header)
+        // contains no time stamp; without this sidecar file ParaView infers the
+        // particle time from the directory name (step number as an integer) while
+        // the fluid reader reads the stored float time from plt*/Header — producing
+        // two incoherent time axes and doubling the apparent step count.
+        if (amrex::ParallelDescriptor::IOProcessor()) {
+            std::ofstream tfile(plotfilename + "/Bubbles/time");
+            tfile << std::setprecision(17) << m_ts_new[0] << '\n';
+        }
         // Restore original rdata (diameter → SI, C_g → n_o2)
         const amrex::Real dx = m_bubble_params.dx_phys;
         for (int lev = 0; lev <= container.finestLevel(); ++lev) {
