@@ -4024,6 +4024,14 @@ amrex::Vector<const amrex::MultiFab*> LBM::plot_file_mf()
             amrex::ParallelFor(
                 m_plt_mf[lev], m_plt_mf[lev].nGrowVect(),
                 [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                    // Only report Y_k in fluid cells; gas and solid cells
+                    // may hold stale populations that never contribute to
+                    // transport and should appear as zero in the plotfile.
+                    if (is_fluid_arrs[nbx](i, j, k,
+                            lbm::constants::IS_FLUID_IDX) != 1) {
+                        plt_mf_arrs[nbx](i, j, k, cnt) = 0.0;
+                        return;
+                    }
                     amrex::Real rho_comp = 0.0;
                     for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
                         rho_comp += f_comp_arrs[nbx](i, j, k, q);
@@ -6371,6 +6379,26 @@ void LBM::fslbm_advance_surface(const int lev)
                 }
             });
         amrex::Gpu::synchronize();
+    }
+
+    // Zero component lattices in cells that just converted to CELL_GAS.
+    // m_f was already zeroed in the kernel above; component lattices must
+    // also be cleared so dissolved scalars don't persist in gas cells and
+    // contaminate liquid cells if the interface retreats back over them.
+    if (m_n_components > 0) {
+        auto const& flag_arrs_ro = mass_flux.const_arrays();
+        for (int c = 0; c < m_n_components; ++c) {
+            auto const& f_comp_arrs = m_component_lattices[c][lev].arrays();
+            amrex::ParallelFor(
+                m_component_lattices[c][lev],
+                [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                    if (flag_arrs_ro[nbx](i, j, k, 0) > amrex::Real(0.5)) {
+                        for (int q = 0; q < N_MICRO_STATES; ++q)
+                            f_comp_arrs[nbx](i, j, k, q) = amrex::Real(0.0);
+                    }
+                });
+            amrex::Gpu::synchronize();
+        }
     }
 
     // -----------------------------------------------------------------------
