@@ -758,6 +758,16 @@ void LBM::advance(
         refill_and_spill(lev);
     }
 
+    // --- NaN detection after refill_and_spill ---
+    if (m_n_components > 0 && m_body_is_moving) {
+        bool has_nan_spill = m_component_lattices[0][lev].contains_nan();
+        if (has_nan_spill) {
+            amrex::Print() << "[NaN_DETECT step=" << m_isteps[lev]
+                           << "] NaN found AFTER refill_and_spill!\n";
+            amrex::Abort("NaN detected in component lattice after refill_and_spill");
+        }
+    }
+
 #if 0  // O2 mass diagnostic — disabled for performance
     amrex::Real o2_mass_A = 0.0;
     if (o2_diag) {
@@ -780,6 +790,16 @@ void LBM::advance(
         stream(lev, m_f);
     }
 
+    // --- NaN detection after fslbm/stream ---
+    if (m_n_components > 0) {
+        bool has_nan_fslbm = m_component_lattices[0][lev].contains_nan();
+        if (has_nan_fslbm) {
+            amrex::Print() << "[NaN_DETECT step=" << m_isteps[lev]
+                           << "] NaN found AFTER fslbm_advance_surface!\n";
+            amrex::Abort("NaN detected in component lattice after fslbm");
+        }
+    }
+
 #if 0  // O2 mass diagnostic — disabled for performance
     amrex::Real o2_mass_B = 0.0;
     if (o2_diag) {
@@ -789,6 +809,16 @@ void LBM::advance(
 
     for (int i = 0; i < m_n_components; ++i) {
         stream(lev, m_component_lattices[i]);
+    }
+
+    // --- NaN detection after component stream ---
+    if (m_n_components > 0) {
+        bool has_nan_stream = m_component_lattices[0][lev].contains_nan();
+        if (has_nan_stream) {
+            amrex::Print() << "[NaN_DETECT step=" << m_isteps[lev]
+                           << "] NaN found AFTER component stream!\n";
+            amrex::Abort("NaN detected in component lattice after stream");
+        }
     }
 
 #if 0  // O2 mass diagnostic — disabled for performance
@@ -822,6 +852,16 @@ void LBM::advance(
     }
 
     collide(lev);
+
+    // --- NaN detection after collide ---
+    if (m_n_components > 0) {
+        bool has_nan_collide = m_component_lattices[0][lev].contains_nan();
+        if (has_nan_collide) {
+            amrex::Print() << "[NaN_DETECT step=" << m_isteps[lev]
+                           << "] NaN found AFTER collide!\n";
+            amrex::Abort("NaN detected in component lattice after collide");
+        }
+    }
 
 #if 0  // O2 mass diagnostic — disabled for performance
     if (o2_diag) {
@@ -1340,6 +1380,7 @@ void LBM::relax_f_to_equilibrium(const int lev)
                 if (all_positive) {
                     // Newton: g(alpha) = H(f + alpha*s) - H0 = 0
                     amrex::Real alpha = 2.0;
+                    bool newton_converged = false;
                     for (int iter = 0; iter < 10; ++iter) {
                         amrex::Real g = -H0, dg = 0.0;
                         bool fhat_positive = true;
@@ -1354,9 +1395,15 @@ void LBM::relax_f_to_equilibrium(const int lev)
                         if (!fhat_positive || fabs(dg) < 1.0e-14) { break; }
                         alpha -= g / dg;
                         alpha = amrex::min(2.0, amrex::max(0.0, alpha));
-                        if (fabs(g) < 1.0e-12 * (fabs(H0) + 1.0e-30)) { break; }
+                        if (fabs(g) < 1.0e-12 * (fabs(H0) + 1.0e-30)) {
+                            newton_converged = true;
+                            break;
+                        }
                     }
-                    alpha_use = amrex::min(omega, alpha);
+                    if (newton_converged) {
+                        alpha_use = amrex::min(omega, alpha);
+                    }
+                    // else: alpha_use remains min(omega, 1.0)
                 }
 
                 // Apply entropic collision to f
@@ -1505,6 +1552,7 @@ void LBM::relax_f_to_equilibrium(const int lev)
                             // Newton iteration: g(alpha) = H(f + alpha*s) - H0 = 0
                             // g'(alpha) = sum_q s_q * (ln(fhat_q / eq_ref_q) + 1)
                             amrex::Real alpha = 2.0; // start at BGK mirror point
+                            bool newton_converged = false;
                             for (int iter = 0; iter < 10; ++iter) {
                                 amrex::Real g = -H0, dg = 0.0;
                                 bool fhat_positive = true;
@@ -1526,10 +1574,22 @@ void LBM::relax_f_to_equilibrium(const int lev)
                                 alpha -= g / dg;
                                 // clamp to [0, 2] for safety
                                 alpha = amrex::min(2.0, amrex::max(0.0, alpha));
-                                if (fabs(g) < 1.0e-12 * (fabs(H0) + 1.0e-30)) break;
+                                if (fabs(g) < 1.0e-12 * (fabs(H0) + 1.0e-30)) {
+                                    newton_converged = true;
+                                    break;
+                                }
                             }
-                            // Tightest bound: Newton result further caps omega_comp
-                            alpha_use = amrex::min(omega_comp, alpha);
+                            // Use Newton result only if it converged; otherwise
+                            // fall back to the safe monotone relaxation rate.
+                            // Without this guard, a failed Newton (e.g. negative
+                            // fhat on iter 0 due to negative eq_all entries from
+                            // high velocity) leaves alpha=2.0, which at omega≈2
+                            // produces an over-relaxation that drives populations
+                            // negative and eventually triggers NaN via streaming.
+                            if (newton_converged) {
+                                alpha_use = amrex::min(omega_comp, alpha);
+                            }
+                            // else: alpha_use remains min(omega_comp, 1.0)
                         }
                     }
 
