@@ -922,9 +922,16 @@ void BubbleManager::deposit_o2_sources(
                     const amrex::Real C_g_i = (Vb > 0.0) ? (n_O2 / Vb) : 0.0;
 
                     // Fluid O2 concentration at bubble location [LB rho → mol/m³]
-                    const amrex::Real C_f_lb = trilinear_interp(o2_conc_mf, 0,
+                    const amrex::Real C_f_lb_raw = trilinear_interp(o2_conc_mf, 0,
                                                                   geom,
                                                                   p.pos(0), p.pos(1), p.pos(2));
+
+                    // Clamp negative concentrations to zero: negative values are
+                    // numerical artifacts from early-time oscillations and have no
+                    // physical meaning.  Treating them as zero keeps the driving
+                    // force positive (bubble→liquid) which is stabilizing.
+                    const amrex::Real C_f_lb = std::max(C_f_lb_raw, amrex::Real(0.0));
+
                     // Convert from LB_rho to physical units: 1 LB_rho = C_ref mol/m³
                     const amrex::Real C_f_i = C_f_lb * m_params.C_ref;
 
