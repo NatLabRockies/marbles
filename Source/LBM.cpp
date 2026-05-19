@@ -725,6 +725,24 @@ void LBM::advance(
     m_ts_old[lev] = m_ts_new[lev]; // old time is now current time (time)
     m_ts_new[lev] += dt_lev;       // new time is ahead
 
+    // --- O2 mass tracking diagnostic (per-step) --- DISABLED for performance
+    // To re-enable: uncomment this block and the corresponding measurement blocks below.
+#if 0
+    auto sum_comp0_mass = [&]() -> amrex::Real {
+        if (m_n_components < 1) return 0.0;
+        amrex::Real total = 0.0;
+        for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+            total += m_component_lattices[0][lev].sum(q);
+        }
+        return total;
+    };
+    const bool o2_diag = (m_n_components > 0 && m_isteps[lev] >= 100);
+    amrex::Real o2_mass_A0 = 0.0;
+    if (o2_diag) {
+        o2_mass_A0 = sum_comp0_mass();
+    }
+#endif
+
     // Update moving body position and reconstruct fluid/solid boundaries
     if (m_body_is_moving) {
         reconstruct_body_sdf(lev, m_ts_new[lev]);
@@ -740,6 +758,20 @@ void LBM::advance(
         refill_and_spill(lev);
     }
 
+#if 0  // O2 mass diagnostic — disabled for performance
+    amrex::Real o2_mass_A = 0.0;
+    if (o2_diag) {
+        o2_mass_A = sum_comp0_mass();
+        amrex::Real loss_spill = (o2_mass_A0 > 1e-20) ? (o2_mass_A0 - o2_mass_A) / o2_mass_A0 : 0.0;
+        if (loss_spill > 0.001 || m_isteps[lev] % 200 == 0) {
+            amrex::Print() << "[O2_mass step=" << m_isteps[lev]
+                           << "] A0(start)=" << o2_mass_A0
+                           << " A(after_spill)=" << o2_mass_A
+                           << " loss_spill=" << loss_spill*100 << "%\n";
+        }
+    }
+#endif
+
     // Free-surface advance: FSLBM (Körner 2005) replaces both advance_phi and
     // stream(lev, m_f).  When m_free_surface is false the standard stream() runs.
     if (m_free_surface) {
@@ -747,9 +779,34 @@ void LBM::advance(
     } else {
         stream(lev, m_f);
     }
+
+#if 0  // O2 mass diagnostic — disabled for performance
+    amrex::Real o2_mass_B = 0.0;
+    if (o2_diag) {
+        o2_mass_B = sum_comp0_mass();
+    }
+#endif
+
     for (int i = 0; i < m_n_components; ++i) {
         stream(lev, m_component_lattices[i]);
     }
+
+#if 0  // O2 mass diagnostic — disabled for performance
+    amrex::Real o2_mass_C = 0.0;
+    if (o2_diag) {
+        o2_mass_C = sum_comp0_mass();
+        // Print detailed if significant loss detected at any stage
+        amrex::Real loss_B = (o2_mass_A > 1e-20) ? (o2_mass_A - o2_mass_B) / o2_mass_A : 0.0;
+        amrex::Real loss_C = (o2_mass_B > 1e-20) ? (o2_mass_B - o2_mass_C) / o2_mass_B : 0.0;
+        if (loss_B > 0.01 || loss_C > 0.01 || m_isteps[lev] % 200 == 0) {
+            amrex::Print() << "[O2_mass step=" << m_isteps[lev]
+                           << "] B(after_fslbm)=" << o2_mass_B
+                           << " C(after_stream)=" << o2_mass_C
+                           << " loss_fslbm=" << loss_B*100 << "%"
+                           << " loss_stream=" << loss_C*100 << "%\n";
+        }
+    }
+#endif
 
     stream(lev, m_g);
 
@@ -766,6 +823,17 @@ void LBM::advance(
 
     collide(lev);
 
+#if 0  // O2 mass diagnostic — disabled for performance
+    if (o2_diag) {
+        amrex::Real o2_mass_D = sum_comp0_mass();
+        amrex::Real loss_D = (o2_mass_C > 1e-20) ? (o2_mass_C - o2_mass_D) / o2_mass_C : 0.0;
+        if (loss_D > 0.01 || m_isteps[lev] % 200 == 0) {
+            amrex::Print() << "[O2_mass step=" << m_isteps[lev]
+                           << "] D(after_collide)=" << o2_mass_D
+                           << " loss_collide=" << loss_D*100 << "%\n";
+        }
+    }
+#endif
 
     // Catalyst injection: executed exactly once on level 0 when the
     // configured step is reached.  After injection the populations are
