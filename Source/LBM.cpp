@@ -5390,6 +5390,7 @@ void LBM::apply_bubble_body_force(int lev, const amrex::MultiFab& force_mf)
 
     const amrex::Real l_mesh_speed   = m_mesh_speed;
     const amrex::Real spec_gas_const = m_R_u / m_m_bar;  // (R/m_bar) = P/(rho*T)
+    const amrex::Real l_gamma        = m_adiabaticExponent;
     const amrex::Real nu             = m_nu;
     const amrex::Real dt             = m_dts[lev];
 
@@ -5443,16 +5444,25 @@ void LBM::apply_bubble_body_force(int lev, const amrex::MultiFab& force_mf)
 
             // Shifted velocity: delta_u = F * dt / rho
             const amrex::Real inv_rho = 1.0 / rho;
-            const amrex::Real ux1 = ux + Fx * dt * inv_rho;
-            const amrex::Real uy1 = uy + Fy * dt * inv_rho;
-            const amrex::Real uz1 = uz + Fz * dt * inv_rho;
+            amrex::Real dux = Fx * dt * inv_rho;
+            amrex::Real duy = Fy * dt * inv_rho;
+            amrex::Real duz = Fz * dt * inv_rho;
 
-            // Safety guard: skip if the velocity perturbation is unphysically
-            // large (> 0.5 LB/step).  This should never trigger in a correct run;
-            // if it does it indicates a unit-conversion bug in the force deposition
-            // and is better treated as a NaN-guard than as a silent clamp.
-            const amrex::Real du2 = (ux1-ux)*(ux1-ux) + (uy1-uy)*(uy1-uy) + (uz1-uz)*(uz1-uz);
-            if (du2 > 0.25) { return; }  // |δu| > 0.5 — skip this cell
+            // Clamp velocity perturbation to 0.5 * cs (local sound speed).
+            // Preserves force direction but limits magnitude to avoid
+            // supersonic perturbations from concentrated point forces.
+            const amrex::Real du2 = dux*dux + duy*duy + duz*duz;
+            const amrex::Real du_max_sq = amrex::Real(0.25) * l_gamma * r_temperature;
+            if (du2 > du_max_sq) {
+                const amrex::Real scale = std::sqrt(du_max_sq / du2);
+                dux *= scale;
+                duy *= scale;
+                duz *= scale;
+            }
+
+            const amrex::Real ux1 = ux + dux;
+            const amrex::Real uy1 = uy + duy;
+            const amrex::Real uz1 = uz + duz;
 
             // Extended stress tensor at shifted state
             // (kinematic u^2 changes; r_temperature and SGS D_CORR unchanged)
