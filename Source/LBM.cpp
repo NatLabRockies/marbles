@@ -1447,6 +1447,8 @@ void LBM::relax_f_to_equilibrium(const int lev)
 
                     const amrex::Real temperature =
                         md_arr(iv, constants::TEMPERATURE_IDX);
+                    // Guard: skip cells where T is not usable (prevents inf/NaN eq_unit)
+                    if (!isfinite(temperature) || temperature <= 0.0) { return; }
                     const amrex::Real p_by_rho =
                         specific_gas_constant * temperature;
 
@@ -1467,12 +1469,21 @@ void LBM::relax_f_to_equilibrium(const int lev)
                     const amrex::RealVect zero_vel = {AMREX_D_DECL(0.0, 0.0, 0.0)};
 
                     for (int q = 0; q < NQ; ++q) {
-                        eq_unit_arr(iv, q) = set_extended_equilibrium_value(
+                        amrex::Real eq_flow = set_extended_equilibrium_value(
                             1.0, vel, pxx_eq, pyy_eq, pzz_eq,
                             l_mesh_speed, weight[q], evs[q]);
-                        eq_unit_arr(iv, q + NQ) = set_extended_equilibrium_value(
+                        amrex::Real eq_ref = set_extended_equilibrium_value(
                             1.0, zero_vel, p_by_rho, p_by_rho, p_by_rho,
                             l_mesh_speed, weight[q], evs[q]);
+                        if (isnan(eq_flow) || isnan(eq_ref)) {
+                            printf("[EQ_UNIT_NaN] cell=(%d,%d,%d) q=%d "
+                                   "eq_flow=%e eq_ref=%e T=%e vel=(%e,%e,%e)\n",
+                                   iv[0], iv[1], iv[2], q,
+                                   eq_flow, eq_ref, temperature,
+                                   vel[0], vel[1], vel[2]);
+                        }
+                        eq_unit_arr(iv, q) = eq_flow;
+                        eq_unit_arr(iv, q + NQ) = eq_ref;
                     }
                 }
             });
@@ -1501,6 +1512,12 @@ void LBM::relax_f_to_equilibrium(const int lev)
 
                     const amrex::Real temperature =
                         md_arr(iv, constants::TEMPERATURE_IDX);
+                    // Skip collision for cells with invalid temperature or
+                    // negligible component density — nothing meaningful to relax.
+                    if (!isfinite(temperature) || temperature <= 0.0 ||
+                        rho_comp <= 1.0e-30) {
+                        return; // leave populations unchanged
+                    }
                     const amrex::Real omega_comp =
                         1.0 /
                         (diff / (specific_gas_constant * temperature * dt) +
@@ -1545,7 +1562,15 @@ void LBM::relax_f_to_equilibrium(const int lev)
                         for (int q = 0; q < NQ; ++q) {
                             amrex::Real fq = f_comp_arr(iv, q);
                             if (fq <= 0.0) { all_positive = false; break; }
-                            H0 += fq * log(fq / eq_unit_arr(iv, q + NQ));
+                            amrex::Real eq_ref_q = eq_unit_arr(iv, q + NQ);
+                            if (eq_ref_q <= 0.0 || isnan(eq_ref_q)) {
+                                printf("[H0_BAD_REF] cell=(%d,%d,%d) q=%d "
+                                       "eq_ref=%e fq=%e T=%e\n",
+                                       iv[0], iv[1], iv[2], q,
+                                       eq_ref_q, fq, temperature);
+                                all_positive = false; break;
+                            }
+                            H0 += fq * log(fq / eq_ref_q);
                         }
 
                         if (all_positive) {
@@ -1595,8 +1620,19 @@ void LBM::relax_f_to_equilibrium(const int lev)
 
                     // --- Apply collision with entropic alpha ---
                     for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
-                        f_comp_arr(iv, q) +=
+                        amrex::Real f_new = f_comp_arr(iv, q) +
                             alpha_use * (eq_all[q] - f_comp_arr(iv, q));
+                        if (isnan(f_new) || isinf(f_new)) {
+                            printf("[COMP_NaN] cell=(%d,%d,%d) q=%d "
+                                   "f_old=%e eq=%e rho_comp=%e "
+                                   "T=%e omega_comp=%e alpha_use=%e "
+                                   "eq_unit_flow=%e eq_unit_ref=%e\n",
+                                   iv[0], iv[1], iv[2], q,
+                                   f_comp_arr(iv, q), eq_all[q], rho_comp,
+                                   temperature, omega_comp, alpha_use,
+                                   eq_unit_arr(iv, q), eq_unit_arr(iv, q + NQ));
+                        }
+                        f_comp_arr(iv, q) = f_new;
                     }
                 }
             });
@@ -1762,8 +1798,14 @@ void LBM::f_to_macrodata(const int lev)
                     md_arr(iv, constants::QY_IDX) = qy,
                     md_arr(iv, constants::QZ_IDX) = qz);
 
-                amrex::Real temperature =
-                    get_temperature(two_rho_e, rho, u, v, w, cv);
+                amrex::Real temperature;
+                if (rho > 1.0e-10) {
+                    temperature = get_temperature(two_rho_e, rho, u, v, w, cv);
+                } else {
+                    // Near-zero density: two_rho_e/rho would overflow to inf.
+                    // Use a safe default (body temperature or initial T).
+                    temperature = body_temperature;
+                }
 
                 if (body_is_isothermal) {
                     if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_SIDE_IDX) == 1) {
@@ -3324,25 +3366,145 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
     amrex::Gpu::synchronize();
     } // end Step 7 block
 
-    // Refill for components: DISABLED
-    // For passive scalars/tracers, refilling is not physically meaningful.
-    // When cells become fluid (e.g., as a moving body rotates away), they should
-    // remain at zero or their initial state, not be "refilled" from neighbors.
-    // Spilling (when cells become solid) is still performed above to conserve mass.
-    //
-    // Explicitly zero out component lattices in newly fluid cells
+    // Refill for components: same donor-based conservative transfer as m_f/m_g.
+    // Uses the same donor_recipient_count and donor-selection logic (normal direction,
+    // max dot product) to transfer q=0 from the donor, then reduces the donor's q=0.
+    // This ensures mass conservation and smooth initialisation of newly-fluid cells.
     for (int c = 0; c < m_n_components; ++c) {
         auto const& f_comp_arrs = m_component_lattices[c][lev].arrays();
         auto const& newly_fluid_arrs = newly_fluid.const_arrays();
-        
+        auto const& old_fluid_arrs_c = old_is_fluid.const_arrays();
+        auto const& curr_fluid_arrs_c = m_is_fluid[lev].const_arrays();
+        auto const& donor_count_arrs_c = donor_recipient_count.const_arrays();
+        auto const& ct_arrs_c = ct_arrs_refill;
+        const bool is_free_surface_c = is_free_surface_refill;
+
+        const stencil::Stencil stencil_c;
+        const auto& evs_c = stencil_c.evs;
+
+        // Pass A: Transfer q=0 from donor to recipient (same donor as m_f/m_g)
         amrex::ParallelFor(
-            m_component_lattices[c][lev], amrex::IntVect(0), constants::N_MICRO_STATES,
-            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k, int q) noexcept {
-                if (newly_fluid_arrs[nbx](i, j, k, 0) == 1) {
-                    f_comp_arrs[nbx](i, j, k, q) = 0.0;
+            m_component_lattices[c][lev], amrex::IntVect(0),
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                if (newly_fluid_arrs[nbx](i, j, k, 0) != 1) return;
+
+                // Same FSLBM guard as m_f refill
+                if (is_free_surface_c) {
+                    const int ct_val = ct_arrs_c[nbx](i, j, k, 0);
+                    if (ct_val == lbm::constants::CELL_GAS ||
+                        ct_val == lbm::constants::CELL_INTERFACE ||
+                        ct_val == lbm::constants::CELL_SOLID) { return; }
+                }
+
+                const auto& farr = f_comp_arrs[nbx];
+                const auto lo = amrex::lbound(farr);
+                const auto hi = amrex::ubound(farr);
+
+                // Recompute the normal direction (same as m_f refill)
+                amrex::Real normal_x = 0.0, normal_y = 0.0, normal_z = 0.0;
+                int num_persistent = 0;
+                for (int nq = 1; nq < constants::N_MICRO_STATES; ++nq) {
+                    int ni = i + evs_c[nq][0];
+                    int nj = j + evs_c[nq][1];
+                    int nk = k + evs_c[nq][2];
+                    if (ni < lo.x || ni > hi.x ||
+                        nj < lo.y || nj > hi.y ||
+                        nk < lo.z || nk > hi.z) continue;
+                    if (old_fluid_arrs_c[nbx](ni, nj, nk, 0) == 1 &&
+                        curr_fluid_arrs_c[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1) {
+                        normal_x += evs_c[nq][0];
+                        normal_y += evs_c[nq][1];
+                        normal_z += evs_c[nq][2];
+                        ++num_persistent;
+                    }
+                }
+
+                if (num_persistent == 0) {
+                    for (int qq = 0; qq < constants::N_MICRO_STATES; ++qq)
+                        f_comp_arrs[nbx](i, j, k, qq) = 0.0;
+                    return;
+                }
+
+                amrex::Real norm = std::sqrt(normal_x*normal_x + normal_y*normal_y + normal_z*normal_z);
+                if (norm == 0.0) {
+                    // Fallback: first persistent neighbor (with /N scaling)
+                    for (int nq = 1; nq < constants::N_MICRO_STATES; ++nq) {
+                        int ni = i + evs_c[nq][0];
+                        int nj = j + evs_c[nq][1];
+                        int nk = k + evs_c[nq][2];
+                        if (ni < lo.x || ni > hi.x ||
+                            nj < lo.y || nj > hi.y ||
+                            nk < lo.z || nk > hi.z) continue;
+                        if (old_fluid_arrs_c[nbx](ni, nj, nk, 0) == 1 &&
+                            curr_fluid_arrs_c[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1) {
+                            int n_recip = donor_count_arrs_c[nbx](ni, nj, nk, 0);
+                            amrex::Real scale = (n_recip > 0) ? 1.0 / amrex::Real(n_recip) : 1.0;
+                            f_comp_arrs[nbx](i, j, k, 0) = f_comp_arrs[nbx](ni, nj, nk, 0) * scale;
+                            for (int qq = 1; qq < constants::N_MICRO_STATES; ++qq)
+                                f_comp_arrs[nbx](i, j, k, qq) = 0.0;
+                            return;
+                        }
+                    }
+                    for (int qq = 0; qq < constants::N_MICRO_STATES; ++qq)
+                        f_comp_arrs[nbx](i, j, k, qq) = 0.0;
+                    return;
+                }
+
+                normal_x /= norm;
+                normal_y /= norm;
+                normal_z /= norm;
+
+                // Find donor: neighbor with max dot product to normal
+                amrex::Real max_dot = -1e10;
+                int donor_i = -1, donor_j = -1, donor_k = -1;
+                for (int nq = 1; nq < constants::N_MICRO_STATES; ++nq) {
+                    int ni = i + evs_c[nq][0];
+                    int nj = j + evs_c[nq][1];
+                    int nk = k + evs_c[nq][2];
+                    if (ni < lo.x || ni > hi.x ||
+                        nj < lo.y || nj > hi.y ||
+                        nk < lo.z || nk > hi.z) continue;
+                    if (old_fluid_arrs_c[nbx](ni, nj, nk, 0) == 1 &&
+                        curr_fluid_arrs_c[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1) {
+                        amrex::Real dot = evs_c[nq][0]*normal_x + evs_c[nq][1]*normal_y + evs_c[nq][2]*normal_z;
+                        if (dot > max_dot) {
+                            max_dot = dot;
+                            donor_i = ni; donor_j = nj; donor_k = nk;
+                        }
+                    }
+                }
+
+                // Transfer q=0 from donor, scaled by 1/N_recipients
+                if (donor_i >= 0) {
+                    int n_recip = donor_count_arrs_c[nbx](donor_i, donor_j, donor_k, 0);
+                    amrex::Real scale = (n_recip > 0) ? 1.0 / amrex::Real(n_recip) : 1.0;
+                    f_comp_arrs[nbx](i, j, k, 0) = f_comp_arrs[nbx](donor_i, donor_j, donor_k, 0) * scale;
+                    for (int qq = 1; qq < constants::N_MICRO_STATES; ++qq)
+                        f_comp_arrs[nbx](i, j, k, qq) = 0.0;
+                } else {
+                    for (int qq = 0; qq < constants::N_MICRO_STATES; ++qq)
+                        f_comp_arrs[nbx](i, j, k, qq) = 0.0;
                 }
             });
         amrex::Gpu::synchronize();
+
+        // Pass B: Reduce donor's q=0 to conserve mass
+        {
+            auto const& donor_count_arrs_b = donor_recipient_count.const_arrays();
+            auto const& curr_fluid_arrs_b = m_is_fluid[lev].const_arrays();
+            auto const& f_comp_arrs_b = m_component_lattices[c][lev].arrays();
+
+            amrex::ParallelFor(
+                m_component_lattices[c][lev], amrex::IntVect(0),
+                [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                    int n_recip = donor_count_arrs_b[nbx](i, j, k, 0);
+                    if (n_recip == 0) return;
+                    if (curr_fluid_arrs_b[nbx](i, j, k, lbm::constants::IS_FLUID_IDX) != 1) return;
+                    // Donor gives away ALL of its q=0
+                    f_comp_arrs_b[nbx](i, j, k, 0) = 0.0;
+                });
+            amrex::Gpu::synchronize();
+        }
     }
 
     } // End of refill block
