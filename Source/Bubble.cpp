@@ -157,11 +157,22 @@ amrex::Real BubbleManager::trilinear_interp(
         const auto& arr = mf.const_array(mfi);
 
         auto get = [&](int ii, int jj, int kk) {
-            amrex::Real v = arr(amrex::IntVect(clamp(ii, bx.smallEnd(0), bx.bigEnd(0)),
+            const amrex::Real* ptr = &arr(amrex::IntVect(clamp(ii, bx.smallEnd(0), bx.bigEnd(0)),
                                      clamp(jj, bx.smallEnd(1), bx.bigEnd(1)),
                                      clamp(kk, bx.smallEnd(2), bx.bigEnd(2))), comp);
-            // EB/solid cells may contain NaN; treat as zero for interpolation purposes
-            return std::isfinite(v) ? v : amrex::Real(0.0);
+            // EB/GAS cells may contain signaling NaN (AMReX fill_snan).
+            // Loading SNaN into FP register triggers SIGFPE, so inspect
+            // IEEE 754 bits via memcpy before any float operation.
+            std::uint64_t bits;
+            std::memcpy(&bits, ptr, sizeof(bits));
+            const std::uint64_t exp_mask = 0x7FF0000000000000ULL;
+            const std::uint64_t man_mask = 0x000FFFFFFFFFFFFFULL;
+            const bool is_nan = ((bits & exp_mask) == exp_mask) &&
+                                ((bits & man_mask) != 0);
+            if (is_nan) { return amrex::Real(0.0); }
+            amrex::Real v;
+            std::memcpy(&v, ptr, sizeof(v));
+            return v;
         };
 
         val =
@@ -961,6 +972,19 @@ void BubbleManager::deposit_o2_sources(
                 auto& aos  = pbox.GetArrayOfStructs();
                 for (auto& p : aos()) {
                     if (!p.id().is_valid()) { ++fi; continue; }
+
+                    // Guard: skip bubbles at positions where underlying
+                    // MultiFab data may contain signaling NaN (outside
+                    // initialized fluid domain or in EB cells).
+                    {
+                        const int ci = static_cast<int>(std::floor((p.pos(0) - plo[0]) / dx_arr[0]));
+                        const int cj = static_cast<int>(std::floor((p.pos(1) - plo[1]) / dx_arr[1]));
+                        const int ck = static_cast<int>(std::floor((p.pos(2) - plo[2]) / dx_arr[2]));
+                        if (!dom.contains(amrex::IntVect(AMREX_D_DECL(ci, cj, ck)))) {
+                            p.id() = -1;
+                            ++fi; continue;
+                        }
+                    }
 
                     const amrex::Real d   = p.rdata(BubbleIdx::DIAMETER);
                     const amrex::Real r   = 0.5 * d;
