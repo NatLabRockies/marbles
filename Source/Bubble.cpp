@@ -404,6 +404,12 @@ void BubbleManager::compute_forces(
                 }
 
                 const amrex::Real d  = p.rdata(BubbleIdx::DIAMETER);  // m
+                if (d <= 1.0e-5) {
+                    // Tiny bubble slipped through — skip forces, mark invalid
+                    p.id() = -1;
+                    m_forces.push_back({0,0,0, 0,0,0, 0});
+                    continue;
+                }
                 const amrex::Real r  = 0.5 * d;
                 const amrex::Real Vb = (4.0/3.0) * amrex::Math::pi<amrex::Real>() * r*r*r;
                 const amrex::Real Ab = amrex::Math::pi<amrex::Real>() * r*r;   // cross-section
@@ -963,9 +969,17 @@ void BubbleManager::deposit_o2_sources(
 
                     // Update bubble diameter from new mole count
                     const amrex::Real Vb_new = n_O2_new * m_params.O2_molar_volume;
+                    // Minimum bubble diameter (10 µm): below this the effective
+                    // mass → 0 causing acceleration → Inf in compute_forces.
+                    const amrex::Real d_min = 1.0e-5;  // metres
                     if (Vb_new > 0.0) {
-                        p.rdata(BubbleIdx::DIAMETER) =
+                        const amrex::Real d_new =
                             std::cbrt(6.0 * Vb_new / amrex::Math::pi<amrex::Real>());
+                        if (d_new < d_min) {
+                            p.id() = -1;  // Too small — remove
+                        } else {
+                            p.rdata(BubbleIdx::DIAMETER) = d_new;
+                        }
                     } else {
                         p.id() = -1;  // Bubble fully dissolved — mark for removal
                     }
