@@ -761,6 +761,15 @@ void BubbleManager::remove_exited_bubbles(const amrex::Geometry& geom,
                 for (auto& p : aos()) {
                     if (!p.id().is_valid()) { continue; }
 
+                    // Guard: if position is NaN/Inf (from numerical blow-up
+                    // in forces or integration), remove immediately.
+                    if (!std::isfinite(p.pos(0)) ||
+                        !std::isfinite(p.pos(1)) ||
+                        !std::isfinite(p.pos(2))) {
+                        p.id() = -1;
+                        continue;
+                    }
+
                     // Cell index containing bubble centre
                     const int ci = static_cast<int>(std::floor(
                         (p.pos(0) - prob_lo[0]) / dx_arr[0]));
@@ -1134,6 +1143,13 @@ void BubbleManager::advance(
                     const amrex::Real ax = p.rdata(BubbleIdx::AX);
                     const amrex::Real ay = p.rdata(BubbleIdx::AY);
                     const amrex::Real az = p.rdata(BubbleIdx::AZ);
+
+                    // Guard: if acceleration is NaN/Inf, skip integration
+                    // and mark for removal to prevent position corruption.
+                    if (!std::isfinite(ax) || !std::isfinite(ay) || !std::isfinite(az)) {
+                        p.id() = -1;
+                        continue;
+                    }
 
                     const amrex::Real vx = p.rdata(BubbleIdx::VX);
                     const amrex::Real vy = p.rdata(BubbleIdx::VY);
