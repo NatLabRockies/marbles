@@ -951,6 +951,12 @@ void LBM::advance(
         }
 
         // Advance bubbles: forces, Verlet integration, mass transfer
+        // Disable FPE trapping: bubble interpolation may encounter signaling
+        // NaN from EB/GAS cells in the LBM MultiFabs.  The trilinear_interp
+        // function handles these gracefully (memcpy + bit check) but compiler
+        // reordering under -O3 can still trigger traps on intermediate loads.
+        auto prev_fpe = amrex::disableFPExcept(amrex::FPExcept::invalid |
+                                                amrex::FPExcept::overflow);
         m_bubbles.advance(
             dt_lev,
             m_macrodata[lev],
@@ -971,6 +977,9 @@ void LBM::advance(
             m_bubble_step_counter % m_bubble_params.coal_interval == 0) {
             m_bubbles.do_coalescence(phys_time);
         }
+
+        // Restore FPE trapping after bubble routines
+        amrex::setFPExcept(prev_fpe);
 
         // Apply bubble body force to fluid distributions (He-Luo scheme)
         // Diagnostic: print max force magnitude to catch anomalous deposits.
