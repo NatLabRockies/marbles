@@ -52,7 +52,8 @@ namespace BubbleIdx {
         AX       = 5,  ///< x-acceleration from previous step [m/s²] — for vel. Verlet
         AY       = 6,  ///< y-acceleration from previous step [m/s²]
         AZ       = 7,  ///< z-acceleration from previous step [m/s²]
-        NReal    = 8
+        BREAKUP_COOLDOWN = 8, ///< steps remaining before next breakup allowed
+        NReal    = 9
     };
 } // namespace BubbleIdx
 
@@ -60,7 +61,7 @@ namespace BubbleIdx {
 // CPU-side particle loops can access particle data without CUDA managed memory.
 // Pinned memory is DMA-accessible by the GPU and avoids the page-migration
 // overhead of managed memory while remaining directly readable/writable on CPU.
-//   NStructReal = 8  (vx, vy, vz, diameter, n_O2, ax, ay, az)
+//   NStructReal = 9  (vx, vy, vz, diameter, n_O2, ax, ay, az, breakup_cooldown)
 //   NStructInt  = 0
 using BubbleContainer = amrex::ParticleContainer<BubbleIdx::NReal, 0, 0, 0,
                                                  amrex::PinnedArenaAllocator,

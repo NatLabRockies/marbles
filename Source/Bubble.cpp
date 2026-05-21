@@ -337,6 +337,7 @@ void BubbleManager::inject_bubbles(amrex::Real dt_phys)
                 p.rdata(BubbleIdx::AX)       = 0.0;
                 p.rdata(BubbleIdx::AY)       = 0.0;
                 p.rdata(BubbleIdx::AZ)       = 0.0;
+                p.rdata(BubbleIdx::BREAKUP_COOLDOWN) = 0.0;
                 ptile.push_back(p);
             }
         }
@@ -511,6 +512,7 @@ void BubbleManager::do_breakup(
     const amrex::Real rho_f  = m_params.rho_fluid;
     const amrex::Real dx     = m_params.dx_phys;
     const amrex::Real dt     = m_params.dt_phys;
+    const amrex::Real nu_f   = m_params.nu_fluid;
     // Conversion factor: eps_LB → eps_SI [m²/s³]
     const amrex::Real eps_conv = dx * dx / (dt * dt * dt);
 
@@ -522,6 +524,9 @@ void BubbleManager::do_breakup(
             auto& aos  = pbox.GetArrayOfStructs();
             for (auto& p : aos()) {
                 if (!p.id().is_valid()) { continue; }
+
+                // Skip if bubble is still in breakup cooldown (Kolmogorov timescale)
+                if (p.rdata(BubbleIdx::BREAKUP_COOLDOWN) > 0.0) { continue; }
 
                 // Interpolate turbulent dissipation rate from derived field [LB → SI]
                 const amrex::Real eps_lb = trilinear_interp(
@@ -579,6 +584,11 @@ void BubbleManager::do_breakup(
                 // All checks passed — invalidate the parent and create two daughters
                 p.id() = -1;
 
+                // Kolmogorov timescale cooldown: τ_η = sqrt(ν/ε) [s]
+                // Convert to LB steps: cooldown = τ_η / dt_phys
+                const amrex::Real tau_eta = std::sqrt(nu_f / eps_SI);
+                const amrex::Real cooldown_steps = std::ceil(tau_eta / dt);
+
                 // Create daughter bubbles (add to new_bubbles list)
                 for (int id = 0; id < 2; ++id) {
                     BubbleParticle daughter;
@@ -595,6 +605,7 @@ void BubbleManager::do_breakup(
                     daughter.rdata(BubbleIdx::AZ) = p.rdata(BubbleIdx::AZ);
                     daughter.rdata(BubbleIdx::DIAMETER) = (id == 0) ? d1 : d2;
                     daughter.rdata(BubbleIdx::N_O2)     = (id == 0) ? n1 : n2;
+                    daughter.rdata(BubbleIdx::BREAKUP_COOLDOWN) = cooldown_steps;
                     new_bubbles.push_back(daughter);
                 }
             }
@@ -1204,8 +1215,18 @@ void BubbleManager::advance(
     remove_exited_bubbles(geom, phi_h_ptr);
 
     // ------------------------------------------------------------------
-    // 7. Breakup check at new positions
+    // 7. Decrement breakup cooldown timers, then check breakup
     // ------------------------------------------------------------------
+    for (int lev = 0; lev <= m_container.finestLevel(); ++lev) {
+        for (auto& kv : m_container.GetParticles(lev)) {
+            auto& aos = kv.second.GetArrayOfStructs();
+            for (auto& p : aos()) {
+                if (!p.id().is_valid()) { continue; }
+                amrex::Real& cd = p.rdata(BubbleIdx::BREAKUP_COOLDOWN);
+                if (cd > 0.0) { cd -= 1.0; }
+            }
+        }
+    }
     do_breakup(derived_h, geom);
 
     // ------------------------------------------------------------------
