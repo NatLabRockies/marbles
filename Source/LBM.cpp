@@ -4412,7 +4412,7 @@ void LBM::write_plot_file()
         }
         container.WritePlotFile(
             plotfilename, "Bubbles",
-            {"vx", "vy", "vz", "diameter", "C_g_mol_m3", "ax", "ay", "az"});
+            {"vx", "vy", "vz", "diameter", "C_g_mol_m3", "ax", "ay", "az", "breakup_cooldown"});
         // Write the simulation time into plt*/Bubbles/time so that the ParaView
         // AMReX Grid Reader reports the same time for both the fluid fields and
         // the bubble particles.  The AMReX particle sub-header (plt*/Bubbles/Header)
