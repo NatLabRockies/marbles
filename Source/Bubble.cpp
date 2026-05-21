@@ -770,13 +770,21 @@ void BubbleManager::remove_exited_bubbles(const amrex::Geometry& geom,
                         continue;
                     }
 
-                    // Cell index containing bubble centre
-                    const int ci = static_cast<int>(std::floor(
-                        (p.pos(0) - prob_lo[0]) / dx_arr[0]));
-                    const int cj = static_cast<int>(std::floor(
-                        (p.pos(1) - prob_lo[1]) / dx_arr[1]));
-                    const int ck = static_cast<int>(std::floor(
-                        (p.pos(2) - prob_lo[2]) / dx_arr[2]));
+                    // Cell index containing bubble centre.
+                    // Guard against huge positions (finite but outside int range)
+                    // that would cause UB in static_cast<int>(floor(...)).
+                    const double fi = (p.pos(0) - prob_lo[0]) / dx_arr[0];
+                    const double fj = (p.pos(1) - prob_lo[1]) / dx_arr[1];
+                    const double fk = (p.pos(2) - prob_lo[2]) / dx_arr[2];
+                    if (fi < -1.0e9 || fi > 1.0e9 ||
+                        fj < -1.0e9 || fj > 1.0e9 ||
+                        fk < -1.0e9 || fk > 1.0e9) {
+                        p.id() = -1;
+                        continue;
+                    }
+                    const int ci = static_cast<int>(std::floor(fi));
+                    const int cj = static_cast<int>(std::floor(fj));
+                    const int ck = static_cast<int>(std::floor(fk));
 
                     const amrex::IntVect iv(AMREX_D_DECL(ci, cj, ck));
                     if (!domain.contains(iv)) {
