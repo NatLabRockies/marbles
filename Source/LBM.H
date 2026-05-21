@@ -152,6 +152,10 @@ public:
     // Replaces both advance_phi(lev) and stream(lev, m_f).
     void fslbm_advance_surface(const int lev);
 
+    // FSLBM: replenish m_g populations in INTERFACE cells facing gas.
+    // Prevents thermal energy drain at the free surface.
+    void fslbm_replenish_g(const int lev);
+
     // FSLBM: derive IS_FLUID_IDX (and boundary markers) from m_cell_type.
     // Replaces update_is_fluid_from_fraction_and_mark for FSLBM to avoid
     // conflict with the moving-body SDF that also lives in m_is_fluid_fraction.

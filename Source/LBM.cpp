@@ -790,6 +790,16 @@ void LBM::advance(
         stream(lev, m_f);
     }
 
+    // --- DEBUG: check m_f for NaN immediately after fslbm_advance_surface ---
+    {
+        bool has_nan_f = m_f[lev].contains_nan();
+        if (has_nan_f) {
+            amrex::Print() << "[NaN_DETECT step=" << m_isteps[lev]
+                           << "] NaN found in m_f AFTER fslbm_advance_surface!\n";
+            amrex::Abort("NaN in m_f after fslbm_advance_surface");
+        }
+    }
+
     // --- NaN detection after fslbm/stream ---
     if (m_n_components > 0) {
         bool has_nan_fslbm = m_component_lattices[0][lev].contains_nan();
@@ -839,6 +849,18 @@ void LBM::advance(
 #endif
 
     stream(lev, m_g);
+
+    // -----------------------------------------------------------------------
+    // Free-surface m_g replenishment: after streaming, INTERFACE cells that
+    // face gas have zero incoming g populations (gas cells have g=0).  Without
+    // treatment, interface cells lose thermal energy every step → T→0 → the
+    // component collision becomes degenerate.  Fill missing incoming directions
+    // with equilibrium g at local velocity and body_temperature (reference T).
+    // This is the thermal analog of the ABB boundary condition for m_f.
+    // -----------------------------------------------------------------------
+    if (m_free_surface) {
+        fslbm_replenish_g(lev);
+    }
 
     if (lev < finest_level) {
         average_down_to(lev, amrex::IntVect(1));
@@ -1447,10 +1469,16 @@ void LBM::relax_f_to_equilibrium(const int lev)
 
                     const amrex::Real temperature =
                         md_arr(iv, constants::TEMPERATURE_IDX);
-                    // Guard: skip cells where T is not usable (prevents inf/NaN eq_unit)
-                    if (!isfinite(temperature) || temperature <= 0.0) { return; }
+                    // Guard: skip cells where T is not usable (prevents inf/NaN eq_unit).
+                    // T must be large enough that R_g*T produces a meaningful eq:
+                    // the product form phi_dir ∝ (1.5*p_ii - 1) requires p_ii = R_g*T
+                    // to be at least ~1e-6 for eq_ref to stay above 0 in double precision.
+                    // Cells near the free surface with near-zero g populations can have
+                    // T ≈ 10^-20, producing eq_ref=0 and blowing up the H function.
+                    if (!isfinite(temperature) || temperature <= 1.0e-6) { return; }
+                    const amrex::Real T_safe = amrex::min(temperature, 0.5 / specific_gas_constant);
                     const amrex::Real p_by_rho =
-                        specific_gas_constant * temperature;
+                        specific_gas_constant * T_safe;
 
                     // Flow equilibrium: rho=1, local velocity
                     const amrex::RealVect vel = {AMREX_D_DECL(
@@ -1514,13 +1542,16 @@ void LBM::relax_f_to_equilibrium(const int lev)
                         md_arr(iv, constants::TEMPERATURE_IDX);
                     // Skip collision for cells with invalid temperature or
                     // negligible component density — nothing meaningful to relax.
-                    if (!isfinite(temperature) || temperature <= 0.0 ||
+                    // T must exceed 1e-6 (matching eq_unit guard) to ensure
+                    // eq_ref > 0 and the entropic H function is well-defined.
+                    if (!isfinite(temperature) || temperature <= 1.0e-6 ||
                         rho_comp <= 1.0e-30) {
                         return; // leave populations unchanged
                     }
+                    const amrex::Real T_coll = amrex::min(temperature, 0.5 / specific_gas_constant);
                     const amrex::Real omega_comp =
                         1.0 /
-                        (diff / (specific_gas_constant * temperature * dt) +
+                        (diff / (specific_gas_constant * T_coll * dt) +
                          0.5);
 
                     // Scale cached unit-density shape by rho_comp
@@ -6000,6 +6031,93 @@ void LBM::fslbm_init_cell_type(const int lev)
 //  Step 2: Compute per-interface-cell mass flux Δm (pull scheme, pre-stream f).
 //  Step 3: Copy f_star -> m_f and FillBoundary.
 //  Step 4: Update fill level phi <- phi + Δm/rho, clamp to [0,1].
+// ============================================================================
+// fslbm_replenish_g: fill missing incoming g populations in INTERFACE cells
+// that face gas.  After standard stream(m_g), populations arriving from gas
+// directions are zero.  We replenish with g_eq at the local velocity and
+// reference temperature to prevent thermal energy drain at the free surface.
+// ============================================================================
+void LBM::fslbm_replenish_g(const int lev)
+{
+    BL_PROFILE("LBM::fslbm_replenish_g()");
+    using namespace lbm::constants;
+
+    auto const& g_arrs  = m_g[lev].arrays();
+    auto const& f_arrs  = m_f[lev].const_arrays();
+    auto const& ct_arrs = m_cell_type[lev].const_arrays();
+
+    const stencil::Stencil stencil_g;
+    const auto& evs_g        = stencil_g.evs;
+    const auto& weights_g    = stencil_g.weights;
+    const auto& bounce_dirs_g = stencil_g.bounce_dirs;
+    const amrex::Real l_mesh_speed = m_mesh_speed;
+    const amrex::Real l_Rg   = m_R_u / m_m_bar;
+    const amrex::Real l_Cv   = l_Rg / (m_adiabaticExponent - 1.0);
+    const amrex::Real l_Tref = m_initialTemperature;
+    const amrex::Real l_theta0 = stencil::Stencil::THETA0;  // lattice temperature = 1/3
+
+    amrex::ParallelFor(
+        m_g[lev], amrex::IntVect(0), N_MICRO_STATES,
+        [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k, int q) noexcept {
+            const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
+            if (ct_arrs[nbx](iv, 0) != CELL_INTERFACE) { return; }
+
+            // q is the population index.  Its source cell in push-stream is
+            // iv - ev[q] = iv + ev[bq].  If that source is GAS, the streamed-in
+            // g[iv][q] is zero.
+            const int bq = bounce_dirs_g[q];
+            const auto& ev_bq = evs_g[bq];
+            const amrex::IntVect src(iv + ev_bq);
+
+            const auto& g_arr = g_arrs[nbx];
+            const auto& lb = amrex::lbound(g_arr);
+            const auto& ub = amrex::ubound(g_arr);
+            const amrex::Box gbox(
+                amrex::IntVect(AMREX_D_DECL(lb.x, lb.y, lb.z)),
+                amrex::IntVect(AMREX_D_DECL(ub.x, ub.y, ub.z)));
+            if (!gbox.contains(src)) { return; }
+
+            if (ct_arrs[nbx](src, 0) != CELL_GAS) { return; }
+
+            // This direction came from gas → fill with geq at reference T.
+            // Use velocity computed directly from f moments (avoids stale macrodata
+            // which may contain NaN from the previous step's g corruption).
+            amrex::Real rho = amrex::Real(0.0);
+            amrex::Real mx = amrex::Real(0.0);
+            amrex::Real my = amrex::Real(0.0);
+            amrex::Real mz = amrex::Real(0.0);
+            for (int qq = 0; qq < N_MICRO_STATES; ++qq) {
+                const amrex::Real fq = f_arrs[nbx](iv, qq);
+                rho += fq;
+                mx += fq * evs_g[qq][0];
+                my += fq * evs_g[qq][1];
+                mz += fq * evs_g[qq][2];
+            }
+            rho = amrex::max(rho, amrex::Real(0.01));
+            const amrex::Real ux = mx / rho;
+            const amrex::Real uy = my / rho;
+            const amrex::Real uz = mz / rho;
+            const amrex::RealVect vel(AMREX_D_DECL(ux, uy, uz));
+
+            // Compute g_eq at (rho, vel, T_ref)
+            const amrex::Real two_rho_e = get_energy(
+                l_Tref, rho, ux, uy, uz, l_Cv);
+            amrex::RealVect heat_flux(AMREX_D_DECL(0.0, 0.0, 0.0));
+            amrex::Real rxx(0), ryy(0), rzz(0), rxy(0), rxz(0), ryz(0);
+            get_equilibrium_moments(rho, vel, two_rho_e, l_Cv, l_Rg,
+                heat_flux, rxx, ryy, rzz, rxy, rxz, ryz);
+            const amrex::GpuArray<amrex::Real, 6> hf_eq = {
+                rxx, ryy, rzz, rxy, rxz, ryz};
+            const amrex::RealVect zero_vec(AMREX_D_DECL(0.0, 0.0, 0.0));
+
+            g_arrs[nbx](iv, q) = set_extended_grad_expansion_generic(
+                two_rho_e, heat_flux, hf_eq,
+                l_mesh_speed, weights_g[q], evs_g[q],
+                l_theta0, zero_vec, amrex::Real(1.0));
+        });
+    amrex::Gpu::synchronize();
+}
+
 //  Step 5: Convert cells: phi<1e-4 -> GAS (zero f), phi>1-1e-4 -> LIQUID.
 //  Step 6: Sync integer is_fluid mask and FillBoundary everything.
 // ============================================================================
@@ -6276,7 +6394,7 @@ void LBM::fslbm_advance_surface(const int lev)
     f_star.setVal(amrex::Real(0.0));
 
     amrex::MultiFab mass_flux(
-        boxArray(lev), DistributionMap(lev), 1,
+        boxArray(lev), DistributionMap(lev), 2,
         m_f[lev].nGrow(), amrex::MFInfo(), *(m_factory[lev]));
     mass_flux.setVal(amrex::Real(0.0));
 
@@ -6481,30 +6599,25 @@ void LBM::fslbm_advance_surface(const int lev)
                 const amrex::Real T_iv =
                     amrex::max(md_arrs[nbx](iv, TEMPERATURE_IDX), amrex::Real(1.0e-10));
 
-                // Gas-side density for ABB (Schwarzmeier 2023 Eq.11-14,
-                // thermal extension: ρ_G = p_G / (R_g T_interface)).
+                // Gas-side density for ABB (Donath 2011, §2.3.3):
+                //   ρ_gas = p_gas / c_s² = (p_V + Δp_σ) / (R_g · T)
                 //
-                // Base (old Körner stability clamp): rho_iv = max(Σf_iv, rho_ref).
-                // This guarantees feq_bq + feq_q ≥ f_pre[bq] when the impeller
-                // drives ρ_iv > ρ_ref near the interface.
+                // For the atmosphere (open surface), p_V = p_0 = const
+                // → base ρ_gas = ρ_ref (the reference/atmospheric density).
                 //
-                // Laplace correction (σ > 0): Δρ_G = -2σκ / (Rg·T_iv).
-                //   κ > 0 (concave toward gas) → Δρ < 0 → lower gas pressure.
-                //   κ < 0 (convex toward gas)  → Δρ > 0 → higher gas pressure.
-                // When σ = 0: Δρ = 0 → rho_G = rho_iv = EXACT old behaviour,
-                // regardless of local temperature T_iv.
+                // Laplace correction (σ > 0): Δρ_G = 2σκ / (R_g · T_iv).
+                //   κ > 0 (center of curvature in gas) → higher gas pressure.
+                //   κ < 0 (center of curvature in liquid) → lower gas pressure.
+                // Sign convention: κ = −∇·n̂ where n̂ points liquid→gas.
                 //
-                // Wall-corrected κ (computed above) prevents instability when
-                // the interface contacts a solid wall (Donath [52]).
-                amrex::Real rho_iv = amrex::Real(0.0);
-                for (int qq = 0; qq < N_MICRO_STATES; ++qq)
-                    rho_iv += f_ro[nbx](iv, qq);
-                rho_iv = amrex::max(rho_iv, l_fslbm_rho_ref);
+                // IMPORTANT: We use ρ_ref (NOT the local cell density ρ_iv)
+                // as the base.  Using ρ_iv creates a positive feedback loop:
+                // elevated ρ → ABB targets elevated ρ → more mass injected → blow-up.
                 const amrex::Real kappa_iv = kap_arr[nbx](iv, 0);
                 const amrex::Real delta_rho_laplace =
                     -amrex::Real(2.0) * l_sigma * kappa_iv / (l_Rg * T_iv);
                 const amrex::Real rho_G = amrex::max(
-                    rho_iv + delta_rho_laplace,
+                    l_fslbm_rho_ref + delta_rho_laplace,
                     l_fslbm_rho_ref * amrex::Real(1.0e-3));
 
                 const amrex::Real pxx = ux * ux + l_Rg * T_iv;
@@ -6624,7 +6737,7 @@ void LBM::fslbm_advance_surface(const int lev)
     // -----------------------------------------------------------------------
     {
         auto const& phi_arrs = m_phi_fslbm[lev].arrays();
-        auto const& dm_arrs  = mass_flux.const_arrays();
+        auto const& dm_arrs  = mass_flux.arrays();  // comp 0: dm, comp 1: excess
         auto const& f_ro_cur = m_f[lev].const_arrays();
         auto const& ct_arrs  = m_cell_type[lev].const_arrays();
 
@@ -6638,10 +6751,16 @@ void LBM::fslbm_advance_surface(const int lev)
                 for (int q = 0; q < N_MICRO_STATES; ++q)
                     rho += f_ro_cur[nbx](iv, q);
                 rho = amrex::max(rho, amrex::Real(1.0e-4) * l_fslbm_rho_ref);
-                const amrex::Real phi_new =
+                // Phi update with clamp: prevent extreme phi excursions that
+                // trigger cascade conversions and drain the energy lattice.
+                // Excess mass from clamping is stored and redistributed later.
+                const amrex::Real phi_unclamped =
                     phi_arrs[nbx](iv, 0) + dm_arrs[nbx](iv, 0) / rho;
-                phi_arrs[nbx](iv, 0) =
-                    amrex::max(amrex::Real(0.0), amrex::min(amrex::Real(1.0), phi_new));
+                const amrex::Real phi_clamped = amrex::max(
+                    amrex::Real(-0.5), amrex::min(amrex::Real(1.5), phi_unclamped));
+                phi_arrs[nbx](iv, 0) = phi_clamped;
+                // Store excess mass (what was clamped away) in comp 1 for redistribution
+                dm_arrs[nbx](iv, 1) = (phi_unclamped - phi_clamped) * rho;
             });
         amrex::Gpu::synchronize();
     }
@@ -6654,12 +6773,13 @@ void LBM::fslbm_advance_surface(const int lev)
     //   -1  =>  this cell just converted to CELL_LIQUID (neighbors may need spawning)
     //    0  =>  no conversion
     // -----------------------------------------------------------------------
-    mass_flux.setVal(amrex::Real(0.0));
+    // Only zero the flag component (0); component 1 already holds phi-update excess.
+    mass_flux.setVal(amrex::Real(0.0), 0, 1, mass_flux.nGrow());  // zero comp 0 only
     {
         auto const& ct_arrs   = m_cell_type[lev].arrays();
         auto const& phi_arrs  = m_phi_fslbm[lev].arrays();
         auto const& f_arrs    = m_f[lev].arrays();
-        auto const& flag_arrs = mass_flux.arrays();   // reused as conversion flag
+        auto const& flag_arrs = mass_flux.arrays();   // comp 0: flag, comp 1: excess mass
 
         amrex::ParallelFor(
             m_cell_type[lev],
@@ -6668,14 +6788,25 @@ void LBM::fslbm_advance_surface(const int lev)
                 if (ct_arrs[nbx](iv, 0) != CELL_INTERFACE) { return; }
                 const amrex::Real phi = phi_arrs[nbx](iv, 0);
                 if (phi < FSLBM_PHI_LO) {
+                    // Convert to GAS.  Excess mass = phi * rho (negative or ~0).
+                    amrex::Real rho = amrex::Real(0.0);
+                    for (int q = 0; q < N_MICRO_STATES; ++q)
+                        rho += f_arrs[nbx](iv, q);
+                    flag_arrs[nbx](iv, 0) = amrex::Real(+1.0);
+                    flag_arrs[nbx](iv, 1) += phi * rho;  // ADD to phi-update excess
                     ct_arrs[nbx](iv, 0)   = CELL_GAS;
                     phi_arrs[nbx](iv, 0)  = amrex::Real(0.0);
-                    flag_arrs[nbx](iv, 0) = amrex::Real(+1.0);   // converted → GAS
                     for (int q = 0; q < N_MICRO_STATES; ++q)
                         f_arrs[nbx](iv, q) = amrex::Real(0.0);
                 } else if (phi > FSLBM_PHI_HI) {
+                    // Convert to LIQUID.  Excess mass = (phi - 1) * rho (≥ 0).
+                    amrex::Real rho = amrex::Real(0.0);
+                    for (int q = 0; q < N_MICRO_STATES; ++q)
+                        rho += f_arrs[nbx](iv, q);
+                    flag_arrs[nbx](iv, 0) = amrex::Real(-1.0);
+                    flag_arrs[nbx](iv, 1) += (phi - amrex::Real(1.0)) * rho;  // ADD to excess
                     ct_arrs[nbx](iv, 0)   = CELL_LIQUID;
-                    flag_arrs[nbx](iv, 0) = amrex::Real(-1.0);   // converted → LIQUID
+                    phi_arrs[nbx](iv, 0)  = amrex::Real(1.0);
                 }
             });
         amrex::Gpu::synchronize();
@@ -6699,6 +6830,71 @@ void LBM::fslbm_advance_surface(const int lev)
                 });
             amrex::Gpu::synchronize();
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 5a: Excess mass redistribution (Donath 2011 §2.3.2, Körner 2005).
+    //
+    // When a cell converts, its excess mass must be distributed to neighboring
+    // INTERFACE cells to maintain global mass conservation.  The excess mass
+    // is stored in mass_flux component 1.  We distribute it weighted by the
+    // interface normal direction (Pohl 2008 / Schwarzmeier 2023):
+    //   weight_i = n̂ · ê_i  (for LIQUID→INTERFACE conversion, bias toward gas)
+    //   weight_i = -(n̂ · ê_i) (for GAS→INTERFACE conversion, bias toward liquid)
+    // If no weighting info available, equal distribution is used.
+    // -----------------------------------------------------------------------
+    mass_flux.FillBoundary(Geom(lev).periodicity());
+    m_cell_type[lev].FillBoundary(Geom(lev).periodicity());
+    {
+        auto const& phi_arrs  = m_phi_fslbm[lev].arrays();
+        auto const& flag_arrs = mass_flux.const_arrays();
+        auto const& ct_arrs   = m_cell_type[lev].const_arrays();
+        auto const& f_arrs    = m_f[lev].const_arrays();
+
+        amrex::ParallelFor(
+            m_phi_fslbm[lev],
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
+                // Only INTERFACE cells receive excess mass from converted neighbors
+                if (ct_arrs[nbx](iv, 0) != CELL_INTERFACE) { return; }
+
+                amrex::Real total_excess = amrex::Real(0.0);
+                // Look at face-connected neighbors (6 directions)
+                for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                    const auto ep = amrex::IntVect::TheDimensionVector(d);
+                    for (int s : {+1, -1}) {
+                        const amrex::IntVect ivn = iv + s * ep;
+                        const amrex::Real fl = flag_arrs[nbx](ivn, 0);
+                        if (fl > amrex::Real(0.5) || fl < amrex::Real(-0.5)) {
+                            // This neighbor converted.  Count how many
+                            // INTERFACE cells are its neighbors (for equal split).
+                            int n_ifc_nbrs = 0;
+                            for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
+                                const auto ep2 = amrex::IntVect::TheDimensionVector(dd);
+                                for (int ss : {+1, -1}) {
+                                    const amrex::IntVect ivnn = ivn + ss * ep2;
+                                    if (ct_arrs[nbx](ivnn, 0) == CELL_INTERFACE) {
+                                        ++n_ifc_nbrs;
+                                    }
+                                }
+                            }
+                            if (n_ifc_nbrs > 0) {
+                                total_excess += flag_arrs[nbx](ivn, 1)
+                                    / amrex::Real(n_ifc_nbrs);
+                            }
+                        }
+                    }
+                }
+                if (total_excess != amrex::Real(0.0)) {
+                    // Convert excess mass to phi increment: Δφ = Δm / ρ
+                    amrex::Real rho = amrex::Real(0.0);
+                    for (int q = 0; q < N_MICRO_STATES; ++q)
+                        rho += f_arrs[nbx](iv, q);
+                    rho = amrex::max(rho, l_fslbm_rho_ref * amrex::Real(1.0e-4));
+                    phi_arrs[nbx](iv, 0) += total_excess / rho;
+                }
+            });
+        amrex::Gpu::synchronize();
     }
 
     // -----------------------------------------------------------------------
