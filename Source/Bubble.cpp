@@ -12,6 +12,8 @@
  */
 #include "Bubble.H"
 #include "Constants.H"
+#include <cstdint>
+#include <cstring>
 
 #include <AMReX_ParmParse.H>
 #include <AMReX_Geometry.H>
@@ -796,10 +798,24 @@ void BubbleManager::remove_exited_bubbles(const amrex::Geometry& geom,
                     // Find the MFIter tile that owns this cell
                     for (amrex::MFIter mfi(*phi_mf); mfi.isValid(); ++mfi) {
                         if (mfi.validbox().contains(iv)) {
-                            const amrex::Real phi_val =
-                                (*phi_mf).array(mfi)(iv, 0);
-                            if (phi_val < 0.5) {
-                                p.id() = -1;  // in gas region — exit
+                            // Read via memcpy to avoid loading SNaN into FP
+                            // register (which triggers SIGFPE with FPE trapping).
+                            const amrex::Real* ptr = &((*phi_mf).array(mfi)(iv, 0));
+                            std::uint64_t bits;
+                            std::memcpy(&bits, ptr, sizeof(bits));
+                            // IEEE 754 double NaN: exponent all 1s, mantissa != 0
+                            const std::uint64_t exp_mask = 0x7FF0000000000000ULL;
+                            const std::uint64_t man_mask = 0x000FFFFFFFFFFFFFULL;
+                            const bool is_nan = ((bits & exp_mask) == exp_mask) &&
+                                                ((bits & man_mask) != 0);
+                            if (is_nan) {
+                                p.id() = -1;
+                            } else {
+                                amrex::Real phi_val;
+                                std::memcpy(&phi_val, ptr, sizeof(phi_val));
+                                if (phi_val < 0.5) {
+                                    p.id() = -1;
+                                }
                             }
                             break;
                         }
