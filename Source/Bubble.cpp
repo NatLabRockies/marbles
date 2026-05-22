@@ -942,7 +942,8 @@ void BubbleManager::deposit_o2_sources(
     amrex::MultiFab&       o2_src_mf,
     const amrex::MultiFab& o2_conc_mf,
     const amrex::MultiFab& derived,
-    const amrex::Geometry& geom)
+    const amrex::Geometry& geom,
+    const amrex::iMultiFab* is_fluid_mf)
 {
     const amrex::Real dx     = m_params.dx_phys;
     const amrex::Real dt     = m_params.dt_phys;
@@ -976,6 +977,7 @@ void BubbleManager::deposit_o2_sources(
                     // Guard: skip bubbles at positions where underlying
                     // MultiFab data may contain signaling NaN (outside
                     // initialized fluid domain or in EB cells).
+                    bool skip_solid = false;
                     {
                         const int ci = static_cast<int>(std::floor((p.pos(0) - plo[0]) / dx_arr[0]));
                         const int cj = static_cast<int>(std::floor((p.pos(1) - plo[1]) / dx_arr[1]));
@@ -984,7 +986,21 @@ void BubbleManager::deposit_o2_sources(
                             p.id() = -1;
                             ++fi; continue;
                         }
+                        // Skip bubbles inside solid cells — no mass transfer
+                        // should occur inside impeller/walls.
+                        if (is_fluid_mf != nullptr) {
+                            const amrex::IntVect iv(AMREX_D_DECL(ci, cj, ck));
+                            for (amrex::MFIter mfi(*is_fluid_mf); mfi.isValid(); ++mfi) {
+                                if (mfi.validbox().contains(iv)) {
+                                    if ((*is_fluid_mf).array(mfi)(iv, 0) == 0) {
+                                        skip_solid = true;
+                                    }
+                                    break;
+                                }
+                            }
+                        }
                     }
+                    if (skip_solid) { ++fi; continue; }
 
                     const amrex::Real d   = p.rdata(BubbleIdx::DIAMETER);
                     const amrex::Real r   = 0.5 * d;
@@ -1055,6 +1071,13 @@ void BubbleManager::deposit_o2_sources(
                     // Source deposit [mol/(m³·s)]
                     const amrex::Real src_rate = dn_i / dx3;
 
+                    // Guard: skip deposit if source is non-finite or unreasonably large.
+                    // With FPE disabled, NaN/Inf can arise from interpolation of
+                    // uninitialized cells; reject silently.
+                    if (!std::isfinite(src_rate) || std::abs(src_rate) > 1.0e4) {
+                        ++fi; continue;
+                    }
+
                     const int ci = static_cast<int>(std::floor((p.pos(0) - plo[0]) / dx_arr[0]));
                     const int cj = static_cast<int>(std::floor((p.pos(1) - plo[1]) / dx_arr[1]));
                     const int ck = static_cast<int>(std::floor((p.pos(2) - plo[2]) / dx_arr[2]));
@@ -1104,7 +1127,8 @@ void BubbleManager::advance(
     amrex::MultiFab&           fluid_force_mf,
     amrex::MultiFab&           o2_src_mf,
     amrex::Real                phys_time,
-    const amrex::MultiFab*     phi_mf)
+    const amrex::MultiFab*     phi_mf,
+    const amrex::iMultiFab*    is_fluid_mf)
 {
     if (!m_initialized) { return; }
     if (!m_particles_ever_injected) { return; }  // m_particles not yet sized
@@ -1157,6 +1181,19 @@ void BubbleManager::advance(
         phi_h_ptr = phi_h.get();
     }
 
+    // Optional is_fluid_mf: copy if provided for solid-body collision
+    std::unique_ptr<amrex::iMultiFab> is_fluid_h;
+    const amrex::iMultiFab* is_fluid_h_ptr = nullptr;
+    if (is_fluid_mf != nullptr) {
+        is_fluid_h = std::make_unique<amrex::iMultiFab>(
+            is_fluid_mf->boxArray(), is_fluid_mf->DistributionMap(),
+            is_fluid_mf->nComp(), 0,
+            amrex::MFInfo().SetArena(amrex::The_Pinned_Arena()));
+        amrex::iMultiFab::Copy(*is_fluid_h, *is_fluid_mf, 0, 0, is_fluid_mf->nComp(), 0);
+        amrex::Gpu::streamSynchronize();
+        is_fluid_h_ptr = is_fluid_h.get();
+    }
+
     // ------------------------------------------------------------------
     // 1. Boyle's law diameter correction (reads only particle data — pinned)
     // ------------------------------------------------------------------
@@ -1182,7 +1219,7 @@ void BubbleManager::advance(
     // 4. Mass transfer O2 source + bubble shrinkage.
     //    Also done before Redistribute for the same index-safety reason.
     // ------------------------------------------------------------------
-    deposit_o2_sources(o2_src_h, o2_conc_h, derived_h, geom);
+    deposit_o2_sources(o2_src_h, o2_conc_h, derived_h, geom, is_fluid_h_ptr);
 
     // ------------------------------------------------------------------
     // 5. Velocity Verlet integration
@@ -1190,8 +1227,16 @@ void BubbleManager::advance(
     //    v(t+dt) = v(t) + a(t)*dt_phys                       [m/s, SI]
     //    (Full 2nd-order Verlet; a from compute_forces above)
     //    Redistribute after this call may reorder particle storage.
+    //
+    //    Solid-body collision: after the position update, if the bubble's
+    //    new cell is solid (is_fluid == 0), revert position and zero
+    //    velocity to prevent penetration into impeller/walls.
     // ------------------------------------------------------------------
     {
+        const amrex::Real* plo    = geom.ProbLo();
+        const amrex::Real* dx_arr = geom.CellSize();
+        const amrex::Box   domain = geom.Domain();
+
         for (int lev = 0; lev <= m_container.finestLevel(); ++lev) {
             for (auto& kv : m_container.GetParticles(lev)) {
                 auto& pbox = kv.second;
@@ -1214,6 +1259,11 @@ void BubbleManager::advance(
                     const amrex::Real vy = p.rdata(BubbleIdx::VY);
                     const amrex::Real vz = p.rdata(BubbleIdx::VZ);
 
+                    // Save old position for solid-body collision revert
+                    const amrex::Real old_x = p.pos(0);
+                    const amrex::Real old_y = p.pos(1);
+                    const amrex::Real old_z = p.pos(2);
+
                     // Position update (to LB cells): Δx_LB = v_SI * dt_phys / dx_phys
                     p.pos(0) += (vx * dt_phys + 0.5 * ax * dt_phys * dt_phys) / dx_phys;
                     p.pos(1) += (vy * dt_phys + 0.5 * ay * dt_phys * dt_phys) / dx_phys;
@@ -1223,6 +1273,104 @@ void BubbleManager::advance(
                     p.rdata(BubbleIdx::VX) = vx + ax * dt_phys;
                     p.rdata(BubbleIdx::VY) = vy + ay * dt_phys;
                     p.rdata(BubbleIdx::VZ) = vz + az * dt_phys;
+
+                    // Solid-body collision: prevent bubble from entering solid
+                    if (is_fluid_h_ptr != nullptr) {
+                        const int ci = static_cast<int>(std::floor((p.pos(0) - plo[0]) / dx_arr[0]));
+                        const int cj = static_cast<int>(std::floor((p.pos(1) - plo[1]) / dx_arr[1]));
+                        const int ck = static_cast<int>(std::floor((p.pos(2) - plo[2]) / dx_arr[2]));
+                        const amrex::IntVect iv(AMREX_D_DECL(ci, cj, ck));
+
+                        bool new_in_solid = false;
+                        if (!domain.contains(iv)) {
+                            new_in_solid = true;
+                        } else {
+                            for (amrex::MFIter mfi(*is_fluid_h_ptr); mfi.isValid(); ++mfi) {
+                                if (mfi.validbox().contains(iv)) {
+                                    if ((*is_fluid_h_ptr).array(mfi)(iv, 0) == 0) {
+                                        new_in_solid = true;
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (new_in_solid) {
+                            // Check if old position is also solid (impeller
+                            // swept over the bubble — need to push/spill it
+                            // to nearest fluid neighbor).
+                            const int oi = static_cast<int>(std::floor((old_x - plo[0]) / dx_arr[0]));
+                            const int oj = static_cast<int>(std::floor((old_y - plo[1]) / dx_arr[1]));
+                            const int ok = static_cast<int>(std::floor((old_z - plo[2]) / dx_arr[2]));
+                            const amrex::IntVect oiv(AMREX_D_DECL(oi, oj, ok));
+
+                            bool old_in_solid = false;
+                            if (!domain.contains(oiv)) {
+                                old_in_solid = true;
+                            } else {
+                                for (amrex::MFIter mfi(*is_fluid_h_ptr); mfi.isValid(); ++mfi) {
+                                    if (mfi.validbox().contains(oiv)) {
+                                        if ((*is_fluid_h_ptr).array(mfi)(oiv, 0) == 0) {
+                                            old_in_solid = true;
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if (!old_in_solid) {
+                                // New position hit solid but old was fluid:
+                                // simple wall collision — revert position.
+                                p.pos(0) = old_x;
+                                p.pos(1) = old_y;
+                                p.pos(2) = old_z;
+                                p.rdata(BubbleIdx::VX) = 0.0;
+                                p.rdata(BubbleIdx::VY) = 0.0;
+                                p.rdata(BubbleIdx::VZ) = 0.0;
+                                p.rdata(BubbleIdx::AX) = 0.0;
+                                p.rdata(BubbleIdx::AY) = 0.0;
+                                p.rdata(BubbleIdx::AZ) = 0.0;
+                            } else {
+                                // Both old and new are solid — impeller swept
+                                // over the bubble.  Push to nearest fluid cell
+                                // (spill-like behavior).
+                                bool found_fluid = false;
+                                // Search in 26-connected neighborhood of old cell
+                                for (int di = -1; di <= 1 && !found_fluid; ++di) {
+                                    for (int dj = -1; dj <= 1 && !found_fluid; ++dj) {
+                                        for (int dk = -1; dk <= 1 && !found_fluid; ++dk) {
+                                            if (di == 0 && dj == 0 && dk == 0) continue;
+                                            const amrex::IntVect niv(AMREX_D_DECL(oi+di, oj+dj, ok+dk));
+                                            if (!domain.contains(niv)) continue;
+                                            for (amrex::MFIter mfi(*is_fluid_h_ptr); mfi.isValid(); ++mfi) {
+                                                if (mfi.validbox().contains(niv)) {
+                                                    if ((*is_fluid_h_ptr).array(mfi)(niv, 0) == 1) {
+                                                        // Place bubble at center of this fluid cell
+                                                        p.pos(0) = (niv[0] + 0.5) * dx_arr[0] + plo[0];
+                                                        p.pos(1) = (niv[1] + 0.5) * dx_arr[1] + plo[1];
+                                                        p.pos(2) = (niv[2] + 0.5) * dx_arr[2] + plo[2];
+                                                        p.rdata(BubbleIdx::VX) = 0.0;
+                                                        p.rdata(BubbleIdx::VY) = 0.0;
+                                                        p.rdata(BubbleIdx::VZ) = 0.0;
+                                                        p.rdata(BubbleIdx::AX) = 0.0;
+                                                        p.rdata(BubbleIdx::AY) = 0.0;
+                                                        p.rdata(BubbleIdx::AZ) = 0.0;
+                                                        found_fluid = true;
+                                                    }
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if (!found_fluid) {
+                                    // No fluid neighbor in immediate vicinity —
+                                    // bubble is deeply embedded; remove it.
+                                    p.id() = -1;
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

@@ -179,7 +179,8 @@ public:
         amrex::MultiFab&           fluid_force_mf,
         amrex::MultiFab&           o2_src_mf,
         amrex::Real                phys_time,
-        const amrex::MultiFab*     phi_mf = nullptr);
+        const amrex::MultiFab*     phi_mf = nullptr,
+        const amrex::iMultiFab*    is_fluid_mf = nullptr);
 
     /// Sparger injection: create new bubbles at a rate matching flow_rate.
     /// Call every step before advance().
@@ -253,7 +254,8 @@ private:
         amrex::MultiFab&       o2_src_mf,
         const amrex::MultiFab& o2_conc_mf,
         const amrex::MultiFab& derived,
-        const amrex::Geometry& geom);
+        const amrex::Geometry& geom,
+        const amrex::iMultiFab* is_fluid_mf = nullptr);
 
     // -----------------------------------------------------------------------
     // Interpolation helpers

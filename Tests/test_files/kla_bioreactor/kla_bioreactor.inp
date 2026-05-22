@@ -113,9 +113,9 @@ lbm.compute_forces = 1
 lbm.use_entropic_components = 1
 lbm.clamp_component_densities = 0
 
-# Entropic alpha stabilisation for the main f distribution (off by default).
-# Enable if the momentum/energy solver develops negative populations at high Re.
-lbm.use_entropic_f = 0
+# Entropic alpha stabilisation for the main f distribution.
+# Required: spill deposits create rho≈3.8 at impeller tips (far from equilibrium).
+lbm.use_entropic_f = 1
 
 lbm.body_is_isothermal = 0
 
@@ -204,8 +204,10 @@ bubble.breakup_model  = "triangle"   # mode = 0.2 (80/20 vol split most probable
 # 0.1 mm ≈ physical Hinze limit at peak impeller ε ~ 2000 m²/s³.
 bubble.min_diameter   = 1.0e-4       # m  (0.1 mm)
 # Maximum local epsilon fed to Hinze criterion [m²/s³].
-# Caps boundary-layer ε spikes; realistic peak near 400 RPM impeller ~ 2000 m²/s³.
-bubble.eps_max        = 5000.0       # m²/s³
+# M-Star reports peak ε ≈ 10 m²/s³ for this geometry (5L, 400 RPM, 1mm lattice).
+# Cap at 50 m²/s³ (5× safety factor) to prevent under-resolved boundary-layer
+# spikes from driving unphysical fragmentation.  At 50 m²/s³, D_e ≈ 0.68 mm.
+bubble.eps_max        = 50.0         # m²/s³
 
 # Statistics output
 bubble.stats_int  = 800             # steps between CSV writes (~0.01 s physical)
