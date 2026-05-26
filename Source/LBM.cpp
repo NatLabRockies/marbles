@@ -5551,18 +5551,6 @@ void LBM::apply_bubble_body_force(int lev, const amrex::MultiFab& force_mf)
             amrex::Real duy = Fy * dt * inv_rho;
             amrex::Real duz = Fz * dt * inv_rho;
 
-            // Clamp velocity perturbation to 0.5 * cs (local sound speed).
-            // Preserves force direction but limits magnitude to avoid
-            // supersonic perturbations from concentrated point forces.
-            const amrex::Real du2 = dux*dux + duy*duy + duz*duz;
-            const amrex::Real du_max_sq = amrex::Real(0.25) * l_gamma * r_temperature;
-            if (du2 > du_max_sq) {
-                const amrex::Real scale = std::sqrt(du_max_sq / du2);
-                dux *= scale;
-                duy *= scale;
-                duz *= scale;
-            }
-
             const amrex::Real ux1 = ux + dux;
             const amrex::Real uy1 = uy + duy;
             const amrex::Real uz1 = uz + duz;
@@ -6520,6 +6508,42 @@ void LBM::fslbm_advance_surface(const int lev)
             }
         }
     }
+    // Diagnostic: rho of CELL_LIQUID cells in a 5-cell band just below the
+    // free surface (k=155..159).  Reveals whether elevated rho from impeller
+    // spill deposits propagates upward to the interface.
+    if (m_print_int > 0 && m_isteps[0] % m_print_int == 0) {
+        // comp 0: rho (LIQUID in band), comp 1: |u| (LIQUID in band)
+        amrex::MultiFab surf_diag(boxArray(lev), DistributionMap(lev), 2, 0,
+                                   amrex::MFInfo(), *(m_factory[lev]));
+        surf_diag.setVal(amrex::Real(0.0));
+        auto const& sd_arrs = surf_diag.arrays();
+        auto const& f_surf  = m_f[lev].const_arrays();
+        auto const& ct_surf = m_cell_type[lev].const_arrays();
+        const int k_surf = static_cast<int>(m_free_surface_z - Geom(lev).ProbLo(2));
+        const int k_lo = k_surf - 5;
+        const int k_hi = k_surf - 1;
+        amrex::ParallelFor(surf_diag,
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                if (k < k_lo || k > k_hi) return;
+                if (ct_surf[nbx](i,j,k,0) != CELL_LIQUID) return;
+                amrex::Real rho = 0.0, mx = 0.0, my = 0.0, mz = 0.0;
+                const stencil::Stencil st;
+                for (int q = 0; q < N_MICRO_STATES; ++q) {
+                    amrex::Real fq = f_surf[nbx](i,j,k,q);
+                    rho += fq;
+                    mx += fq * st.evs[q][0];
+                    my += fq * st.evs[q][1];
+                    mz += fq * st.evs[q][2];
+                }
+                sd_arrs[nbx](i,j,k,0) = rho;
+                sd_arrs[nbx](i,j,k,1) = std::sqrt(mx*mx+my*my+mz*mz)
+                                         / amrex::max(rho, amrex::Real(1e-10));
+            });
+        amrex::Gpu::synchronize();
+        amrex::Print() << "  surface_band(k=" << k_lo << ".." << k_hi
+                       << ") liq rho=[" << surf_diag.min(0) << "," << surf_diag.max(0)
+                       << "] |u|_max=" << surf_diag.max(1) << "\n";
+    }
     {
         auto const& dm_arrs  = mass_flux.arrays();
         auto const& f_ro     = m_f[lev].const_arrays();
@@ -6595,17 +6619,11 @@ void LBM::fslbm_advance_surface(const int lev)
                 amrex::Real rho = amrex::Real(0.0);
                 for (int q = 0; q < N_MICRO_STATES; ++q)
                     rho += f_ro_cur[nbx](iv, q);
-                rho = amrex::max(rho, amrex::Real(1.0e-4) * l_fslbm_rho_ref);
-                // Phi update with clamp: prevent extreme phi excursions that
-                // trigger cascade conversions and drain the energy lattice.
-                // Excess mass from clamping is stored and redistributed later.
-                const amrex::Real phi_unclamped =
+                const amrex::Real phi_new =
                     phi_arrs[nbx](iv, 0) + dm_arrs[nbx](iv, 0) / rho;
-                const amrex::Real phi_clamped = amrex::max(
-                    amrex::Real(-0.5), amrex::min(amrex::Real(1.5), phi_unclamped));
-                phi_arrs[nbx](iv, 0) = phi_clamped;
-                // Store excess mass (what was clamped away) in comp 1 for redistribution
-                dm_arrs[nbx](iv, 1) = (phi_unclamped - phi_clamped) * rho;
+                phi_arrs[nbx](iv, 0) = phi_new;
+                // No clamping: let phi evolve naturally (for diagnostics)
+                dm_arrs[nbx](iv, 1) = amrex::Real(0.0);  // No excess redistribution
             });
         amrex::Gpu::synchronize();
     }

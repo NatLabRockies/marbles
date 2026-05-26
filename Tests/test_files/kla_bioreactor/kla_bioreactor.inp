@@ -117,7 +117,8 @@ lbm.clamp_component_densities = 0
 # Required: spill deposits create rho≈3.8 at impeller tips (far from equilibrium).
 lbm.use_entropic_f = 1
 
-lbm.body_is_isothermal = 0
+lbm.body_is_isothermal = 1
+lbm.body_temperature = 0.03333
 
 # Free surface (Chiu & Lin 2011 conservative phase-field, Eq. 18)
 # Interface at z = 70 LB cells = 160 cells above domain bottom (z=-90)
