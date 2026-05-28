@@ -96,13 +96,13 @@ lbm.bc_hi = 5 5 5
 lbm.dx_outer = 1.0
 lbm.dt_outer = 1.0
 
-lbm.nu    = 0.008   # effective LBM kinematic viscosity (includes Smagorinsky SGS)
-lbm.alpha = 0.008
+lbm.nu    = 0.032   # effective LBM kinematic viscosity (includes Smagorinsky SGS)
+lbm.alpha = 0.032
 
 # One passive scalar: dissolved O₂  (component 0)
 # D_O2_LB = nu_LB / Sc = 0.008 / 500 = 1.60e-5
 lbm.n_components = 1
-lbm.diffusivity_component_0 = 1.60e-5
+lbm.diffusivity_component_0 = 6.40e-5
 
 lbm.initial_temperature = 0.03333
 lbm.adiabatic_exponent = 1.4

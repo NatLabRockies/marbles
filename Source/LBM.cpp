@@ -2727,14 +2727,19 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
     // Step 2: Save old fluid mask AND boundary layers BEFORE updating
     amrex::iMultiFab old_is_fluid(
         m_is_fluid[lev].boxArray(), m_is_fluid[lev].DistributionMap(), 1, 1);
+    amrex::iMultiFab old_fluid_side(
+        m_is_fluid[lev].boxArray(), m_is_fluid[lev].DistributionMap(), 1, 1);
     amrex::iMultiFab old_fluid_side_boundary(
         m_is_fluid[lev].boxArray(), m_is_fluid[lev].DistributionMap(), 1, 1);
     
     amrex::iMultiFab::Copy(old_is_fluid, m_is_fluid[lev], 
                           lbm::constants::IS_FLUID_IDX, 0, 1, 0);
+    amrex::iMultiFab::Copy(old_fluid_side, m_is_fluid[lev],
+                          lbm::constants::IS_FLUID_SIDE_IDX, 0, 1, 0);
     amrex::iMultiFab::Copy(old_fluid_side_boundary, m_is_fluid[lev], 
                           lbm::constants::IS_FLUID_SIDE_BOUNDARY_IDX, 0, 1, 0);
     old_is_fluid.FillBoundary(Geom(lev).periodicity());
+    old_fluid_side.FillBoundary(Geom(lev).periodicity());
     old_fluid_side_boundary.FillBoundary(Geom(lev).periodicity());
 
     // Step 3: Update fluid mask based on new fractional values
@@ -2773,6 +2778,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
     {
         auto const& newly_solid_arrs = newly_solid.const_arrays();
         auto const& frac_arrs = m_is_fluid_fraction[lev].const_arrays();
+        auto const& old_side_arrs = old_fluid_side.const_arrays();
         auto const& old_boundary_arrs = old_fluid_side_boundary.const_arrays();
         auto const& curr_fluid_arrs = m_is_fluid[lev].const_arrays();
         auto const& f_arrs = m_f[lev].arrays();
@@ -2811,7 +2817,8 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                 const auto lo = amrex::lbound(farr);
                 const auto hi = amrex::ubound(farr);
                 
-                // First pass: compute sum of weights for OLD IS_FLUID_SIDE_BOUNDARY neighbors
+                // First pass: compute weight sum for layer 1 + layer 2 neighbors
+                // that are still fluid.  Both layers use full lattice weight.
                 amrex::Real weight_sum = 0.0;
                 for (int nq = 1; nq < constants::N_MICRO_STATES; ++nq) {
                     int ni = i + evs[nq][0];
@@ -2823,8 +2830,10 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                         nj < lo.y || nj > hi.y || 
                         nk < lo.z || nk > hi.z) continue;
                     
-                    // Add weight if neighbor was on the OLD outer boundary layer
-                    if (old_boundary_arrs[nbx](ni, nj, nk, 0) == 1) {
+                    if (curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) != 1) continue;
+                    
+                    if (old_boundary_arrs[nbx](ni, nj, nk, 0) == 1 ||
+                        old_side_arrs[nbx](ni, nj, nk, 0) == 1) {
                         weight_sum += weights[nq];
                     }
                 }
@@ -2865,10 +2874,12 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                         nj < lo.y || nj > hi.y || 
                         nk < lo.z || nk > hi.z) continue;
                     
-                    // Primary: old boundary neighbor; fallback: any fluid neighbor
+                    // Primary: layer 1 or 2 + still fluid; fallback: any fluid
                     bool valid = use_fallback
                         ? (curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1)
-                        : (old_boundary_arrs[nbx](ni, nj, nk, 0) == 1);
+                        : ((old_boundary_arrs[nbx](ni, nj, nk, 0) == 1 ||
+                            old_side_arrs[nbx](ni, nj, nk, 0) == 1) &&
+                           curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1);
 
                     if (valid) {
                         amrex::Real w = weights[nq] / weight_sum;
@@ -2909,6 +2920,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
 
         auto const& newly_solid_arrs = newly_solid.const_arrays();
         auto const& frac_arrs = m_is_fluid_fraction[lev].const_arrays();
+        auto const& old_side_arrs = old_fluid_side.const_arrays();
         auto const& old_boundary_arrs = old_fluid_side_boundary.const_arrays();
         auto const& curr_fluid_arrs = m_is_fluid[lev].const_arrays();
         auto const& f_comp_arrs = m_component_lattices[c][lev].arrays();
@@ -2932,8 +2944,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                 const auto lo = amrex::lbound(farr);
                 const auto hi = amrex::ubound(farr);
 
-                // First pass: compute sum of weights for OLD
-                // IS_FLUID_SIDE_BOUNDARY neighbors that are STILL FLUID
+                // First pass: weight sum for layer 1 + layer 2 neighbors still fluid
                 amrex::Real weight_sum = 0.0;
                 for (int nq = 1; nq < constants::N_MICRO_STATES; ++nq) {
                     int ni = i + evs[nq][0];
@@ -2945,10 +2956,10 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                         nk < lo.z || nk > hi.z)
                         continue;
 
-                    // Add weight if neighbor was on the OLD outer boundary
-                    // layer AND is still fluid in the current state
-                    if (old_boundary_arrs[nbx](ni, nj, nk, 0) == 1 &&
-                        curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1) {
+                    if (curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) != 1) continue;
+
+                    if (old_boundary_arrs[nbx](ni, nj, nk, 0) == 1 ||
+                        old_side_arrs[nbx](ni, nj, nk, 0) == 1) {
                         weight_sum += weights[nq];
                     }
                 }
@@ -2990,10 +3001,11 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                         nk < lo.z || nk > hi.z)
                         continue;
 
-                    // Primary: old boundary + still fluid; fallback: any fluid
+                    // Primary: layer 1 or 2 + still fluid; fallback: any fluid
                     bool valid = use_fallback
                         ? (curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1)
-                        : (old_boundary_arrs[nbx](ni, nj, nk, 0) == 1 &&
+                        : ((old_boundary_arrs[nbx](ni, nj, nk, 0) == 1 ||
+                            old_side_arrs[nbx](ni, nj, nk, 0) == 1) &&
                            curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1);
 
                     if (valid) {
@@ -3378,15 +3390,134 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
     amrex::Gpu::synchronize();
     } // end Step 7 block
 
-    // Component lattices: NO refill for newly-uncovered cells.
-    // The refill procedure (transfer q=0 from donor, zero q=1..26) creates a
-    // highly non-equilibrium state that destabilises the entropic collision at
-    // high Schmidt number (omega_comp ≈ 2).  Instead, newly-uncovered cells
-    // retain zero populations (from the Step 8 solid reset) and fill in
-    // naturally via streaming from fluid neighbors — matching the validated
-    // single-phase stirred_tank_reacting behaviour where only m_f and m_g
-    // have refill enabled.  Spill (mass removal when cells become solid) is
-    // still active for components above.
+    // Component lattices: Refill newly-uncovered cells using same q=0 transfer
+    // from the same donor cells identified above for m_f.  The donor may have
+    // zero component mass (deaerated region) — that is physically correct:
+    // the newly-exposed cell also gets zero.  No division-by-zero risk since
+    // donor_count >= 1 for any identified donor.
+    for (int c = 0; c < m_n_components; ++c) {
+        auto const& newly_fluid_arrs = newly_fluid_arrs_outer;
+        auto const& old_fluid_arrs   = old_fluid_arrs_outer;
+        auto const& curr_fluid_arrs  = curr_fluid_arrs_outer;
+        auto const& donor_count_arrs = donor_count_arrs_outer;
+        auto const& ct_arrs_ref      = ct_arrs_refill;
+        const bool   is_free_surface = is_free_surface_refill;
+        auto const& f_comp_arrs      = m_component_lattices[c][lev].arrays();
+
+        const stencil::Stencil stencil_c;
+        const auto& evs = stencil_c.evs;
+
+        // Step 6c: Transfer q=0 from donor to newly-fluid cell (same donor as m_f)
+        amrex::ParallelFor(m_component_lattices[c][lev], amrex::IntVect(0),
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                if (newly_fluid_arrs[nbx](i, j, k, 0) != 1) return;
+
+                // FSLBM guard (same as m_f refill)
+                if (is_free_surface) {
+                    const int ct_val = ct_arrs_ref[nbx](i, j, k, 0);
+                    if (ct_val == lbm::constants::CELL_GAS ||
+                        ct_val == lbm::constants::CELL_INTERFACE) { return; }
+                }
+
+                const auto& farr = f_comp_arrs[nbx];
+                const auto lo = amrex::lbound(farr);
+                const auto hi = amrex::ubound(farr);
+
+                // Recompute normal (same logic as Step 5/6)
+                amrex::Real normal_x = 0.0, normal_y = 0.0, normal_z = 0.0;
+                int num_persistent = 0;
+                for (int nq = 1; nq < constants::N_MICRO_STATES; ++nq) {
+                    int ni = i + evs[nq][0];
+                    int nj = j + evs[nq][1];
+                    int nk = k + evs[nq][2];
+                    if (ni < lo.x || ni > hi.x ||
+                        nj < lo.y || nj > hi.y ||
+                        nk < lo.z || nk > hi.z) continue;
+                    if (old_fluid_arrs[nbx](ni, nj, nk, 0) == 1 &&
+                        curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1) {
+                        normal_x += evs[nq][0];
+                        normal_y += evs[nq][1];
+                        normal_z += evs[nq][2];
+                        num_persistent++;
+                    }
+                }
+
+                if (num_persistent == 0) {
+                    // No persistent neighbors — zero out (same as m_f)
+                    for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+                        f_comp_arrs[nbx](i, j, k, q) = 0.0;
+                    }
+                    return;
+                }
+
+                amrex::Real norm = std::sqrt(normal_x*normal_x + normal_y*normal_y + normal_z*normal_z);
+
+                // Find donor
+                int donor_i = -1, donor_j = -1, donor_k = -1;
+                if (norm > 0.0) {
+                    normal_x /= norm; normal_y /= norm; normal_z /= norm;
+                    amrex::Real max_dot = -1e10;
+                    for (int nq = 1; nq < constants::N_MICRO_STATES; ++nq) {
+                        int ni = i + evs[nq][0];
+                        int nj = j + evs[nq][1];
+                        int nk = k + evs[nq][2];
+                        if (ni < lo.x || ni > hi.x ||
+                            nj < lo.y || nj > hi.y ||
+                            nk < lo.z || nk > hi.z) continue;
+                        if (old_fluid_arrs[nbx](ni, nj, nk, 0) == 1 &&
+                            curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1) {
+                            amrex::Real dot = evs[nq][0]*normal_x + evs[nq][1]*normal_y + evs[nq][2]*normal_z;
+                            if (dot > max_dot) {
+                                max_dot = dot;
+                                donor_i = ni; donor_j = nj; donor_k = nk;
+                            }
+                        }
+                    }
+                } else {
+                    // norm==0 fallback: first persistent neighbor
+                    for (int nq = 1; nq < constants::N_MICRO_STATES; ++nq) {
+                        int ni = i + evs[nq][0];
+                        int nj = j + evs[nq][1];
+                        int nk = k + evs[nq][2];
+                        if (ni < lo.x || ni > hi.x ||
+                            nj < lo.y || nj > hi.y ||
+                            nk < lo.z || nk > hi.z) continue;
+                        if (old_fluid_arrs[nbx](ni, nj, nk, 0) == 1 &&
+                            curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1) {
+                            donor_i = ni; donor_j = nj; donor_k = nk;
+                            break;
+                        }
+                    }
+                }
+
+                // Transfer q=0 from donor, zero q=1..26
+                if (donor_i >= 0) {
+                    int n_recipients = donor_count_arrs[nbx](donor_i, donor_j, donor_k, 0);
+                    amrex::Real scale = (n_recipients > 0)
+                        ? 1.0 / amrex::Real(n_recipients) : 0.0;
+                    f_comp_arrs[nbx](i, j, k, 0) =
+                        f_comp_arrs[nbx](donor_i, donor_j, donor_k, 0) * scale;
+                    for (int q = 1; q < constants::N_MICRO_STATES; ++q) {
+                        f_comp_arrs[nbx](i, j, k, q) = 0.0;
+                    }
+                } else {
+                    for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+                        f_comp_arrs[nbx](i, j, k, q) = 0.0;
+                    }
+                }
+            });
+        amrex::Gpu::synchronize();
+
+        // Step 7c: Zero donor's q=0 for this component (conserve mass)
+        amrex::ParallelFor(m_component_lattices[c][lev], amrex::IntVect(0),
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                int n_recipients = donor_count_arrs[nbx](i, j, k, 0);
+                if (n_recipients == 0) return;
+                if (curr_fluid_arrs[nbx](i, j, k, lbm::constants::IS_FLUID_IDX) != 1) return;
+                f_comp_arrs[nbx](i, j, k, 0) = 0.0;
+            });
+        amrex::Gpu::synchronize();
+    }
 
     } // End of refill block
 
