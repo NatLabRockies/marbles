@@ -1333,36 +1333,39 @@ void LBM::relax_f_to_equilibrium(const int lev)
                     1.0 /
                     (nu / (specific_gas_constant * temperature * dt) + 0.5);
 
-                // f is updated here only for plain BGK; the entropic path
-                // handles f in a separate cell-loop below.
+                // f and g are updated here only for plain BGK; the entropic
+                // path handles both f and g in a separate cell-loop below.
                 if (!use_entropic_f) {
                     f_arr(iv, q) += omega * (eq_arr(iv, q) - f_arr(iv, q));
-                }
+                    g_arr(iv, q) += omega * (eq_arr_g(iv, q) - g_arr(iv, q));
 
-                g_arr(iv, q) += omega * (eq_arr_g(iv, q) - g_arr(iv, q));
+                    if (body_is_isothermal) {
+                        if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_SIDE_IDX) == 1) {
+                            g_arr(iv, q) = eq_arr_g(iv, q);
+                        }
+                    }
 
-                if (body_is_isothermal) {
-                    if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_SIDE_IDX) == 1) {
+                    if (fluid_is_isothermal) {
                         g_arr(iv, q) = eq_arr_g(iv, q);
                     }
-                }
-
-                if (fluid_is_isothermal) {
-                    g_arr(iv, q) = eq_arr_g(iv, q);
                 }
             }
         });
     amrex::Gpu::synchronize();  // catch any CUDA error before bubble CPU code runs
 
-    // --- Entropic alpha solve for m_f (Ansumali & Karlin, Phys. Rev. E 2002) ---
+    // --- Entropic alpha solve for m_f AND m_g ---
+    // (Ansumali & Karlin, Phys. Rev. E 2002; Frapolli et al. thermal extension)
     // Finds alpha* in (0, 2] s.t. H(f + alpha*(f_eq - f)) = H(f), where
     //   H(f) = sum_q f_q * ln(f_q / f_ref_q)
-    //   f_ref_q = f^eq(rho, 0, T)  (zero-velocity Maxwellian reference).
+    //   f_ref_q = f^eq(1, 0, T)  (zero-velocity Maxwellian reference).
+    //
+    // The SAME alpha is applied to both f and g (energy lattice), ensuring
+    // consistent effective viscosity for momentum and energy transport.
     //
     // alpha_use hierarchy:
-    //   Newton succeeds  :  min(omega, alpha*)   [tightest H-theorem bound]
-    //   Negative pops    :  min(omega, 1.0)      [safe fallback, monotone]
-    //   Disabled         :  (this block not executed)
+    //   Newton succeeds     :  min(omega, alpha*)        [H-theorem bound]
+    //   Newton fails / neg  :  positivity-preserving max [smooth fallback]
+    //   Disabled            :  (this block not executed)
     //
     // Controlled by lbm.use_entropic_f (default = 0).
     if (use_entropic_f) {
@@ -1378,6 +1381,8 @@ void LBM::relax_f_to_equilibrium(const int lev)
 
                 const auto f_arr  = f_arrs[nbx];
                 const auto eq_arr = eq_arrs[nbx];
+                const auto g_arr  = g_arrs[nbx];
+                const auto eq_arr_g = eq_arrs_g[nbx];
                 const auto md_arr = md_arrs[nbx];
 
                 const amrex::Real temperature =
@@ -1393,9 +1398,7 @@ void LBM::relax_f_to_equilibrium(const int lev)
                 }
 
                 // Zero-velocity unit-density reference for the H-function:
-                //   f_ref[q] = f^eq(1, 0, T)  — identical to eq_unit_arr(iv, q+NQ)
-                //   used for the component entropic solve.  Unit density makes the
-                //   logarithm independent of rho (matching the component convention).
+                //   f_ref[q] = f^eq(1, 0, T)
                 const amrex::RealVect zero_vel = {AMREX_D_DECL(0.0, 0.0, 0.0)};
                 amrex::GpuArray<amrex::Real, NQ> f_ref;
                 for (int q = 0; q < NQ; ++q) {
@@ -1404,8 +1407,28 @@ void LBM::relax_f_to_equilibrium(const int lev)
                         l_mesh_speed, weight[q], evs[q]);
                 }
 
-                // Safe fallback: min(omega, 1.0) guarantees monotone approach
-                amrex::Real alpha_use = amrex::min(omega, 1.0);
+                // --- Positivity-preserving fallback ---
+                // Instead of hard min(omega, 1.0), compute the maximum alpha
+                // that keeps all post-collision populations non-negative:
+                //   f + alpha*(eq - f) > 0  =>  alpha < f_q / (f_q - eq_q)
+                // for each q where eq_q < f_q.  This gives a smooth spatial
+                // transition instead of a discontinuous jump to 1.
+                amrex::Real alpha_pos = omega;
+                for (int q = 0; q < NQ; ++q) {
+                    const amrex::Real fq = f_arr(iv, q);
+                    const amrex::Real sq = eq_all[q] - fq;
+                    if (sq < -1.0e-30) {
+                        if (fq > 0.0) {
+                            alpha_pos = amrex::min(alpha_pos, fq / (-sq));
+                        } else {
+                            // Population already non-positive and relaxation
+                            // would make it worse: no safe alpha exists.
+                            alpha_pos = 0.0;
+                            break;
+                        }
+                    }
+                }
+                amrex::Real alpha_use = amrex::max(alpha_pos * 0.95, 0.0);
 
                 // Attempt Newton only when all pre-collision pops are positive
                 amrex::Real H0 = 0.0;
@@ -1421,20 +1444,20 @@ void LBM::relax_f_to_equilibrium(const int lev)
                     amrex::Real alpha = 2.0;
                     bool newton_converged = false;
                     for (int iter = 0; iter < 10; ++iter) {
-                        amrex::Real g = -H0, dg = 0.0;
+                        amrex::Real gval = -H0, dg = 0.0;
                         bool fhat_positive = true;
                         for (int q = 0; q < NQ; ++q) {
                             const amrex::Real sq   = eq_all[q] - f_arr(iv, q);
                             const amrex::Real fhat = f_arr(iv, q) + alpha * sq;
                             if (fhat <= 0.0) { fhat_positive = false; break; }
                             const amrex::Real ln_ratio = log(fhat / f_ref[q]);
-                            g  += fhat * ln_ratio;
-                            dg += sq * (ln_ratio + 1.0);
+                            gval += fhat * ln_ratio;
+                            dg   += sq * (ln_ratio + 1.0);
                         }
                         if (!fhat_positive || fabs(dg) < 1.0e-14) { break; }
-                        alpha -= g / dg;
+                        alpha -= gval / dg;
                         alpha = amrex::min(2.0, amrex::max(0.0, alpha));
-                        if (fabs(g) < 1.0e-12 * (fabs(H0) + 1.0e-30)) {
+                        if (fabs(gval) < 1.0e-12 * (fabs(H0) + 1.0e-30)) {
                             newton_converged = true;
                             break;
                         }
@@ -1442,12 +1465,32 @@ void LBM::relax_f_to_equilibrium(const int lev)
                     if (newton_converged) {
                         alpha_use = amrex::min(omega, alpha);
                     }
-                    // else: alpha_use remains min(omega, 1.0)
+                    // else: alpha_use remains positivity-preserving fallback
                 }
 
                 // Apply entropic collision to f
                 for (int q = 0; q < NQ; ++q) {
                     f_arr(iv, q) += alpha_use * (eq_all[q] - f_arr(iv, q));
+                }
+
+                // Apply SAME alpha to g (energy lattice) — ensures consistent
+                // effective viscosity between momentum and energy transport.
+                for (int q = 0; q < NQ; ++q) {
+                    g_arr(iv, q) += alpha_use * (eq_arr_g(iv, q) - g_arr(iv, q));
+                }
+
+                // Isothermal forcing on g for boundary layer cells
+                if (body_is_isothermal) {
+                    if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_SIDE_IDX) == 1) {
+                        for (int q = 0; q < NQ; ++q) {
+                            g_arr(iv, q) = eq_arr_g(iv, q);
+                        }
+                    }
+                }
+                if (fluid_is_isothermal) {
+                    for (int q = 0; q < NQ; ++q) {
+                        g_arr(iv, q) = eq_arr_g(iv, q);
+                    }
                 }
             });
         amrex::Gpu::synchronize();
@@ -1581,27 +1624,31 @@ void LBM::relax_f_to_equilibrium(const int lev)
                     // Find alpha* in (0, 2] s.t. H(f + alpha*(f_eq - f)) = H(f),
                     // where H(f) = sum_q f_q * ln(f_q / eq_ref_q)  and
                     //   eq_ref_q = f^eq(1, 0, T_local)  (zero-velocity reference).
-                    // This generalises the standard H = sum f ln(f/w_q), which holds
-                    // only at the isothermal point cs^2 = 1/3.
                     //
                     // alpha_use hierarchy (when entropic is enabled):
-                    //   Newton succeeds  :  min(omega_comp, alpha*)   [tightest bound]
-                    //   Newton skipped   :  min(omega_comp, 1.0)      [safe fallback —
-                    //     (negative pops,   monotone approach to eq., never overshoots]
-                    //     near-zero rho)
+                    //   Newton succeeds  :  min(omega_comp, alpha*)   [H-theorem bound]
+                    //   Newton fails     :  positivity-preserving max [smooth fallback]
                     //   Entropic disabled:  omega_comp                [pure BGK]
                     //
-                    // The safe fallback is critical at low diffusivity where
-                    // omega_comp ≈ 2.0: sharp IC edges and refill ghost cells can
-                    // develop negative populations that escape the Newton solve and
-                    // would otherwise receive the worst-case BGK relaxation rate.
                     // Controlled by lbm.use_entropic_components (default = 0).
                     amrex::Real alpha_use = omega_comp; // entropic disabled: pure BGK
                     if (use_entropic_components) {
-                        // Safe fallback for any cell where Newton cannot run.
-                        // min(omega_comp, 1.0) guarantees monotone approach
-                        // toward equilibrium regardless of population state.
-                        alpha_use = amrex::min(omega_comp, 1.0);
+                        // Positivity-preserving fallback: max alpha s.t. all
+                        // post-collision populations remain non-negative.
+                        amrex::Real alpha_pos = omega_comp;
+                        for (int q = 0; q < NQ; ++q) {
+                            const amrex::Real fq = f_comp_arr(iv, q);
+                            const amrex::Real sq = eq_all[q] - fq;
+                            if (sq < -1.0e-30) {
+                                if (fq > 0.0) {
+                                    alpha_pos = amrex::min(alpha_pos, fq / (-sq));
+                                } else {
+                                    alpha_pos = 0.0;
+                                    break;
+                                }
+                            }
+                        }
+                        alpha_use = amrex::max(alpha_pos * 0.95, 0.0);
 
                         // Attempt the full entropic solve only when all pre-collision
                         // populations are strictly positive (H0 is well-defined).
@@ -1612,10 +1659,6 @@ void LBM::relax_f_to_equilibrium(const int lev)
                             if (fq <= 0.0) { all_positive = false; break; }
                             amrex::Real eq_ref_q = eq_unit_arr(iv, q + NQ);
                             if (eq_ref_q <= 0.0 || isnan(eq_ref_q)) {
-                                printf("[H0_BAD_REF] cell=(%d,%d,%d) q=%d "
-                                       "eq_ref=%e fq=%e T=%e\n",
-                                       iv[0], iv[1], iv[2], q,
-                                       eq_ref_q, fq, temperature);
                                 all_positive = false; break;
                             }
                             H0 += fq * log(fq / eq_ref_q);
@@ -1623,11 +1666,10 @@ void LBM::relax_f_to_equilibrium(const int lev)
 
                         if (all_positive) {
                             // Newton iteration: g(alpha) = H(f + alpha*s) - H0 = 0
-                            // g'(alpha) = sum_q s_q * (ln(fhat_q / eq_ref_q) + 1)
                             amrex::Real alpha = 2.0; // start at BGK mirror point
                             bool newton_converged = false;
                             for (int iter = 0; iter < 10; ++iter) {
-                                amrex::Real g = -H0, dg = 0.0;
+                                amrex::Real gval = -H0, dg = 0.0;
                                 bool fhat_positive = true;
                                 for (int q = 0; q < NQ; ++q) {
                                     amrex::Real sq =
@@ -1640,29 +1682,22 @@ void LBM::relax_f_to_equilibrium(const int lev)
                                     }
                                     amrex::Real ln_fhat_w =
                                         log(fhat / eq_unit_arr(iv, q + NQ));
-                                    g  += fhat * ln_fhat_w;
-                                    dg += sq * (ln_fhat_w + 1.0);
+                                    gval += fhat * ln_fhat_w;
+                                    dg   += sq * (ln_fhat_w + 1.0);
                                 }
                                 if (!fhat_positive || fabs(dg) < 1.0e-14) break;
-                                alpha -= g / dg;
+                                alpha -= gval / dg;
                                 // clamp to [0, 2] for safety
                                 alpha = amrex::min(2.0, amrex::max(0.0, alpha));
-                                if (fabs(g) < 1.0e-12 * (fabs(H0) + 1.0e-30)) {
+                                if (fabs(gval) < 1.0e-12 * (fabs(H0) + 1.0e-30)) {
                                     newton_converged = true;
                                     break;
                                 }
                             }
-                            // Use Newton result only if it converged; otherwise
-                            // fall back to the safe monotone relaxation rate.
-                            // Without this guard, a failed Newton (e.g. negative
-                            // fhat on iter 0 due to negative eq_all entries from
-                            // high velocity) leaves alpha=2.0, which at omega≈2
-                            // produces an over-relaxation that drives populations
-                            // negative and eventually triggers NaN via streaming.
                             if (newton_converged) {
                                 alpha_use = amrex::min(omega_comp, alpha);
                             }
-                            // else: alpha_use remains min(omega_comp, 1.0)
+                            // else: alpha_use remains positivity-preserving fallback
                         }
                     }
 
