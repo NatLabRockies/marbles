@@ -332,6 +332,7 @@ void LBM::read_parameters()
         pp.query("initial_temperature", m_initialTemperature);
 
         pp.query("body_is_isothermal", m_bodyIsIsothermal);
+        pp.query("fluid_is_isothermal", m_fluidIsIsothermal);
         pp.query("body_temperature", m_bodyTemperature);
 
         pp.query("is_fluid_fraction_threshold", m_is_fluid_fraction_threshold);
@@ -1303,6 +1304,7 @@ void LBM::relax_f_to_equilibrium(const int lev)
     amrex::Real dt = m_dts[lev];
 
     const bool body_is_isothermal = m_bodyIsIsothermal;
+    const bool fluid_is_isothermal = m_fluidIsIsothermal;
     const bool use_entropic_f     = m_use_entropic_f;
 
     const amrex::Real l_mesh_speed = m_mesh_speed;
@@ -1343,6 +1345,10 @@ void LBM::relax_f_to_equilibrium(const int lev)
                     if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_SIDE_IDX) == 1) {
                         g_arr(iv, q) = eq_arr_g(iv, q);
                     }
+                }
+
+                if (fluid_is_isothermal) {
+                    g_arr(iv, q) = eq_arr_g(iv, q);
                 }
             }
         });
@@ -1676,6 +1682,15 @@ void LBM::relax_f_to_equilibrium(const int lev)
                         }
                         f_comp_arr(iv, q) = f_new;
                     }
+
+                    // Force component to equilibrium on layer 1
+                    if (body_is_isothermal) {
+                        if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_SIDE_IDX) == 1) {
+                            for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+                                f_comp_arr(iv, q) = eq_all[q];
+                            }
+                        }
+                    }
                 }
             });
     }
@@ -1701,6 +1716,7 @@ void LBM::f_to_macrodata(const int lev)
     amrex::Real cv = specific_gas_constant / (m_adiabaticExponent - 1.0);
 
     const bool body_is_isothermal = m_bodyIsIsothermal;
+    const bool fluid_is_isothermal = m_fluidIsIsothermal;
     const amrex::Real body_temperature = m_bodyTemperature;
 
     const bool body_is_moving = m_body_is_moving;
@@ -1853,6 +1869,10 @@ void LBM::f_to_macrodata(const int lev)
                     if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_SIDE_IDX) == 1) {
                         temperature = body_temperature;
                     }
+                }
+
+                if (fluid_is_isothermal) {
+                    temperature = body_temperature;
                 }
 
                 md_arr(iv, constants::TEMPERATURE_IDX) = temperature;
@@ -2817,8 +2837,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                 const auto lo = amrex::lbound(farr);
                 const auto hi = amrex::ubound(farr);
                 
-                // First pass: compute weight sum for layer 1 + layer 2 neighbors
-                // that are still fluid.  Both layers use full lattice weight.
+                // First pass: effective weight sum (layer 1 + layer 2, equal weights)
                 amrex::Real weight_sum = 0.0;
                 for (int nq = 1; nq < constants::N_MICRO_STATES; ++nq) {
                     int ni = i + evs[nq][0];
@@ -2832,9 +2851,10 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                     
                     if (curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) != 1) continue;
                     
-                    if (old_boundary_arrs[nbx](ni, nj, nk, 0) == 1 ||
-                        old_side_arrs[nbx](ni, nj, nk, 0) == 1) {
-                        weight_sum += weights[nq];
+                    if (old_side_arrs[nbx](ni, nj, nk, 0) == 1) {
+                        weight_sum += weights[nq];           // layer 1
+                    } else if (old_boundary_arrs[nbx](ni, nj, nk, 0) == 1) {
+                        weight_sum += weights[nq];           // layer 2
                     }
                 }
                 
@@ -2874,15 +2894,20 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                         nj < lo.y || nj > hi.y || 
                         nk < lo.z || nk > hi.z) continue;
                     
-                    // Primary: layer 1 or 2 + still fluid; fallback: any fluid
-                    bool valid = use_fallback
-                        ? (curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1)
-                        : ((old_boundary_arrs[nbx](ni, nj, nk, 0) == 1 ||
-                            old_side_arrs[nbx](ni, nj, nk, 0) == 1) &&
-                           curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1);
+                    // Compute effective weight: layer 1 and layer 2 equal
+                    amrex::Real eff_w = 0.0;
+                    if (use_fallback) {
+                        if (curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1)
+                            eff_w = weights[nq];
+                    } else if (curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1) {
+                        if (old_side_arrs[nbx](ni, nj, nk, 0) == 1)
+                            eff_w = weights[nq];             // layer 1
+                        else if (old_boundary_arrs[nbx](ni, nj, nk, 0) == 1)
+                            eff_w = weights[nq];             // layer 2
+                    }
 
-                    if (valid) {
-                        amrex::Real w = weights[nq] / weight_sum;
+                    if (eff_w > 0.0) {
+                        amrex::Real w = eff_w / weight_sum;
                         for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
                             amrex::Gpu::Atomic::AddNoRet(&spill_f_arrs[nbx](ni, nj, nk, q), f_arrs[nbx](i, j, k, q) * w);
                             amrex::Gpu::Atomic::AddNoRet(&spill_g_arrs[nbx](ni, nj, nk, q), g_arrs[nbx](i, j, k, q) * w);
@@ -2944,7 +2969,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                 const auto lo = amrex::lbound(farr);
                 const auto hi = amrex::ubound(farr);
 
-                // First pass: weight sum for layer 1 + layer 2 neighbors still fluid
+                // First pass: effective weight sum (layer 1 = 2×, layer 2 = 1×)
                 amrex::Real weight_sum = 0.0;
                 for (int nq = 1; nq < constants::N_MICRO_STATES; ++nq) {
                     int ni = i + evs[nq][0];
@@ -2958,9 +2983,10 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
 
                     if (curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) != 1) continue;
 
-                    if (old_boundary_arrs[nbx](ni, nj, nk, 0) == 1 ||
-                        old_side_arrs[nbx](ni, nj, nk, 0) == 1) {
-                        weight_sum += weights[nq];
+                    if (old_side_arrs[nbx](ni, nj, nk, 0) == 1) {
+                        weight_sum += weights[nq];           // layer 1
+                    } else if (old_boundary_arrs[nbx](ni, nj, nk, 0) == 1) {
+                        weight_sum += weights[nq];           // layer 2
                     }
                 }
 
@@ -3001,15 +3027,20 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                         nk < lo.z || nk > hi.z)
                         continue;
 
-                    // Primary: layer 1 or 2 + still fluid; fallback: any fluid
-                    bool valid = use_fallback
-                        ? (curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1)
-                        : ((old_boundary_arrs[nbx](ni, nj, nk, 0) == 1 ||
-                            old_side_arrs[nbx](ni, nj, nk, 0) == 1) &&
-                           curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1);
+                    // Compute effective weight: layer 1 and layer 2 equal
+                    amrex::Real eff_w = 0.0;
+                    if (use_fallback) {
+                        if (curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1)
+                            eff_w = weights[nq];
+                    } else if (curr_fluid_arrs[nbx](ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1) {
+                        if (old_side_arrs[nbx](ni, nj, nk, 0) == 1)
+                            eff_w = weights[nq];             // layer 1
+                        else if (old_boundary_arrs[nbx](ni, nj, nk, 0) == 1)
+                            eff_w = weights[nq];             // layer 2
+                    }
 
-                    if (valid) {
-                        amrex::Real w = weights[nq] / weight_sum;
+                    if (eff_w > 0.0) {
+                        amrex::Real w = eff_w / weight_sum;
                         for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
                             amrex::Gpu::Atomic::AddNoRet(
                                 &spill_comp_arrs[nbx](ni, nj, nk, q),

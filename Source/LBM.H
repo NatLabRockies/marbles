@@ -481,6 +481,9 @@ private:
     // Body is isothermal.
     bool m_bodyIsIsothermal = false;
 
+    // Entire fluid is isothermal (force T = body_temperature everywhere).
+    bool m_fluidIsIsothermal = false;
+
     // Body temperature.
     amrex::Real m_bodyTemperature = 1.0 / 3.0;
 
