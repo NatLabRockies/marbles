@@ -6060,6 +6060,7 @@ void LBM::fslbm_init_cell_type(const int lev)
                    << "  z_surf=" << z_surf << " m\n";
 }
 
+
 // ============================================================================
 // FSLBM: One free-surface time step (Körner 2005, Schwarzmeier 2023 JCP).
 //
@@ -7093,7 +7094,14 @@ void LBM::fslbm_advance_surface(const int lev)
                             }
                         }
                         
-                        // If no neighbor (found == false), it remains 0.0 from its GAS state.
+                        // If no neighbor (found == false), we establish a safe isotropic ambient
+                        // concentration (1.0) rather than leaving an artificial zero-mass sink.
+                        if (!found) {
+                            const stencil::Stencil st;
+                            for (int q = 0; q < N_MICRO_STATES; ++q) {
+                                c_arrs[nbx](iv, q) = st.weights[q];
+                            }
+                        }
                     }
                 });
             amrex::Gpu::synchronize();
