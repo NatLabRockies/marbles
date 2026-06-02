@@ -38,7 +38,7 @@ improves stability due to maximisation of the entropy and the incorporation of a
 Boltzmann approach which adds a non-local correction term to the pressure tensor to correct the insufficient 
 Galilean invariance of the standard lattice at the third order moment.
 
-Input and post processing files: `Tests/test_files/viscosityTest/`
+Input and post processing files: `Tests/test_files/viscosity_test/`
 
 .. image:: /figs/kinematicViscosity.png
    :width: 400pt   
@@ -58,7 +58,7 @@ energy equation, while the multi-relaxation on the energy lattice enables a vari
 exponent. The mean molecular mass is allowed to be a variable because the product form of the equilibrium on the 
 first lattice allows the variance of the equilibrium distribution to be RT instead of T.
 
-Input and post processing files: `Tests/test_files/thermalDiffusivityTest/`
+Input and post processing files: `Tests/test_files/thermaldiffusivity_test/`
 
 .. image:: /figs/thermalDiffusivity.png
    :width: 400pt     
@@ -71,7 +71,7 @@ The correct position of the wave structures confirm that the speed of sound is c
 is the same as that built for the thermal diffusivity test. The sod shock test marks the completion of the MARBLES solver to the 
 extent of a contunuum limit, single-component, single-phase, transient computational fluid dynamics solver with mass, momentum and energy equations.    
 
-Input and post processing files: `Tests/test_files/sodTest/`
+Input and post processing files: `Tests/test_files/sod/`
 
 .. image:: /figs/sodShock.png
    :width: 600pt    
