@@ -39,7 +39,7 @@ Here is an example input file::
   # number of timesteps between checkpoint files
   amr.chk_int = 10
 
-  # LBM parameteris
+  # LBM parameters
   lbm.bc_lo = 2 0 1
   lbm.bc_hi = 3 0 1
   lbm.dx_outer = 1.0
@@ -85,7 +85,7 @@ The following keys are implemented: `value_greater`, `value_less`, `adjacent_dif
 Comprehensive List of Runtime Parameters
 ----------------------------------------
 
-Below is a categorized list of the available runtime parameters that can be specified in the input file or overriden on the command line.
+Below is a categorized list of the available runtime parameters that can be specified in the input file or overridden on the command line.
 
 AMReX Settings
 ~~~~~~~~~~~~~~
