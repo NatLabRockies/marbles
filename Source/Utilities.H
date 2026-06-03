@@ -134,15 +134,15 @@ AMREX_GPU_DEVICE AMREX_INLINE amrex::Real set_extended_grad_expansion_generic(
                                   ux * ((jy)-rho * uy) - uy * ((jx)-rho * ux)) *
                                  one_bystheta0 * one_bystheta0);
 
-    AMREX_3D_ONLY(const amrex::Real a2xz =
-                      ((pxz)-0 - rho * ux * uz - ux * ((jz)-rho * uz) -
-                       uz * ((jx)-rho * ux)) *
-                      one_bystheta0 * one_bystheta0;);
+    AMREX_3D_ONLY(
+        const amrex::Real a2xz = ((pxz)-0 - rho * ux * uz -
+                                  ux * ((jz)-rho * uz) - uz * ((jx)-rho * ux)) *
+                                 one_bystheta0 * one_bystheta0;);
 
-    AMREX_3D_ONLY(const amrex::Real a2yz =
-                      ((pyz)-0 - rho * uy * uz - uy * ((jz)-rho * uz) -
-                       uz * ((jy)-rho * uy)) *
-                      one_bystheta0 * one_bystheta0;);
+    AMREX_3D_ONLY(
+        const amrex::Real a2yz = ((pyz)-0 - rho * uy * uz -
+                                  uy * ((jz)-rho * uz) - uz * ((jy)-rho * uy)) *
+                                 one_bystheta0 * one_bystheta0;);
 
     amrex::Real f = rho + AMREX_D_TERM(a1x * ev[0], +a1y * ev[1], +a1z * ev[2]);
 
