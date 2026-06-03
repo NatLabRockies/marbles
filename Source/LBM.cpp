@@ -357,27 +357,24 @@ void LBM::read_tagging_parameters()
             ppr.get("value_greater", value);
             std::string field;
             ppr.get("field_name", field);
-            m_err_tags.push_back(
-                amrex::AMRErrorTag(
-                    value, amrex::AMRErrorTag::GREATER, field, info));
+            m_err_tags.push_back(amrex::AMRErrorTag(
+                value, amrex::AMRErrorTag::GREATER, field, info));
             itexists = check_field_existence(field);
         } else if (ppr.countval("value_less") > 0) {
             amrex::Real value;
             ppr.get("value_less", value);
             std::string field;
             ppr.get("field_name", field);
-            m_err_tags.push_back(
-                amrex::AMRErrorTag(
-                    value, amrex::AMRErrorTag::LESS, field, info));
+            m_err_tags.push_back(amrex::AMRErrorTag(
+                value, amrex::AMRErrorTag::LESS, field, info));
             itexists = check_field_existence(field);
         } else if (ppr.countval("adjacent_difference_greater") > 0) {
             amrex::Real value;
             ppr.get("adjacent_difference_greater", value);
             std::string field;
             ppr.get("field_name", field);
-            m_err_tags.push_back(
-                amrex::AMRErrorTag(
-                    value, amrex::AMRErrorTag::GRAD, field, info));
+            m_err_tags.push_back(amrex::AMRErrorTag(
+                value, amrex::AMRErrorTag::GRAD, field, info));
             itexists = check_field_existence(field);
         } else if (realbox.ok()) {
             m_err_tags.push_back(amrex::AMRErrorTag(info));
@@ -505,8 +502,10 @@ void LBM::time_step(const int lev, const amrex::Real time, const int iteration)
         m_fillpatch_g_op->fillpatch(lev + 1, m_ts_new[lev + 1], m_g[lev + 1]);
 
         for (int i = 1; i <= m_nsubsteps[lev + 1]; ++i) {
-            m_fillpatch_op->fillpatch(lev + 1, time + (i - 1) * m_dts[lev + 1], m_f[lev + 1]);
-            m_fillpatch_g_op->fillpatch(lev + 1, time + (i - 1) * m_dts[lev + 1], m_g[lev + 1]);
+            m_fillpatch_op->fillpatch(
+                lev + 1, time + (i - 1) * m_dts[lev + 1], m_f[lev + 1]);
+            m_fillpatch_g_op->fillpatch(
+                lev + 1, time + (i - 1) * m_dts[lev + 1], m_g[lev + 1]);
             m_fillpatch_op->physbc(lev + 1, m_ts_new[lev + 1], m_f[lev + 1]);
 
             m_fillpatch_g_op->physbc(lev + 1, m_ts_new[lev + 1], m_g[lev + 1]);
@@ -1036,8 +1035,8 @@ void LBM::compute_eb_forces()
             m_f[lev], amrex::IntVect(0),
             [=] AMREX_GPU_DEVICE(
                 int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k)) noexcept
-                -> amrex::GpuTuple<AMREX_D_DECL(
-                    amrex::Real, amrex::Real, amrex::Real)> {
+            -> amrex::GpuTuple<AMREX_D_DECL(
+                amrex::Real, amrex::Real, amrex::Real)> {
                 const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
                 amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> fs = {0.0};
                 if ((is_fluid_arrs[nbx](iv, 1) == 1) &&
