@@ -1199,25 +1199,27 @@ void LBM::macrodata_to_equilibrium(const int lev)
                 const amrex::Real temperature =
                     md_arr(iv, constants::TEMPERATURE_IDX);
 
+                const amrex::Real T_safe = amrex::min(temperature, 0.5 / specific_gas_constant);
+
                 const amrex::Real omega =
                     1.0 /
-                    (nu / (specific_gas_constant * temperature * dt) + 0.5);
+                    (nu / (specific_gas_constant * T_safe * dt) + 0.5);
                 const amrex::Real omega_one =
                     1.0 /
-                    (alpha / (specific_gas_constant * temperature * dt) + 0.5);
+                    (alpha / (specific_gas_constant * T_safe * dt) + 0.5);
                 const amrex::Real omega_one_by_omega = omega_one / omega;
                 const amrex::Real omega_corr =
                     (2.0 - omega) / (2.0 * omega * rho);
                 
                 const amrex::Real pxx_ext =
-                    vel[0] * vel[0] + specific_gas_constant * temperature +
+                    vel[0] * vel[0] + specific_gas_constant * T_safe +
                     dt * (omega_corr)*d_arr(iv, constants::D_Q_CORR_X_IDX);
                 const amrex::Real pyy_ext =
-                    vel[1] * vel[1] + specific_gas_constant * temperature +
+                    vel[1] * vel[1] + specific_gas_constant * T_safe +
                     dt * (omega_corr)*d_arr(iv, constants::D_Q_CORR_Y_IDX);
                 const amrex::Real pzz_ext = AMREX_D_PICK(
                     0.0, 0.0,
-                    vel[2] * vel[2] + specific_gas_constant * temperature +
+                    vel[2] * vel[2] + specific_gas_constant * T_safe +
                         dt * (omega_corr)*d_arr(iv, constants::D_Q_CORR_Z_IDX));
 
                 eq_arr(iv, q) = set_extended_equilibrium_value(
@@ -1387,9 +1389,10 @@ void LBM::relax_f_to_equilibrium(const int lev)
 
                 const amrex::Real temperature =
                     md_arr(iv, constants::TEMPERATURE_IDX);
+                const amrex::Real T_safe = amrex::min(temperature, 0.5 / specific_gas_constant);
                 const amrex::Real omega =
-                    1.0 / (nu / (specific_gas_constant * temperature * dt) + 0.5);
-                const amrex::Real p_by_rho = specific_gas_constant * temperature;
+                    1.0 / (nu / (specific_gas_constant * T_safe * dt) + 0.5);
+                const amrex::Real p_by_rho = specific_gas_constant * T_safe;
 
                 // BGK target (q-corrected, already stored in m_eq)
                 amrex::GpuArray<amrex::Real, NQ> eq_all;
@@ -1753,6 +1756,7 @@ void LBM::f_to_macrodata(const int lev)
     const bool body_is_isothermal = m_bodyIsIsothermal;
     const bool fluid_is_isothermal = m_fluidIsIsothermal;
     const amrex::Real body_temperature = m_bodyTemperature;
+    const amrex::Real l_init_T = m_initialTemperature;
 
     const bool body_is_moving = m_body_is_moving;
     const auto body_velocity = m_body_velocity;
@@ -1909,6 +1913,12 @@ void LBM::f_to_macrodata(const int lev)
                 if (fluid_is_isothermal) {
                     temperature = body_temperature;
                 }
+                
+                // Absolute structural safeguard against FSLBM interface temperature runaways
+                if (!std::isfinite(temperature) || temperature <= 1.0e-12) {
+                    temperature = l_init_T;
+                }
+                temperature = amrex::min(temperature, 0.5 / specific_gas_constant);
 
                 md_arr(iv, constants::TEMPERATURE_IDX) = temperature;
 
@@ -6078,6 +6088,32 @@ void LBM::fslbm_init_cell_type(const int lev)
 // directions are zero.  We replenish with g_eq at the local velocity and
 // reference temperature to prevent thermal energy drain at the free surface.
 // ============================================================================
+// ============================================================================
+// fslbm_replenish_components: enforce physical impermeable lid at interface
+// ============================================================================
+void LBM::fslbm_replenish_components(const int lev)
+{
+    BL_PROFILE("LBM::fslbm_replenish_components()");
+    using namespace lbm::constants;
+    if (m_n_components == 0) return;
+    auto const& ct_arrs = m_cell_type[lev].const_arrays();
+    const stencil::Stencil st;
+    for (int c = 0; c < m_n_components; ++c) {
+        auto const& c_arrs = m_component_lattices[c][lev].arrays();
+        amrex::ParallelFor(m_component_lattices[c][lev], [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+            const amrex::IntVect iv(i, j, k);
+            if (ct_arrs[nbx](iv, 0) == CELL_INTERFACE) {
+                for (int q = 0; q < N_MICRO_STATES; ++q) {
+                    if (ct_arrs[nbx](iv + st.evs[q], 0) == CELL_GAS) {
+                        c_arrs[nbx](iv, st.bounce_dirs[q]) = c_arrs[nbx](iv, q);
+                    }
+                }
+            }
+        });
+    }
+    amrex::Gpu::synchronize();
+}
+
 void LBM::fslbm_replenish_g(const int lev)
 {
     BL_PROFILE("LBM::fslbm_replenish_g()");
@@ -7059,48 +7095,14 @@ void LBM::fslbm_advance_surface(const int lev)
                 [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
                     const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
                     if (flag_ro[nbx](iv, 2) > amrex::Real(0.5)) {
-                        // Cell needs component spawn.
-                        // Look for a stable fluid neighbor to avoid copy cascades.
-                        bool found = false;
-                        
-                        // Pass 1: Look for CELL_LIQUID
-                        for (int d = 0; d < AMREX_SPACEDIM && !found; ++d) {
-                            const auto ep = amrex::IntVect::TheDimensionVector(d);
-                            for (int s : {+1, -1}) {
-                                const auto ivn = iv + s * ep;
-                                if (ct_arrs_ro[nbx](ivn, 0) == CELL_LIQUID) {
-                                    for (int q = 0; q < N_MICRO_STATES; ++q) {
-                                        c_arrs[nbx](iv, q) = c_arrs[nbx](ivn, q);
-                                    }
-                                    found = true;
-                                    break;
-                                }
-                            }
-                        }
-
-                        // Pass 2: Look for stable CELL_INTERFACE (not newly spawned this step)
-                        for (int d = 0; d < AMREX_SPACEDIM && !found; ++d) {
-                            const auto ep = amrex::IntVect::TheDimensionVector(d);
-                            for (int s : {+1, -1}) {
-                                const auto ivn = iv + s * ep;
-                                if (ct_arrs_ro[nbx](ivn, 0) == CELL_INTERFACE && 
-                                    flag_ro[nbx](ivn, 2) < amrex::Real(0.5)) {
-                                    for (int q = 0; q < N_MICRO_STATES; ++q) {
-                                        c_arrs[nbx](iv, q) = c_arrs[nbx](ivn, q);
-                                    }
-                                    found = true;
-                                    break;
-                                }
-                            }
-                        }
-                        
-                        // If no neighbor (found == false), we establish a safe isotropic ambient
-                        // concentration (1.0) rather than leaving an artificial zero-mass sink.
-                        if (!found) {
-                            const stencil::Stencil st;
-                            for (int q = 0; q < N_MICRO_STATES; ++q) {
-                                c_arrs[nbx](iv, q) = st.weights[q];
-                            }
+                        // IMPORTANT FIX: Step B fallback previously cloned neighbor populations (c_arrs) 
+                        // or injected 1.0 ambient concentration. Both of these approaches duplicate mass 
+                        // because Eulerian components don't track volume fraction (phi); sum(c_arrs) IS the mass.
+                        // Since FSLBM updates IS_FLUID to 1 before component streams, the standard LBM stream() 
+                        // will automatically and mass-conservingly push neighboring populations into this new cell. 
+                        // We MUST initialize it to exactly 0.0 to prevent unphysical buildup (Y_0 blowing up).
+                        for (int q = 0; q < N_MICRO_STATES; ++q) {
+                            c_arrs[nbx](iv, q) = 0.0;
                         }
                     }
                 });

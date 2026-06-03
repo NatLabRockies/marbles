@@ -155,6 +155,7 @@ public:
     // FSLBM: replenish m_g populations in INTERFACE cells facing gas.
     // Prevents thermal energy drain at the free surface.
     void fslbm_replenish_g(const int lev);
+    void fslbm_replenish_components(const int lev);
 
     // FSLBM: derive IS_FLUID_IDX (and boundary markers) from m_cell_type.
     // Replaces update_is_fluid_from_fraction_and_mark for FSLBM to avoid
