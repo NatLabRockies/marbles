@@ -1776,11 +1776,11 @@ void LBM::f_to_macrodata(const int lev)
         [=] AMREX_GPU_DEVICE(
             int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k)) noexcept {
             const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
-            if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_IDX) == 1) {
+            const auto md_arr = md_arrs[nbx];
 
+            if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_IDX) == 1) {
                 const auto f_arr = f_arrs[nbx];
                 const auto g_arr = g_arrs[nbx];
-                const auto md_arr = md_arrs[nbx];
 
                 amrex::Real rho = 0.0, u = 0.0, v = 0.0, w = 0.0;
 
@@ -1931,6 +1931,34 @@ void LBM::f_to_macrodata(const int lev)
                 md_arr(iv, constants::Q_CORR_Z_IDX) =
                     rho * w *
                     ((1.0 - 3.0 * specific_gas_constant * temperature) - w * w);
+            } else {
+                // For non-fluid cells (GAS and SOLID), clean out macrodata 
+                // so that trilinear interpolation (e.g. bubbles) and paraview
+                // do not inherit or drag massive unbounded transients.
+                md_arr(iv, constants::RHO_IDX) = amrex::Real(0.0);
+                AMREX_D_DECL(
+                    md_arr(iv, constants::VELX_IDX) = amrex::Real(0.0),
+                    md_arr(iv, constants::VELY_IDX) = amrex::Real(0.0),
+                    md_arr(iv, constants::VELZ_IDX) = amrex::Real(0.0));
+                md_arr(iv, constants::VMAG_IDX) = amrex::Real(0.0);
+
+                md_arr(iv, constants::PXX_IDX) = specific_gas_constant * body_temperature;
+                md_arr(iv, constants::PYY_IDX) = specific_gas_constant * body_temperature;
+                md_arr(iv, constants::PZZ_IDX) = specific_gas_constant * body_temperature;
+                md_arr(iv, constants::PXY_IDX) = amrex::Real(0.0);
+                md_arr(iv, constants::PXZ_IDX) = amrex::Real(0.0);
+                md_arr(iv, constants::PYZ_IDX) = amrex::Real(0.0);
+
+                md_arr(iv, constants::TWO_RHO_E_IDX) = amrex::Real(0.0);
+                AMREX_D_DECL(
+                    md_arr(iv, constants::QX_IDX) = amrex::Real(0.0),
+                    md_arr(iv, constants::QY_IDX) = amrex::Real(0.0),
+                    md_arr(iv, constants::QZ_IDX) = amrex::Real(0.0));
+
+                md_arr(iv, constants::TEMPERATURE_IDX) = body_temperature;
+                md_arr(iv, constants::Q_CORR_X_IDX) = amrex::Real(0.0);
+                md_arr(iv, constants::Q_CORR_Y_IDX) = amrex::Real(0.0);
+                md_arr(iv, constants::Q_CORR_Z_IDX) = amrex::Real(0.0);
             }
         });
     amrex::Gpu::synchronize();
