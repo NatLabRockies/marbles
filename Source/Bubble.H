@@ -232,6 +232,11 @@ private:
     void remove_exited_bubbles(const amrex::Geometry& geom,
                                const amrex::MultiFab* phi_mf = nullptr);
 
+public:
+    void Checkpoint(const std::string& dir, const std::string& name) const;
+    void Restart(const std::string& dir, const std::string& name);
+
+private:
     /**
      * Deposit two-way coupling reaction force (F_a + F_D, SI N) converted
      * to LB force density onto fluid_force_mf.

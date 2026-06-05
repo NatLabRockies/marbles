@@ -4637,6 +4637,30 @@ void LBM::write_checkpoint_file() const
                                           lev, checkpointname, "Level_",
                                           varnames_frac[0]));
     }
+
+    // FSLBM & Body Checkpointing
+    if (m_free_surface) {
+        for (int lev = 0; lev <= finest_level; ++lev) {
+            amrex::VisMF::Write(
+                m_phi_fslbm[lev], amrex::MultiFabFileFullPrefix(
+                                              lev, checkpointname, "Level_",
+                                              "phi_fslbm"));
+            // Write iMultiFab by copying to a Real MultiFab first
+            amrex::MultiFab tmp_mf(m_cell_type[lev].boxArray(), m_cell_type[lev].DistributionMap(), m_cell_type[lev].nComp(), m_cell_type[lev].nGrowVect());
+            auto const& tmp_arrs = tmp_mf.arrays();
+            auto const& ct_arrs = m_cell_type[lev].const_arrays();
+            amrex::ParallelFor(tmp_mf, tmp_mf.nGrowVect(),
+                [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                    tmp_arrs[nbx](i,j,k) = static_cast<amrex::Real>(ct_arrs[nbx](i,j,k));
+                });
+            amrex::Gpu::synchronize();
+            amrex::VisMF::Write(tmp_mf, amrex::MultiFabFileFullPrefix(lev, checkpointname, "Level_", "cell_type"));
+        }
+    }
+
+    if (m_enable_bubbles) {
+        m_bubbles.Checkpoint(checkpointname, "bubbles");
+    }
 }
 
 void LBM::read_checkpoint_file()
@@ -4773,6 +4797,30 @@ void LBM::read_checkpoint_file()
             m_is_fluid_fraction[lev], amrex::MultiFabFileFullPrefix(
                                           lev, m_restart_chkfile, "Level_",
                                           varnames_frac[0]));
+    }
+
+    // FSLBM & Body Checkpointing
+    if (m_free_surface) {
+        for (int lev = 0; lev <= finest_level; ++lev) {
+            amrex::VisMF::Read(
+                m_phi_fslbm[lev], amrex::MultiFabFileFullPrefix(
+                                      lev, m_restart_chkfile, "Level_",
+                                      "phi_fslbm"));
+            amrex::MultiFab tmp_mf;
+            amrex::VisMF::Read(tmp_mf, amrex::MultiFabFileFullPrefix(lev, m_restart_chkfile, "Level_", "cell_type"));
+            m_cell_type[lev].define(tmp_mf.boxArray(), tmp_mf.DistributionMap(), tmp_mf.nComp(), m_cell_type[lev].nGrow());
+            auto const& tmp_arrs = tmp_mf.const_arrays();
+            auto const& ct_arrs = m_cell_type[lev].arrays();
+            amrex::ParallelFor(tmp_mf, tmp_mf.nGrowVect(),
+                [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                    ct_arrs[nbx](i,j,k) = static_cast<int>(std::round(tmp_arrs[nbx](i,j,k)));
+                });
+            amrex::Gpu::synchronize();
+        }
+    }
+
+    if (m_enable_bubbles) {
+        m_bubbles.Restart(m_restart_chkfile, "bubbles");
     }
 
     // Populate the other data

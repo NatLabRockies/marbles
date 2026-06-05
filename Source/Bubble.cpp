@@ -1480,4 +1480,26 @@ void BubbleManager::close_stats_file()
     if (m_stats_stream.is_open()) { m_stats_stream.close(); }
 }
 
+
+// ============================================================================
+// Checkpoint / Restart
+// ============================================================================
+void BubbleManager::Checkpoint(const std::string& dir, const std::string& name) const
+{
+    if (m_initialized && m_particles_ever_injected) {
+        m_container.Checkpoint(dir, name);
+    }
+}
+
+void BubbleManager::Restart(const std::string& dir, const std::string& name)
+{
+    if (m_initialized) {
+        m_container.Restart(dir, name);
+        // Ensure m_particles_ever_injected correctly turns on if loaded
+        if (m_container.TotalNumberOfParticles() > 0) {
+            m_particles_ever_injected = true;
+        }
+    }
+}
+
 } // namespace lbm
