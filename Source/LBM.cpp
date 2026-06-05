@@ -692,6 +692,11 @@ void LBM::time_step(const int lev, const amrex::Real time, const int iteration)
         m_fillpatch_g_op->fillpatch(lev + 1, m_ts_new[lev + 1], m_g[lev + 1]);
 
         for (int i = 1; i <= m_nsubsteps[lev + 1]; ++i) {
+            m_fillpatch_op->fillpatch(lev + 1, time + (i - 1) * m_dts[lev + 1], m_f[lev + 1]);
+            m_fillpatch_g_op->fillpatch(lev + 1, time + (i - 1) * m_dts[lev + 1], m_g[lev + 1]);
+            for (int c = 0; c < m_n_components; ++c) {
+                m_component_fillpatch_ops[c]->fillpatch(lev + 1, time + (i - 1) * m_dts[lev + 1], m_component_lattices[c][lev + 1]);
+            }
             m_fillpatch_op->physbc(lev + 1, m_ts_new[lev + 1], m_f[lev + 1]);
             for (int c = 0; c < m_n_components; ++c) {
                 m_component_fillpatch_ops[c]->physbc(lev + 1, m_ts_new[lev + 1], m_component_lattices[c][lev + 1]);

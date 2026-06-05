@@ -1,0 +1,64 @@
+# How to use this sod test tube case?
+# set ic_sod.initial_temperature=lbm.initial_temperature to a value <= 0.3333
+# set lbm.nu to a value <= 0.0100
+
+max_step = 500
+
+# geometry parameters
+geometry.prob_lo = 0.0 -2.0 -2.0
+geometry.prob_hi = 1000.0 2.0 2.0
+geometry.is_periodic = 0 1 1
+
+# timestepping
+amr.n_cell  = 1000 4 4
+amr.regrid_int = 1
+amr.max_level = 1
+amr.blocking_factor = 4
+amr.plot_int = 100
+amr.chk_int = 100
+amr.file_name_digits = 5
+amr.n_error_buf = 8
+
+lbm.bc_lo = 5 0 0
+lbm.bc_hi = 5 0 0
+lbm.dx_outer = 1.0
+lbm.dt_outer = 1.0
+lbm.nu = 0.010
+lbm.alpha = 0.010
+lbm.save_streaming = 1
+lbm.compute_forces = 0
+
+lbm.ic_type = "sod"
+ic_sod.density = 0.50
+ic_sod.velocity = 0.0 0.0 0.0
+ic_sod.mach_components = 0.0 0.0 0.0
+
+# Set ic_sod.xDiscontinuity equal to half length to place
+# discontinuity in the middle
+ic_sod.x_discontinuity = 500.0
+
+ic_sod.initial_temperature = 0.20
+ic_sod.adiabatic_exponent = 2.0
+ic_sod.mean_molecular_mass = 28.96
+ic_sod.density_ratio = 4.00
+ic_sod.temperature_ratio = 0.1250
+lbm.initial_temperature = 0.20
+lbm.adiabatic_exponent = 2.0
+lbm.mean_molecular_mass = 28.96
+
+eb2.geom_type = "all_regular"
+
+tagging.refinement_indicators = rho bc
+tagging.rho.max_level     = 2
+tagging.rho.adjacent_difference_greater = 0.1
+tagging.rho.field_name    = rho
+
+tagging.bc.in_box_lo = -10 -10 -10
+tagging.bc.in_box_hi =  20 10 10
+
+
+amrex.fpe_trap_invalid = 1
+amrex.fpe_trap_zero = 1
+amrex.fpe_trap_overflow = 1
+amrex.the_arena_is_managed = 0
+amrex.abort_on_out_of_gpu_memory = 1
