@@ -255,11 +255,13 @@ private:
     // write plotfile to disk
     void write_plot_file();
 
+public:
     // write checkpoint file to disk
     void write_checkpoint_file() const;
 
     // read checkpoint file from disk
     void read_checkpoint_file();
+private:
 
     // utility to skip to next line in Header
     static void goto_next_line(std::istream& is);

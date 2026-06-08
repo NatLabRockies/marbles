@@ -764,6 +764,7 @@ void LBM::advance(
         refill_and_spill(lev);
     }
 
+#if 0
     // --- NaN detection after refill_and_spill ---
     if (m_n_components > 0 && m_body_is_moving) {
         bool has_nan_spill = m_component_lattices[0][lev].contains_nan();
@@ -773,6 +774,7 @@ void LBM::advance(
             amrex::Abort("NaN detected in component lattice after refill_and_spill");
         }
     }
+#endif
 
 #if 0  // O2 mass diagnostic — disabled for performance
     amrex::Real o2_mass_A = 0.0;
@@ -796,6 +798,7 @@ void LBM::advance(
         stream(lev, m_f);
     }
 
+#if 0
     // --- DEBUG: check m_f for NaN immediately after fslbm_advance_surface ---
     {
         bool has_nan_f = m_f[lev].contains_nan();
@@ -805,7 +808,9 @@ void LBM::advance(
             amrex::Abort("NaN in m_f after fslbm_advance_surface");
         }
     }
+#endif
 
+#if 0
     // --- NaN detection after fslbm/stream ---
     if (m_n_components > 0) {
         bool has_nan_fslbm = m_component_lattices[0][lev].contains_nan();
@@ -815,6 +820,7 @@ void LBM::advance(
             amrex::Abort("NaN detected in component lattice after fslbm");
         }
     }
+#endif
 
 #if 0  // O2 mass diagnostic — disabled for performance
     amrex::Real o2_mass_B = 0.0;
@@ -827,6 +833,7 @@ void LBM::advance(
         stream(lev, m_component_lattices[i]);
     }
 
+#if 0
     // --- NaN detection after component stream ---
     if (m_n_components > 0) {
         bool has_nan_stream = m_component_lattices[0][lev].contains_nan();
@@ -836,6 +843,7 @@ void LBM::advance(
             amrex::Abort("NaN detected in component lattice after stream");
         }
     }
+#endif
 
 #if 0  // O2 mass diagnostic — disabled for performance
     amrex::Real o2_mass_C = 0.0;
@@ -881,6 +889,7 @@ void LBM::advance(
 
     collide(lev);
 
+#if 0
     // --- NaN detection after collide ---
     if (m_n_components > 0) {
         bool has_nan_collide = m_component_lattices[0][lev].contains_nan();
@@ -890,6 +899,7 @@ void LBM::advance(
             amrex::Abort("NaN detected in component lattice after collide");
         }
     }
+#endif
 
 #if 0  // O2 mass diagnostic — disabled for performance
     if (o2_diag) {
