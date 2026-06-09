@@ -85,7 +85,7 @@ amr.blocking_factor_y = 1
 amr.blocking_factor_z = 1
 amr.plot_int = 1000         # every 
 amr.print_int = 200
-amr.chk_int = 83800        # checkpoint every ~2.4 s physical
+amr.chk_int = 20000        # checkpoint every ~2.4 s physical
 amr.file_name_digits = 5
 
 # ---------------------------------------------------------------

@@ -74,7 +74,7 @@ namespace lbm {
 //   Re    — bubble Reynolds number = |u_rel| * d / nu_f
 //   eps_p — local solid (bubble) volume fraction in the cell [0,1)
 // ============================================================================
-static amrex::Real bubble_drag_cd(amrex::Real Re, amrex::Real eps_p)
+AMREX_GPU_DEVICE AMREX_FORCE_INLINE static amrex::Real bubble_drag_cd(amrex::Real Re, amrex::Real eps_p)
 {
     if (Re < 1.0e-10) { return 0.0; }
 
@@ -112,18 +112,62 @@ static amrex::Real bubble_drag_cd(amrex::Real Re, amrex::Real eps_p)
 
 // ============================================================================
 // Utility: trilinear interpolation in a MultiFab at LB-cell position (px,py,pz)
+
 // ============================================================================
-amrex::Real BubbleManager::trilinear_interp(
+// Interpolation functions
+// ============================================================================
+AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+amrex::Real trilinear_interp_device(
+    const amrex::Array4<const amrex::Real>& arr,
+    int comp,
+    const amrex::Real* plo,
+    const amrex::Real* dx_arr,
+    amrex::Real px, amrex::Real py, amrex::Real pz)
+{
+    amrex::Real fi = (px - plo[0]) / dx_arr[0] - 0.5;
+    amrex::Real fj = (py - plo[1]) / dx_arr[1] - 0.5;
+    amrex::Real fk = (pz - plo[2]) / dx_arr[2] - 0.5;
+
+    int i0 = static_cast<int>(amrex::Math::floor(fi));
+    int j0 = static_cast<int>(amrex::Math::floor(fj));
+    int k0 = static_cast<int>(amrex::Math::floor(fk));
+    int i1 = i0 + 1, j1 = j0 + 1, k1 = k0 + 1;
+
+    amrex::Real ti = fi - i0;
+    amrex::Real tj = fj - j0;
+    amrex::Real tk = fk - k0;
+    
+    auto lb = amrex::lbound(arr);
+    auto ub = amrex::ubound(arr);
+    
+    auto clamp = [](int v, int l, int h) { return amrex::max(l, amrex::min(h, v)); };
+    i0 = clamp(i0, lb.x, ub.x); i1 = clamp(i1, lb.x, ub.x);
+    j0 = clamp(j0, lb.y, ub.y); j1 = clamp(j1, lb.y, ub.y);
+    k0 = clamp(k0, lb.z, ub.z); k1 = clamp(k1, lb.z, ub.z);
+
+    auto get = [&](int ii, int jj, int kk) {
+        return arr(ii, jj, kk, comp);
+    };
+
+    return (1-ti)*(1-tj)*(1-tk)*get(i0,j0,k0) +
+              ti *(1-tj)*(1-tk)*get(i1,j0,k0) +
+           (1-ti)*   tj *(1-tk)*get(i0,j1,k0) +
+              ti *   tj *(1-tk)*get(i1,j1,k0) +
+           (1-ti)*(1-tj)*   tk *get(i0,j0,k1) +
+              ti *(1-tj)*   tk *get(i1,j0,k1) +
+           (1-ti)*   tj *   tk *get(i0,j1,k1) +
+              ti *   tj *   tk *get(i1,j1,k1);
+}
+
+amrex::Real trilinear_interp(
     const amrex::MultiFab& mf,
     int                    comp,
     const amrex::Geometry& geom,
     amrex::Real px, amrex::Real py, amrex::Real pz)
 {
-    // Cell-centre coordinates in LB cells: cell (i,j,k) has centre at (i+0.5, j+0.5, k+0.5)
     const amrex::Real* plo    = geom.ProbLo();
     const amrex::Real* dx_arr = geom.CellSize();
 
-    // Fractional index
     amrex::Real fi = (px - plo[0]) / dx_arr[0] - 0.5;
     amrex::Real fj = (py - plo[1]) / dx_arr[1] - 0.5;
     amrex::Real fk = (pz - plo[2]) / dx_arr[2] - 0.5;
@@ -133,12 +177,11 @@ amrex::Real BubbleManager::trilinear_interp(
     int k0 = static_cast<int>(std::floor(fk));
     int i1 = i0 + 1, j1 = j0 + 1, k1 = k0 + 1;
 
-    amrex::Real ti = fi - i0;   // [0,1] weight toward i1
+    amrex::Real ti = fi - i0;
     amrex::Real tj = fj - j0;
     amrex::Real tk = fk - k0;
 
     const amrex::Box& domain = geom.Domain();
-    // Clamp to valid domain
     auto clamp = [](int v, int lo, int hi) { return std::max(lo, std::min(hi, v)); };
     i0 = clamp(i0, domain.smallEnd(0), domain.bigEnd(0));
     i1 = clamp(i1, domain.smallEnd(0), domain.bigEnd(0));
@@ -147,55 +190,35 @@ amrex::Real BubbleManager::trilinear_interp(
     k0 = clamp(k0, domain.smallEnd(2), domain.bigEnd(2));
     k1 = clamp(k1, domain.smallEnd(2), domain.bigEnd(2));
 
-    // Find which FArrayBox owns cell (i0,j0,k0)
-    // For simplicity, iterate over tiles on the MultiFab and find the box.
     amrex::Real val = 0.0;
     bool found = false;
     for (amrex::MFIter mfi(mf, false); mfi.isValid(); ++mfi) {
         const amrex::Box& bx = mfi.validbox();
         if (!bx.contains(amrex::IntVect(i0, j0, k0))) { continue; }
         const auto& arr = mf.const_array(mfi);
-
         auto get = [&](int ii, int jj, int kk) {
-            const amrex::Real* ptr = &arr(amrex::IntVect(clamp(ii, bx.smallEnd(0), bx.bigEnd(0)),
-                                     clamp(jj, bx.smallEnd(1), bx.bigEnd(1)),
-                                     clamp(kk, bx.smallEnd(2), bx.bigEnd(2))), comp);
-            // EB/GAS cells may contain signaling NaN (AMReX fill_snan).
-            // Loading SNaN into FP register triggers SIGFPE, so inspect
-            // IEEE 754 bits via memcpy before any float operation.
-            std::uint64_t bits;
-            std::memcpy(&bits, ptr, sizeof(bits));
-            const std::uint64_t exp_mask = 0x7FF0000000000000ULL;
-            const std::uint64_t man_mask = 0x000FFFFFFFFFFFFFULL;
-            const bool is_nan = ((bits & exp_mask) == exp_mask) &&
-                                ((bits & man_mask) != 0);
-            if (is_nan) { return amrex::Real(0.0); }
-            amrex::Real v;
-            std::memcpy(&v, ptr, sizeof(v));
-            return v;
+            return arr(clamp(ii, bx.smallEnd(0), bx.bigEnd(0)),
+                       clamp(jj, bx.smallEnd(1), bx.bigEnd(1)),
+                       clamp(kk, bx.smallEnd(2), bx.bigEnd(2)), comp);
         };
-
-        val =
-            (1-ti)*(1-tj)*(1-tk)*get(i0,j0,k0) +
-               ti *(1-tj)*(1-tk)*get(i1,j0,k0) +
-            (1-ti)*   tj *(1-tk)*get(i0,j1,k0) +
-               ti *   tj *(1-tk)*get(i1,j1,k0) +
-            (1-ti)*(1-tj)*   tk *get(i0,j0,k1) +
-               ti *(1-tj)*   tk *get(i1,j0,k1) +
-            (1-ti)*   tj *   tk *get(i0,j1,k1) +
-               ti *   tj *   tk *get(i1,j1,k1);
+        val = (1-ti)*(1-tj)*(1-tk)*get(i0,j0,k0) +
+                 ti *(1-tj)*(1-tk)*get(i1,j0,k0) +
+              (1-ti)*   tj *(1-tk)*get(i0,j1,k0) +
+                 ti *   tj *(1-tk)*get(i1,j1,k0) +
+              (1-ti)*(1-tj)*   tk *get(i0,j0,k1) +
+                 ti *(1-tj)*   tk *get(i1,j0,k1) +
+              (1-ti)*   tj *   tk *get(i0,j1,k1) +
+                 ti *   tj *   tk *get(i1,j1,k1);
         found = true;
         break;
-    }
-    if (!found) {
-        // Particle is outside valid domain — return zero
-        val = 0.0;
     }
     return val;
 }
 
 // ============================================================================
 // read_params
+
+
 // ============================================================================
 void BubbleManager::read_params(BubbleParams& p)
 {
@@ -358,152 +381,6 @@ void BubbleManager::inject_bubbles(amrex::Real dt_phys)
 }
 
 // ============================================================================
-// apply_boyles_law
-//   Scale bubble diameter based on hydrostatic pressure at depth h below surface.
-//   d / d_atm = (1 + rho*g*h / P_atm)^(-1/3)
-// ============================================================================
-void BubbleManager::apply_boyles_law(const amrex::Geometry& geom)
-{
-    const amrex::Real dx      = m_params.dx_phys;
-    const amrex::Real rho_f   = m_params.rho_fluid;
-    const amrex::Real g       = m_params.g_grav;
-    const amrex::Real P_atm   = m_params.P_atm;
-    const amrex::Real z_surf  = m_params.free_surface_z;  // LB cells
-
-    for (int lev = 0; lev <= m_container.finestLevel(); ++lev) {
-        for (auto& kv : m_container.GetParticles(lev)) {
-            auto& pbox = kv.second;
-            auto& aos  = pbox.GetArrayOfStructs();
-            for (auto& p : aos()) {
-                if (!p.id().is_valid()) { continue; }
-                // Depth below free surface in metres
-                amrex::Real z_pos = p.pos(2);
-                amrex::Real h = (z_surf - z_pos) * dx;  // metres; positive below surface
-                if (h <= 0.0) { h = 0.0; }
-                amrex::Real d_atm = p.rdata(BubbleIdx::DIAMETER);
-                amrex::Real d_new = d_atm * std::pow(1.0 + rho_f * g * h / P_atm, -1.0/3.0);
-                p.rdata(BubbleIdx::DIAMETER) = d_new;
-            }
-        }
-    }
-}
-
-// ============================================================================
-// compute_forces
-//   Net buoyancy + drag + added mass forces per bubble.
-//   Results go into m_forces (indexed in same traversal order as main loop).
-// ============================================================================
-void BubbleManager::compute_forces(
-    const amrex::MultiFab& macrodata,
-    const amrex::MultiFab& derived,
-    const amrex::Geometry& geom)
-{
-    m_forces.clear();
-
-    const amrex::Real dx     = m_params.dx_phys;
-    const amrex::Real dt     = m_params.dt_phys;
-    const amrex::Real rho_f  = m_params.rho_fluid;
-    const amrex::Real nu_f   = m_params.nu_fluid;
-    const amrex::Real g      = m_params.g_grav;
-    const amrex::Real C_AM   = constants::C_ADDED_MASS;
-
-    for (int lev = 0; lev <= m_container.finestLevel(); ++lev) {
-        for (auto& kv : m_container.GetParticles(lev)) {
-            auto& pbox = kv.second;
-            auto& aos  = pbox.GetArrayOfStructs();
-            for (auto& p : aos()) {
-                if (!p.id().is_valid()) {
-                    m_forces.push_back({0,0,0, 0,0,0, 0});
-                    continue;
-                }
-
-                const amrex::Real d  = p.rdata(BubbleIdx::DIAMETER);  // m
-                if (d <= 1.0e-5) {
-                    // Tiny bubble slipped through — skip forces, mark invalid
-                    p.id() = -1;
-                    m_forces.push_back({0,0,0, 0,0,0, 0});
-                    continue;
-                }
-                const amrex::Real r  = 0.5 * d;
-                const amrex::Real Vb = (4.0/3.0) * amrex::Math::pi<amrex::Real>() * r*r*r;
-                const amrex::Real Ab = amrex::Math::pi<amrex::Real>() * r*r;   // cross-section
-
-                // Bubble velocity in SI
-                const amrex::Real vbx = p.rdata(BubbleIdx::VX);
-                const amrex::Real vby = p.rdata(BubbleIdx::VY);
-                const amrex::Real vbz = p.rdata(BubbleIdx::VZ);
-
-                // Interpolate fluid velocity at bubble location (LB units → SI)
-                // macrodata comps: RHO=0, VELX=1, VELY=2, VELZ=3
-                const amrex::Real ufx_lb = trilinear_interp(macrodata, constants::VELX_IDX,
-                                                             geom, p.pos(0), p.pos(1), p.pos(2));
-                const amrex::Real ufy_lb = trilinear_interp(macrodata, constants::VELY_IDX,
-                                                             geom, p.pos(0), p.pos(1), p.pos(2));
-                const amrex::Real ufz_lb = trilinear_interp(macrodata, constants::VELZ_IDX,
-                                                             geom, p.pos(0), p.pos(1), p.pos(2));
-                const amrex::Real ufx = ufx_lb * dx / dt;  // m/s
-                const amrex::Real ufy = ufy_lb * dx / dt;
-                const amrex::Real ufz = ufz_lb * dx / dt;
-
-                // Relative velocity: u_rel = v_b - u_f
-                const amrex::Real urx = vbx - ufx;
-                const amrex::Real ury = vby - ufy;
-                const amrex::Real urz = vbz - ufz;
-                const amrex::Real ur_mag = std::sqrt(urx*urx + ury*ury + urz*urz);
-
-                // Bubble Reynolds number
-                const amrex::Real Re_b = (ur_mag > 0.0) ? (ur_mag * d / nu_f) : 0.0;
-
-                // Local solid volume fraction: bubble volume / cell volume
-                // (single bubble per cell approximation; conservative lower bound)
-                const amrex::Real dx_phys = m_params.dx_phys;
-                const amrex::Real V_cell  = dx_phys * dx_phys * dx_phys;
-                const amrex::Real eps_p_local = std::min(Vb / V_cell, 0.99);
-
-                const amrex::Real Cd   = bubble_drag_cd(Re_b, eps_p_local);
-
-                // Drag force (SI, N) — in direction opposing relative motion
-                amrex::Real fd_factor = -0.5 * Cd * rho_f * Ab * ur_mag;
-                const amrex::Real FDx = fd_factor * urx;
-                const amrex::Real FDy = fd_factor * ury;
-                const amrex::Real FDz = fd_factor * urz;
-
-                // Net buoyancy: F = -rho_f * Vb * g in z (upward = +z)
-                // (rho_b ≈ 0, so F_g + F_pressure ≈ -rho_f * Vb * g_z)
-                // g_grav points downward; buoyancy is upward (+z here)
-                const amrex::Real FBx = 0.0;
-                const amrex::Real FBy = 0.0;
-                const amrex::Real FBz = rho_f * Vb * g;  // upward [N]
-
-                // Effective mass (added mass dominates for gas bubbles)
-                const amrex::Real m_eff = C_AM * rho_f * Vb;
-
-                // Acceleration from buoyancy + drag
-                const amrex::Real ax_new = (FBx + FDx) / m_eff;
-                const amrex::Real ay_new = (FBy + FDy) / m_eff;
-                const amrex::Real az_new = (FBz + FDz) / m_eff;
-
-                // Added mass force (Newton's 3rd law back to fluid)
-                const amrex::Real FAx = C_AM * rho_f * Vb * ax_new;
-                const amrex::Real FAy = C_AM * rho_f * Vb * ay_new;
-                const amrex::Real FAz = C_AM * rho_f * Vb * az_new;
-
-                BubbleForces bf;
-                bf.fx_a = FAx; bf.fy_a = FAy; bf.fz_a = FAz;
-                bf.fx_D = FDx; bf.fy_D = FDy; bf.fz_D = FDz;
-                bf.dn_i = 0.0;  // filled later in deposit_o2_sources
-                m_forces.push_back(bf);
-
-                // Store new acceleration in particle for next step's velocity Verlet
-                p.rdata(BubbleIdx::AX) = ax_new;
-                p.rdata(BubbleIdx::AY) = ay_new;
-                p.rdata(BubbleIdx::AZ) = az_new;
-            }
-        }
-    }
-}
-
-// ============================================================================
 // do_breakup
 //   Hinze criterion: break if D > D_e = (sigma/rho_f)^0.6 * epsilon^(-0.4)
 //   Epsilon is interpolated from the derived MultiFab (EPSILON_IDX),
@@ -539,12 +416,9 @@ void BubbleManager::do_breakup(
                 // Skip if bubble is still in breakup cooldown (Kolmogorov timescale)
                 if (p.rdata(BubbleIdx::BREAKUP_COOLDOWN) > 0.0) { continue; }
 
-                // Interpolate turbulent dissipation rate from derived field [LB → SI]
-                const amrex::Real eps_lb = trilinear_interp(
-                    derived, constants::EPSILON_IDX,
-                    geom, p.pos(0), p.pos(1), p.pos(2));
+                // Read cached turbulent dissipation rate interpolated during advance()
                 const amrex::Real eps_SI = std::min(
-                    std::max(eps_lb * eps_conv, 1.0e-10),
+                    p.rdata(BubbleIdx::EPS_CACHED),
                     m_params.eps_max);  // cap: prevent boundary-layer over-fragmentation
 
                 const amrex::Real d  = p.rdata(BubbleIdx::DIAMETER);
@@ -764,359 +638,7 @@ void BubbleManager::do_coalescence(amrex::Real phys_time)
 }
 
 // ============================================================================
-// remove_exited_bubbles
-//   Remove bubbles that have risen above the free surface.
-// ============================================================================
-void BubbleManager::remove_exited_bubbles(const amrex::Geometry& geom,
-                                           const amrex::MultiFab* phi_mf)
-{
-    const amrex::Real z_surf = m_params.free_surface_z;
-
-    if (phi_mf != nullptr) {
-        // Phase-field mode: remove bubble when Φ < 0.5 at its cell.
-        // Uses nearest-cell lookup (floor of position in LB coordinates).
-        const auto& prob_lo = geom.ProbLoArray();
-        const auto& dx_arr  = geom.CellSizeArray();
-        const amrex::Box domain = geom.Domain();
-
-        for (int lev = 0; lev <= m_container.finestLevel(); ++lev) {
-            for (auto& kv : m_container.GetParticles(lev)) {
-                auto& aos = kv.second.GetArrayOfStructs();
-                for (auto& p : aos()) {
-                    if (!p.id().is_valid()) { continue; }
-
-                    // Guard: if position is NaN/Inf (from numerical blow-up
-                    // in forces or integration), remove immediately.
-                    if (!std::isfinite(p.pos(0)) ||
-                        !std::isfinite(p.pos(1)) ||
-                        !std::isfinite(p.pos(2))) {
-                        p.id() = -1;
-                        continue;
-                    }
-
-                    // Cell index containing bubble centre.
-                    // Guard against huge positions (finite but outside int range)
-                    // that would cause UB in static_cast<int>(floor(...)).
-                    const double fi = (p.pos(0) - prob_lo[0]) / dx_arr[0];
-                    const double fj = (p.pos(1) - prob_lo[1]) / dx_arr[1];
-                    const double fk = (p.pos(2) - prob_lo[2]) / dx_arr[2];
-                    if (fi < -1.0e9 || fi > 1.0e9 ||
-                        fj < -1.0e9 || fj > 1.0e9 ||
-                        fk < -1.0e9 || fk > 1.0e9) {
-                        p.id() = -1;
-                        continue;
-                    }
-                    const int ci = static_cast<int>(std::floor(fi));
-                    const int cj = static_cast<int>(std::floor(fj));
-                    const int ck = static_cast<int>(std::floor(fk));
-
-                    const amrex::IntVect iv(AMREX_D_DECL(ci, cj, ck));
-                    if (!domain.contains(iv)) {
-                        // Outside domain entirely — always remove
-                        p.id() = -1;
-                        continue;
-                    }
-
-                    // Find the MFIter tile that owns this cell
-                    for (amrex::MFIter mfi(*phi_mf); mfi.isValid(); ++mfi) {
-                        if (mfi.validbox().contains(iv)) {
-                            // Read via memcpy to avoid loading SNaN into FP
-                            // register (which triggers SIGFPE with FPE trapping).
-                            const amrex::Real* ptr = &((*phi_mf).array(mfi)(iv, 0));
-                            std::uint64_t bits;
-                            std::memcpy(&bits, ptr, sizeof(bits));
-                            // IEEE 754 double NaN: exponent all 1s, mantissa != 0
-                            const std::uint64_t exp_mask = 0x7FF0000000000000ULL;
-                            const std::uint64_t man_mask = 0x000FFFFFFFFFFFFFULL;
-                            const bool is_nan = ((bits & exp_mask) == exp_mask) &&
-                                                ((bits & man_mask) != 0);
-                            if (is_nan) {
-                                p.id() = -1;
-                            } else {
-                                amrex::Real phi_val;
-                                std::memcpy(&phi_val, ptr, sizeof(phi_val));
-                                if (phi_val < 0.5) {
-                                    p.id() = -1;
-                                }
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    } else {
-        // Fallback: fixed z-threshold
-        for (int lev = 0; lev <= m_container.finestLevel(); ++lev) {
-            for (auto& kv : m_container.GetParticles(lev)) {
-                auto& aos = kv.second.GetArrayOfStructs();
-                for (auto& p : aos()) {
-                    if (!p.id().is_valid()) { continue; }
-                    if (p.pos(2) >= z_surf) {
-                        p.id() = -1;
-                    }
-                }
-            }
-        }
-    }
-    m_container.Redistribute();
-}
-
-// ============================================================================
-// deposit_fluid_forces
-//   Convert force (SI, N) to LB force density and add into fluid_force_mf.
-//   Uses a two-pass approach: collect (cell, value) pairs, then iterate
-//   over MultiFab tiles and add contributions (safe, no GPU atomics needed).
-// ============================================================================
-void BubbleManager::deposit_fluid_forces(
-    amrex::MultiFab&       fluid_force_mf,
-    const amrex::Geometry& geom)
-{
-    const amrex::Real dx        = m_params.dx_phys;
-    const amrex::Real dt        = m_params.dt_phys;
-    const amrex::Real rho_ref   = m_params.rho_fluid;
-    // F_LB_vol = F_SI [N] * dt^2 / (rho_ref [kg/m³] * dx^4 [m^4])
-    const amrex::Real conv = dt * dt / (rho_ref * std::pow(dx, 4.0));
-
-    // Pass 1: collect all force deposits
-    struct ForceDep { int ci, cj, ck; amrex::Real fx, fy, fz; };
-    amrex::Vector<ForceDep> deps;
-    deps.reserve(static_cast<int>(m_forces.size()));
-
-    const amrex::Real* plo    = geom.ProbLo();
-    const amrex::Real* dx_arr = geom.CellSize();
-    const amrex::Box& dom     = geom.Domain();
-
-    {
-        int fi = 0;
-        for (int lev = 0; lev <= m_container.finestLevel(); ++lev) {
-            for (const auto& kv : m_container.GetParticles(lev)) {
-                const auto& aos = kv.second.GetArrayOfStructs();
-                for (const auto& p : aos()) {
-                    if (!p.id().is_valid()) { ++fi; continue; }
-
-                    const auto& bf = m_forces[fi];
-                    const amrex::Real Ffx = -(bf.fx_a + bf.fx_D) * conv;
-                    const amrex::Real Ffy = -(bf.fy_a + bf.fy_D) * conv;
-                    const amrex::Real Ffz = -(bf.fz_a + bf.fz_D) * conv;
-
-                    const int ci = static_cast<int>(std::floor((p.pos(0) - plo[0]) / dx_arr[0]));
-                    const int cj = static_cast<int>(std::floor((p.pos(1) - plo[1]) / dx_arr[1]));
-                    const int ck = static_cast<int>(std::floor((p.pos(2) - plo[2]) / dx_arr[2]));
-
-                    if (dom.contains(amrex::IntVect(AMREX_D_DECL(ci, cj, ck)))) {
-                        deps.push_back({ci, cj, ck, Ffx, Ffy, Ffz});
-                    }
-                    ++fi;
-                }
-            }
-        }
-    }
-
-    // Pass 2: deposit into MultiFab (MFIter outer loop)
-    for (amrex::MFIter mfi(fluid_force_mf); mfi.isValid(); ++mfi) {
-        const amrex::Box& bx = mfi.validbox();
-        auto arr = fluid_force_mf.array(mfi);
-        for (const auto& d : deps) {
-            if (bx.contains(amrex::IntVect(AMREX_D_DECL(d.ci, d.cj, d.ck)))) {
-                arr(d.ci, d.cj, d.ck, 0) += d.fx;
-                arr(d.ci, d.cj, d.ck, 1) += d.fy;
-                arr(d.ci, d.cj, d.ck, 2) += d.fz;
-            }
-        }
-    }
-}
-
-// ============================================================================
-// deposit_o2_sources
-//   Kawase k_L, Eq. 17 of Thomas et al.
-//   k_L = 0.301 * (epsilon * nu)^(1/4) * Sc^(-1/2)
-//
-//   Mass transfer rate per bubble [mol/s]:
-//   dn_i/dt = k_L * A_i * (S_i * C_g,i - C_f,i)
-//
-//   Source deposited on cell j [mol/(m³·s)]:
-//   cdot_j = (1/Vcell) * sum_{i in j} dn_i
-// ============================================================================
-void BubbleManager::deposit_o2_sources(
-    amrex::MultiFab&       o2_src_mf,
-    const amrex::MultiFab& o2_conc_mf,
-    const amrex::MultiFab& derived,
-    const amrex::Geometry& geom,
-    const amrex::iMultiFab* is_fluid_mf)
-{
-    const amrex::Real dx     = m_params.dx_phys;
-    const amrex::Real dt     = m_params.dt_phys;
-    const amrex::Real nu_f   = m_params.nu_fluid;
-    const amrex::Real D_O2   = m_params.D_O2;
-    const amrex::Real C_kL   = m_params.kL_coeff;
-    const amrex::Real Sc     = nu_f / D_O2;            // Schmidt number
-    const amrex::Real S_i    = m_params.O2_solubility; // dimensionless Bunsen. 
-    const amrex::Real dx3    = dx * dx * dx;            // cell volume [m³]
-    // epsilon LB → SI: eps_SI [m²/s³] = eps_LB * dx²/dt³
-    const amrex::Real eps_conv = dx * dx / (dt * dt * dt);
-
-    // Pass 1: compute per-bubble mass transfer and collect deposits
-    struct SrcDep { int ci, cj, ck; amrex::Real src; };
-    amrex::Vector<SrcDep> deps;
-    deps.reserve(static_cast<int>(m_forces.size()));
-
-    const amrex::Real* plo    = geom.ProbLo();
-    const amrex::Real* dx_arr = geom.CellSize();
-    const amrex::Box& dom     = geom.Domain();
-
-    {
-        int fi = 0;
-        for (int lev = 0; lev <= m_container.finestLevel(); ++lev) {
-            for (auto& kv : m_container.GetParticles(lev)) {
-                auto& pbox = kv.second;
-                auto& aos  = pbox.GetArrayOfStructs();
-                for (auto& p : aos()) {
-                    if (!p.id().is_valid()) { ++fi; continue; }
-
-                    // Guard: skip bubbles at positions where underlying
-                    // MultiFab data may contain signaling NaN (outside
-                    // initialized fluid domain or in EB cells).
-                    bool skip_solid = false;
-                    {
-                        const int ci = static_cast<int>(std::floor((p.pos(0) - plo[0]) / dx_arr[0]));
-                        const int cj = static_cast<int>(std::floor((p.pos(1) - plo[1]) / dx_arr[1]));
-                        const int ck = static_cast<int>(std::floor((p.pos(2) - plo[2]) / dx_arr[2]));
-                        if (!dom.contains(amrex::IntVect(AMREX_D_DECL(ci, cj, ck)))) {
-                            p.id() = -1;
-                            ++fi; continue;
-                        }
-                        // Skip bubbles inside solid cells — no mass transfer
-                        // should occur inside impeller/walls.
-                        if (is_fluid_mf != nullptr) {
-                            const amrex::IntVect iv(AMREX_D_DECL(ci, cj, ck));
-                            for (amrex::MFIter mfi(*is_fluid_mf); mfi.isValid(); ++mfi) {
-                                if (mfi.validbox().contains(iv)) {
-                                    if ((*is_fluid_mf).array(mfi)(iv, 0) == 0) {
-                                        skip_solid = true;
-                                    }
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    if (skip_solid) { ++fi; continue; }
-
-                    const amrex::Real d   = p.rdata(BubbleIdx::DIAMETER);
-                    const amrex::Real r   = 0.5 * d;
-                    const amrex::Real Vb  = (4.0/3.0) * amrex::Math::pi<amrex::Real>() * r*r*r;
-                    const amrex::Real Ab  = amrex::Math::pi<amrex::Real>() * d * d;
-
-                    // Gas-phase O2 concentration [mol/m³]
-                    const amrex::Real n_O2  = p.rdata(BubbleIdx::N_O2);
-                    const amrex::Real C_g_i = (Vb > 0.0) ? (n_O2 / Vb) : 0.0;
-
-                    // Fluid O2 concentration at bubble location [LB rho → mol/m³]
-                    const amrex::Real C_f_lb_raw = trilinear_interp(o2_conc_mf, 0,
-                                                                  geom,
-                                                                  p.pos(0), p.pos(1), p.pos(2));
-
-                    // Clamp negative concentrations to zero: negative values are
-                    // numerical artifacts from early-time oscillations and have no
-                    // physical meaning.  Treating them as zero keeps the driving
-                    // force positive (bubble→liquid) which is stabilizing.
-                    const amrex::Real C_f_lb = std::max(C_f_lb_raw, amrex::Real(0.0));
-
-                    // Convert from LB_rho to physical units: 1 LB_rho = C_ref mol/m³
-                    const amrex::Real C_f_i = C_f_lb * m_params.C_ref;
-
-                    // Local epsilon [LB → SI]
-                    const amrex::Real eps_lb = trilinear_interp(derived, constants::EPSILON_IDX,
-                                                                  geom,
-                                                                  p.pos(0), p.pos(1), p.pos(2));
-                    const amrex::Real eps_SI = std::max(eps_lb * eps_conv, 1.0e-10);
-
-                    // Kawase k_L [m/s]  (Eq. 17, Thomas et al.)
-                    const amrex::Real k_L = C_kL * std::pow(eps_SI * nu_f, 0.25) *
-                                            std::pow(Sc, -0.5);
-
-                    // Driving force [mol/m³]: S_i * C_g,i - C_f,i
-                    const amrex::Real driving = S_i * C_g_i - C_f_i;
-
-                    // Mass transfer rate [mol/s]
-                    const amrex::Real dn_i = k_L * Ab * driving;
-
-                    // Cache for budget output
-                    if (fi < static_cast<int>(m_forces.size())) {
-                        m_forces[fi].dn_i = dn_i;
-                    }
-
-                    // Shrink bubble O2 content
-                    amrex::Real n_O2_new = n_O2 - dn_i * dt;
-                    if (n_O2_new < 0.0) { n_O2_new = 0.0; }
-                    p.rdata(BubbleIdx::N_O2) = n_O2_new;
-
-                    // Update bubble diameter from new mole count
-                    const amrex::Real Vb_new = n_O2_new * m_params.O2_molar_volume;
-                    // Minimum bubble diameter (10 µm): below this the effective
-                    // mass → 0 causing acceleration → Inf in compute_forces.
-                    const amrex::Real d_min = 1.0e-5;  // metres
-                    if (Vb_new > 0.0) {
-                        const amrex::Real d_new =
-                            std::cbrt(6.0 * Vb_new / amrex::Math::pi<amrex::Real>());
-                        if (d_new < d_min) {
-                            p.id() = -1;  // Too small — remove
-                        } else {
-                            p.rdata(BubbleIdx::DIAMETER) = d_new;
-                        }
-                    } else {
-                        p.id() = -1;  // Bubble fully dissolved — mark for removal
-                    }
-
-                    // Source deposit [mol/(m³·s)]
-                    const amrex::Real src_rate = dn_i / dx3;
-
-                    // Guard: skip deposit if source is non-finite or unreasonably large.
-                    // With FPE disabled, NaN/Inf can arise from interpolation of
-                    // uninitialized cells; reject silently.
-                    if (!std::isfinite(src_rate) || std::abs(src_rate) > 1.0e4) {
-                        ++fi; continue;
-                    }
-
-                    const int ci = static_cast<int>(std::floor((p.pos(0) - plo[0]) / dx_arr[0]));
-                    const int cj = static_cast<int>(std::floor((p.pos(1) - plo[1]) / dx_arr[1]));
-                    const int ck = static_cast<int>(std::floor((p.pos(2) - plo[2]) / dx_arr[2]));
-                    if (dom.contains(amrex::IntVect(AMREX_D_DECL(ci, cj, ck)))) {
-                        deps.push_back({ci, cj, ck, src_rate});
-                    }
-                    ++fi;
-                }
-            }
-        }
-    }
-
-    // Pass 2: deposit into o2_src_mf (MFIter outer loop)
-    amrex::Real dep_max = 0.0;
-    for (amrex::MFIter mfi(o2_src_mf); mfi.isValid(); ++mfi) {
-        const amrex::Box& bx = mfi.validbox();
-        auto arr = o2_src_mf.array(mfi);
-        for (const auto& d : deps) {
-            if (bx.contains(amrex::IntVect(AMREX_D_DECL(d.ci, d.cj, d.ck)))) {
-                arr(d.ci, d.cj, d.ck, 0) += d.src;
-                dep_max = std::max(dep_max, std::abs(d.src));
-            }
-        }
-    }
-    // Diagnostic: print deposit summary (controlled by a local print interval)
-    {
-        static int dbg_ctr = 0;
-        if (++dbg_ctr % 800 == 1) {
-            amrex::Print() << "[O2_deposit] n_deps=" << deps.size()
-                           << "  max_src_rate=" << dep_max << " mol/(m3*s)\n";
-        }
-    }
-
-    // Remove bubbles that fully dissolved (id = -1)
-    m_container.Redistribute();
-}
-
-// ============================================================================
-// advance  — main per-step driver
+// advance  — fused GPU per-step driver
 // ============================================================================
 void BubbleManager::advance(
     amrex::Real                dt,
@@ -1131,264 +653,236 @@ void BubbleManager::advance(
     const amrex::iMultiFab*    is_fluid_mf)
 {
     if (!m_initialized) { return; }
-    if (!m_particles_ever_injected) { return; }  // m_particles not yet sized
+    if (!m_particles_ever_injected) { return; }
+    
+    // We no longer make host-pinned copies because Particles live in Managed/Device memory implicitly via DefaultAllocator.
+    
+    // Reset output MFs to zero natively on device
+    fluid_force_mf.setVal(0.0);
+    o2_src_mf.setVal(0.0);
+
     const amrex::Real dt_phys = m_params.dt_phys;
     const amrex::Real dx_phys = m_params.dx_phys;
-
-    // ------------------------------------------------------------------
-    // 0. Copy device MultiFabs to host-pinned copies so that all CPU-side
-    //    particle loops (trilinear_interp, deposit_*) can read/write them
-    //    without requiring amrex.the_arena_is_managed=1.
-    //    Pinned memory is directly accessible from CPU and DMA-accessible
-    //    by the GPU, so the copies back to device are cheap H2D transfers.
-    // ------------------------------------------------------------------
-    auto make_pinned_copy = [](const amrex::MultiFab& src) {
-        amrex::MultiFab h(src.boxArray(), src.DistributionMap(),
-                          src.nComp(), 0,
-                          amrex::MFInfo().SetArena(amrex::The_Pinned_Arena()));
-        amrex::MultiFab::Copy(h, src, 0, 0, src.nComp(), 0);
-        return h;
-    };
-
-    // Input MFs: device → host-pinned
-    amrex::MultiFab macrodata_h = make_pinned_copy(macrodata);
-    amrex::MultiFab derived_h   = make_pinned_copy(derived);
-    amrex::MultiFab o2_conc_h   = make_pinned_copy(o2_conc_mf);
-    amrex::Gpu::streamSynchronize();  // ensure D2H copies are done before CPU reads
-
-    // Output MFs: zeroed host-pinned buffers (will be copied back to device)
-    amrex::MultiFab fluid_force_h(fluid_force_mf.boxArray(),
-                                  fluid_force_mf.DistributionMap(),
-                                  fluid_force_mf.nComp(), 0,
-                                  amrex::MFInfo().SetArena(amrex::The_Pinned_Arena()));
-    fluid_force_h.setVal(0.0);
-    amrex::MultiFab o2_src_h(o2_src_mf.boxArray(),
-                             o2_src_mf.DistributionMap(),
-                             o2_src_mf.nComp(), 0,
-                             amrex::MFInfo().SetArena(amrex::The_Pinned_Arena()));
-    o2_src_h.setVal(0.0);
-
-    // Optional phi_mf: copy if provided, otherwise leave null
-    std::unique_ptr<amrex::MultiFab> phi_h;
-    const amrex::MultiFab* phi_h_ptr = nullptr;
-    if (phi_mf != nullptr) {
-        phi_h = std::make_unique<amrex::MultiFab>(
-            phi_mf->boxArray(), phi_mf->DistributionMap(),
-            phi_mf->nComp(), 0,
-            amrex::MFInfo().SetArena(amrex::The_Pinned_Arena()));
-        amrex::MultiFab::Copy(*phi_h, *phi_mf, 0, 0, phi_mf->nComp(), 0);
-        amrex::Gpu::streamSynchronize();
-        phi_h_ptr = phi_h.get();
-    }
-
-    // Optional is_fluid_mf: copy if provided for solid-body collision
-    std::unique_ptr<amrex::iMultiFab> is_fluid_h;
-    const amrex::iMultiFab* is_fluid_h_ptr = nullptr;
-    if (is_fluid_mf != nullptr) {
-        is_fluid_h = std::make_unique<amrex::iMultiFab>(
-            is_fluid_mf->boxArray(), is_fluid_mf->DistributionMap(),
-            is_fluid_mf->nComp(), 0,
-            amrex::MFInfo().SetArena(amrex::The_Pinned_Arena()));
-        amrex::iMultiFab::Copy(*is_fluid_h, *is_fluid_mf, 0, 0, is_fluid_mf->nComp(), 0);
-        amrex::Gpu::streamSynchronize();
-        is_fluid_h_ptr = is_fluid_h.get();
-    }
-
-    // ------------------------------------------------------------------
-    // 1. Boyle's law diameter correction (reads only particle data — pinned)
-    // ------------------------------------------------------------------
-    apply_boyles_law(geom);
-
-    // ------------------------------------------------------------------
-    // 2. Compute forces at current positions (fills m_forces, stores 
-    //    acceleration in particle rdata for velocity Verlet)
-    // ------------------------------------------------------------------
-    compute_forces(macrodata_h, derived_h, geom);
-
-    // ------------------------------------------------------------------
-    // 3. Deposit two-way coupling body forces on fluid.
-    //    MUST happen BEFORE any Redistribute() call so that m_forces[]
-    //    remains indexed in the same particle-iteration order as step 2.
-    //    Redistribute (called below in Verlet, remove_exited_bubbles, and
-    //    do_breakup) may reorder particles within tiles, breaking the fi
-    //    index alignment if deposits were done after those calls.
-    // ------------------------------------------------------------------
-    deposit_fluid_forces(fluid_force_h, geom);
-
-    // ------------------------------------------------------------------
-    // 4. Mass transfer O2 source + bubble shrinkage.
-    //    Also done before Redistribute for the same index-safety reason.
-    // ------------------------------------------------------------------
-    deposit_o2_sources(o2_src_h, o2_conc_h, derived_h, geom, is_fluid_h_ptr);
-
-    // ------------------------------------------------------------------
-    // 5. Velocity Verlet integration
-    //    x(t+dt) = x(t) + v(t)*dt_phys + 0.5*a(t)*dt_phys²  [LB cells]
-    //    v(t+dt) = v(t) + a(t)*dt_phys                       [m/s, SI]
-    //    (Full 2nd-order Verlet; a from compute_forces above)
-    //    Redistribute after this call may reorder particle storage.
-    //
-    //    Solid-body collision: after the position update, if the bubble's
-    //    new cell is solid (is_fluid == 0), revert position and zero
-    //    velocity to prevent penetration into impeller/walls.
-    // ------------------------------------------------------------------
-    {
-        const amrex::Real* plo    = geom.ProbLo();
-        const amrex::Real* dx_arr = geom.CellSize();
-        const amrex::Box   domain = geom.Domain();
-
-        for (int lev = 0; lev <= m_container.finestLevel(); ++lev) {
-            for (auto& kv : m_container.GetParticles(lev)) {
-                auto& pbox = kv.second;
-                auto& aos  = pbox.GetArrayOfStructs();
-                for (auto& p : aos()) {
-                    if (!p.id().is_valid()) { continue; }
-
-                    const amrex::Real ax = p.rdata(BubbleIdx::AX);
-                    const amrex::Real ay = p.rdata(BubbleIdx::AY);
-                    const amrex::Real az = p.rdata(BubbleIdx::AZ);
-
-                    // Guard: if acceleration is NaN/Inf, skip integration
-                    // and mark for removal to prevent position corruption.
-                    if (!std::isfinite(ax) || !std::isfinite(ay) || !std::isfinite(az)) {
-                        p.id() = -1;
-                        continue;
+    
+    // Set up iteration
+    for (int lev = 0; lev <= m_container.finestLevel(); ++lev) {
+        
+        const auto& geom_lev = m_container.Geom(lev);
+        amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> prob_lo = geom_lev.ProbLoArray();
+        amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> dx_arr  = geom_lev.CellSizeArray();
+        amrex::Box domain = geom_lev.Domain();
+        
+        for (BubbleContainer::ParIterType pti(m_container, lev); pti.isValid(); ++pti) {
+            auto& aos = pti.GetArrayOfStructs();
+            auto* pData = aos().data();
+            int num_part = pti.numParticles();
+            if (num_part == 0) continue;
+            
+            auto md_arr    = macrodata.const_array(pti);
+            auto der_arr   = derived.const_array(pti);
+            auto o2_arr    = o2_conc_mf.const_array(pti);
+            auto force_arr = fluid_force_mf.array(pti);
+            auto src_arr   = o2_src_mf.array(pti);
+            
+            bool has_isf = (is_fluid_mf != nullptr);
+            auto isf_arr = has_isf ? is_fluid_mf->const_array(pti) : amrex::Array4<const int>{};
+            bool has_phi = (phi_mf != nullptr);
+            auto phi_arr = has_phi ? phi_mf->const_array(pti) : amrex::Array4<const amrex::Real>{};
+            
+            auto prms = m_params;
+            
+            amrex::ParallelFor(num_part, [=] AMREX_GPU_DEVICE (int i) {
+                auto& p = pData[i];
+                if (!p.id().is_valid()) return;
+                
+                amrex::Real px = p.pos(0);
+                amrex::Real py = p.pos(1);
+                amrex::Real pz = p.pos(2);
+                
+                // 1. Boyle's law depth scaling
+                amrex::Real h = (prms.free_surface_z - pz) * dx_phys;
+                if (h <= 0.0) h = 0.0;
+                amrex::Real d_atm = p.rdata(BubbleIdx::DIAMETER);
+                amrex::Real d_new = d_atm * std::pow(1.0 + prms.rho_fluid * prms.g_grav * h / prms.P_atm, -1.0/3.0);
+                p.rdata(BubbleIdx::DIAMETER) = d_new;
+                
+                const amrex::Real r = 0.5 * d_new;
+                const amrex::Real Vb = (4.0/3.0) * amrex::Math::pi<amrex::Real>() * r*r*r;
+                const amrex::Real Ab = amrex::Math::pi<amrex::Real>() * r*r;
+                
+                // 2. Interpolate fluid velocity -> Bubble Drag
+                amrex::Real ufx_lb = trilinear_interp_device(md_arr, constants::VELX_IDX, prob_lo.data(), dx_arr.data(), px, py, pz);
+                amrex::Real ufy_lb = trilinear_interp_device(md_arr, constants::VELY_IDX, prob_lo.data(), dx_arr.data(), px, py, pz);
+                amrex::Real ufz_lb = trilinear_interp_device(md_arr, constants::VELZ_IDX, prob_lo.data(), dx_arr.data(), px, py, pz);
+                
+                const amrex::Real ufx = ufx_lb * dx_phys / prms.dt_phys;
+                const amrex::Real ufy = ufy_lb * dx_phys / prms.dt_phys;
+                const amrex::Real ufz = ufz_lb * dx_phys / prms.dt_phys;
+                
+                amrex::Real vbx = p.rdata(BubbleIdx::VX);
+                amrex::Real vby = p.rdata(BubbleIdx::VY);
+                amrex::Real vbz = p.rdata(BubbleIdx::VZ);
+                
+                amrex::Real urx = vbx - ufx;
+                amrex::Real ury = vby - ufy;
+                amrex::Real urz = vbz - ufz;
+                amrex::Real ur_mag = std::sqrt(urx*urx + ury*ury + urz*urz);
+                
+                amrex::Real Re_b = (ur_mag > 0.0) ? (ur_mag * d_new / prms.nu_fluid) : 0.0;
+                amrex::Real V_cell = dx_phys * dx_phys * dx_phys;
+                amrex::Real eps_p = amrex::min(Vb / V_cell, 0.99);
+                amrex::Real Cd = bubble_drag_cd(Re_b, eps_p);
+                
+                amrex::Real fd_factor = -0.5 * Cd * prms.rho_fluid * Ab * ur_mag;
+                amrex::Real FDx = fd_factor * urx;
+                amrex::Real FDy = fd_factor * ury;
+                amrex::Real FDz = fd_factor * urz;
+                
+                amrex::Real FBx = 0.0, FBy = 0.0, FBz = prms.rho_fluid * Vb * prms.g_grav;
+                amrex::Real m_eff = constants::C_ADDED_MASS * prms.rho_fluid * Vb;
+                
+                amrex::Real ax_new = (FBx + FDx) / m_eff;
+                amrex::Real ay_new = (FBy + FDy) / m_eff;
+                amrex::Real az_new = (FBz + FDz) / m_eff;
+                
+                amrex::Real FAx = m_eff * ax_new;
+                amrex::Real FAy = m_eff * ay_new;
+                amrex::Real FAz = m_eff * az_new;
+                
+                p.rdata(BubbleIdx::AX) = ax_new;
+                p.rdata(BubbleIdx::AY) = ay_new;
+                p.rdata(BubbleIdx::AZ) = az_new;
+                
+                // 3. Deposit drag+added mass coupling force back to fluid
+                // LB force = SI Force / (rho * dx^4 / dt^2)
+                amrex::Real conv = (prms.dt_phys * prms.dt_phys) / (prms.rho_fluid * V_cell * dx_phys);
+                amrex::Real Ffx = -(FAx + FDx) * conv;
+                amrex::Real Ffy = -(FAy + FDy) * conv;
+                amrex::Real Ffz = -(FAz + FDz) * conv;
+                
+                int ci = static_cast<int>(amrex::Math::floor((px - prob_lo[0]) / dx_arr[0]));
+                int cj = static_cast<int>(amrex::Math::floor((py - prob_lo[1]) / dx_arr[1]));
+                int ck = static_cast<int>(amrex::Math::floor((pz - prob_lo[2]) / dx_arr[2]));
+                if (domain.contains(amrex::IntVect(AMREX_D_DECL(ci, cj, ck)))) {
+                    amrex::Gpu::Atomic::AddNoRet(&force_arr(ci,cj,ck,0), Ffx);
+                    amrex::Gpu::Atomic::AddNoRet(&force_arr(ci,cj,ck,1), Ffy);
+                    amrex::Gpu::Atomic::AddNoRet(&force_arr(ci,cj,ck,2), Ffz);
+                }
+                
+                // 4. O2 Volumetric Source
+                amrex::Real n_O2 = p.rdata(BubbleIdx::N_O2);
+                amrex::Real C_g_i = (Vb > 0.0) ? (n_O2 / Vb) : 0.0;
+                
+                amrex::Real C_f_lb_raw = trilinear_interp_device(o2_arr, 0, prob_lo.data(), dx_arr.data(), px, py, pz);
+                amrex::Real C_f_i = amrex::max(C_f_lb_raw, amrex::Real(0.0)) * prms.C_ref;
+                
+                amrex::Real eps_lb = trilinear_interp_device(der_arr, constants::EPSILON_IDX, prob_lo.data(), dx_arr.data(), px, py, pz);
+                amrex::Real eps_conv = dx_phys * dx_phys / (prms.dt_phys * prms.dt_phys * prms.dt_phys);
+                amrex::Real eps_SI = amrex::max(eps_lb * eps_conv, 1.0e-10);
+                p.rdata(BubbleIdx::EPS_CACHED) = eps_SI;
+                
+                amrex::Real Sc = prms.nu_fluid / prms.D_O2;
+                amrex::Real k_L = prms.kL_coeff * std::pow(eps_SI * prms.nu_fluid, 0.25) * std::pow(Sc, -0.5);
+                amrex::Real S_i = prms.O2_solubility;
+                
+                amrex::Real dn_i = k_L * (amrex::Math::pi<amrex::Real>() * d_new * d_new) * (S_i * C_g_i - C_f_i);
+                
+                p.rdata(BubbleIdx::DN_I) = dn_i;  // Cache for stats
+                
+                amrex::Real n_O2_new = amrex::max(n_O2 - dn_i * prms.dt_phys, amrex::Real(0.0));
+                p.rdata(BubbleIdx::N_O2) = n_O2_new;
+                
+                amrex::Real Vb_new = n_O2_new * prms.O2_molar_volume;
+                if (Vb_new > 0.0) {
+                    amrex::Real d_new_new = std::cbrt(6.0 * Vb_new / amrex::Math::pi<amrex::Real>());
+                    if (d_new_new < 1.0e-5) { p.id() = -1; }
+                    else { p.rdata(BubbleIdx::DIAMETER) = d_new_new; }
+                } else { p.id() = -1; }
+                
+                amrex::Real src_rate = dn_i / V_cell;
+                if (std::isfinite(src_rate) && std::abs(src_rate) < 1.0e4) {
+                    if (domain.contains(amrex::IntVect(AMREX_D_DECL(ci, cj, ck)))) {
+                        amrex::Gpu::Atomic::AddNoRet(&src_arr(ci,cj,ck,0), src_rate);
                     }
-
-                    const amrex::Real vx = p.rdata(BubbleIdx::VX);
-                    const amrex::Real vy = p.rdata(BubbleIdx::VY);
-                    const amrex::Real vz = p.rdata(BubbleIdx::VZ);
-
-                    // Save old position for solid-body collision revert
-                    const amrex::Real old_x = p.pos(0);
-                    const amrex::Real old_y = p.pos(1);
-                    const amrex::Real old_z = p.pos(2);
-
-                    // Position update (to LB cells): Δx_LB = v_SI * dt_phys / dx_phys
-                    p.pos(0) += (vx * dt_phys + 0.5 * ax * dt_phys * dt_phys) / dx_phys;
-                    p.pos(1) += (vy * dt_phys + 0.5 * ay * dt_phys * dt_phys) / dx_phys;
-                    p.pos(2) += (vz * dt_phys + 0.5 * az * dt_phys * dt_phys) / dx_phys;
-
-                    // Velocity update (SI, m/s)
-                    p.rdata(BubbleIdx::VX) = vx + ax * dt_phys;
-                    p.rdata(BubbleIdx::VY) = vy + ay * dt_phys;
-                    p.rdata(BubbleIdx::VZ) = vz + az * dt_phys;
-
-                    // Solid-body collision: prevent bubble from entering solid
-                    if (is_fluid_h_ptr != nullptr) {
-                        const int ci = static_cast<int>(std::floor((p.pos(0) - plo[0]) / dx_arr[0]));
-                        const int cj = static_cast<int>(std::floor((p.pos(1) - plo[1]) / dx_arr[1]));
-                        const int ck = static_cast<int>(std::floor((p.pos(2) - plo[2]) / dx_arr[2]));
-                        const amrex::IntVect iv(AMREX_D_DECL(ci, cj, ck));
-
-                        bool new_in_solid = false;
-                        if (!domain.contains(iv)) {
-                            new_in_solid = true;
-                        } else {
-                            for (amrex::MFIter mfi(*is_fluid_h_ptr); mfi.isValid(); ++mfi) {
-                                if (mfi.validbox().contains(iv)) {
-                                    if ((*is_fluid_h_ptr).array(mfi)(iv, 0) == 0) {
-                                        new_in_solid = true;
-                                    }
-                                    break;
-                                }
-                            }
-                        }
-
+                }
+                
+                // 5. Velocity Verlet Position Update + Solid Body Collisions
+                if (p.id().is_valid()) {
+                    amrex::Real old_x = px;
+                    amrex::Real old_y = py;
+                    amrex::Real old_z = pz;
+                    
+                    amrex::Real new_px = px + (vbx * prms.dt_phys + 0.5 * ax_new * prms.dt_phys * prms.dt_phys) / dx_phys;
+                    amrex::Real new_py = py + (vby * prms.dt_phys + 0.5 * ay_new * prms.dt_phys * prms.dt_phys) / dx_phys;
+                    amrex::Real new_pz = pz + (vbz * prms.dt_phys + 0.5 * az_new * prms.dt_phys * prms.dt_phys) / dx_phys;
+                    
+                    p.rdata(BubbleIdx::VX) = vbx + ax_new * prms.dt_phys;
+                    p.rdata(BubbleIdx::VY) = vby + ay_new * prms.dt_phys;
+                    p.rdata(BubbleIdx::VZ) = vbz + az_new * prms.dt_phys;
+                    
+                    if (has_isf) {
+                        int nci = static_cast<int>(amrex::Math::floor((new_px - prob_lo[0]) / dx_arr[0]));
+                        int ncj = static_cast<int>(amrex::Math::floor((new_py - prob_lo[1]) / dx_arr[1]));
+                        int nck = static_cast<int>(amrex::Math::floor((new_pz - prob_lo[2]) / dx_arr[2]));
+                        amrex::IntVect niv(AMREX_D_DECL(nci, ncj, nck));
+                        
+                        bool new_in_solid = (!domain.contains(niv) || isf_arr(niv, 0) == 0);
                         if (new_in_solid) {
-                            // Check if old position is also solid (impeller
-                            // swept over the bubble — need to push/spill it
-                            // to nearest fluid neighbor).
-                            const int oi = static_cast<int>(std::floor((old_x - plo[0]) / dx_arr[0]));
-                            const int oj = static_cast<int>(std::floor((old_y - plo[1]) / dx_arr[1]));
-                            const int ok = static_cast<int>(std::floor((old_z - plo[2]) / dx_arr[2]));
-                            const amrex::IntVect oiv(AMREX_D_DECL(oi, oj, ok));
-
-                            bool old_in_solid = false;
-                            if (!domain.contains(oiv)) {
-                                old_in_solid = true;
-                            } else {
-                                for (amrex::MFIter mfi(*is_fluid_h_ptr); mfi.isValid(); ++mfi) {
-                                    if (mfi.validbox().contains(oiv)) {
-                                        if ((*is_fluid_h_ptr).array(mfi)(oiv, 0) == 0) {
-                                            old_in_solid = true;
-                                        }
-                                        break;
-                                    }
-                                }
-                            }
-
+                            amrex::IntVect oiv(AMREX_D_DECL(ci, cj, ck));
+                            bool old_in_solid = (!domain.contains(oiv) || isf_arr(oiv, 0) == 0);
                             if (!old_in_solid) {
-                                // New position hit solid but old was fluid:
-                                // simple wall collision — revert position.
-                                p.pos(0) = old_x;
-                                p.pos(1) = old_y;
-                                p.pos(2) = old_z;
-                                p.rdata(BubbleIdx::VX) = 0.0;
-                                p.rdata(BubbleIdx::VY) = 0.0;
-                                p.rdata(BubbleIdx::VZ) = 0.0;
-                                p.rdata(BubbleIdx::AX) = 0.0;
-                                p.rdata(BubbleIdx::AY) = 0.0;
-                                p.rdata(BubbleIdx::AZ) = 0.0;
+                                new_px = old_x; new_py = old_y; new_pz = old_z;
+                                p.rdata(BubbleIdx::VX) = 0; p.rdata(BubbleIdx::VY) = 0; p.rdata(BubbleIdx::VZ) = 0;
+                                p.rdata(BubbleIdx::AX) = 0; p.rdata(BubbleIdx::AY) = 0; p.rdata(BubbleIdx::AZ) = 0;
                             } else {
-                                // Both old and new are solid — impeller swept
-                                // over the bubble.  Push to nearest fluid cell
-                                // (spill-like behavior).
-                                bool found_fluid = false;
-                                // Search in 26-connected neighborhood of old cell
-                                for (int di = -1; di <= 1 && !found_fluid; ++di) {
-                                    for (int dj = -1; dj <= 1 && !found_fluid; ++dj) {
-                                        for (int dk = -1; dk <= 1 && !found_fluid; ++dk) {
-                                            if (di == 0 && dj == 0 && dk == 0) continue;
-                                            const amrex::IntVect niv(AMREX_D_DECL(oi+di, oj+dj, ok+dk));
-                                            if (!domain.contains(niv)) continue;
-                                            for (amrex::MFIter mfi(*is_fluid_h_ptr); mfi.isValid(); ++mfi) {
-                                                if (mfi.validbox().contains(niv)) {
-                                                    if ((*is_fluid_h_ptr).array(mfi)(niv, 0) == 1) {
-                                                        // Place bubble at center of this fluid cell
-                                                        p.pos(0) = (niv[0] + 0.5) * dx_arr[0] + plo[0];
-                                                        p.pos(1) = (niv[1] + 0.5) * dx_arr[1] + plo[1];
-                                                        p.pos(2) = (niv[2] + 0.5) * dx_arr[2] + plo[2];
-                                                        p.rdata(BubbleIdx::VX) = 0.0;
-                                                        p.rdata(BubbleIdx::VY) = 0.0;
-                                                        p.rdata(BubbleIdx::VZ) = 0.0;
-                                                        p.rdata(BubbleIdx::AX) = 0.0;
-                                                        p.rdata(BubbleIdx::AY) = 0.0;
-                                                        p.rdata(BubbleIdx::AZ) = 0.0;
-                                                        found_fluid = true;
-                                                    }
-                                                    break;
-                                                }
+                                bool found = false;
+                                for (int d_i = -1; d_i <= 1 && !found; ++d_i) {
+                                    for (int d_j = -1; d_j <= 1 && !found; ++d_j) {
+                                        for (int d_k = -1; d_k <= 1 && !found; ++d_k) {
+                                            amrex::IntVect nniv(AMREX_D_DECL(ci+d_i, cj+d_j, ck+d_k));
+                                            if (domain.contains(nniv) && isf_arr(nniv,0) == 1) {
+                                                new_px = (nniv[0] + 0.5) * dx_arr[0] + prob_lo[0];
+                                                new_py = (nniv[1] + 0.5) * dx_arr[1] + prob_lo[1];
+                                                new_pz = (nniv[2] + 0.5) * dx_arr[2] + prob_lo[2];
+                                                p.rdata(BubbleIdx::VX) = 0; p.rdata(BubbleIdx::VY) = 0; p.rdata(BubbleIdx::VZ) = 0;
+                                                p.rdata(BubbleIdx::AX) = 0; p.rdata(BubbleIdx::AY) = 0; p.rdata(BubbleIdx::AZ) = 0;
+                                                found = true;
                                             }
                                         }
                                     }
                                 }
-                                if (!found_fluid) {
-                                    // No fluid neighbor in immediate vicinity —
-                                    // bubble is deeply embedded; remove it.
-                                    p.id() = -1;
-                                }
+                                if (!found) p.id() = -1;
                             }
                         }
                     }
+                    p.pos(0) = new_px;
+                    p.pos(1) = new_py;
+                    p.pos(2) = new_pz;
+                    
+                    // 6. Free Surface Outgassing Exit
+                    if (has_phi) {
+                        int fsi = static_cast<int>(amrex::Math::floor((new_px - prob_lo[0]) / dx_arr[0]));
+                        int fsj = static_cast<int>(amrex::Math::floor((new_py - prob_lo[1]) / dx_arr[1]));
+                        int fsk = static_cast<int>(amrex::Math::floor((new_pz - prob_lo[2]) / dx_arr[2]));
+                        amrex::IntVect fsiv(AMREX_D_DECL(fsi, fsj, fsk));
+                        if (domain.contains(fsiv) && phi_arr(fsiv, 0) < 0.5) {
+                            p.id() = -1;
+                        }
+                    } else {
+                        if (new_pz >= prms.free_surface_z) { p.id() = -1; }
+                    }
                 }
-            }
+            });
         }
     }
+    
+    // Sort and compact
     m_container.Redistribute();
-
-    // ------------------------------------------------------------------
-    // 6. Remove bubbles that have crossed the free surface.
-    //    When phi_mf is provided (Chiu & Lin phase-field active), use
-    //    Φ < 0.5 at the bubble's cell as the exit criterion — consistent
-    //    with the dynamic interface position.  Otherwise fall back to
-    //    the fixed free_surface_z z-coordinate threshold.
-    // ------------------------------------------------------------------
-    remove_exited_bubbles(geom, phi_h_ptr);
-
-    // ------------------------------------------------------------------
-    // 7. Decrement breakup cooldown timers, then check breakup
-    // ------------------------------------------------------------------
+    
+    // 7. AMReX CPU fallback loops for collision/breakup via Managed Memory
+    // These run natively on host via the unified memory wrapper tracking
+    amrex::Gpu::synchronize();
+    
     for (int lev = 0; lev <= m_container.finestLevel(); ++lev) {
         for (auto& kv : m_container.GetParticles(lev)) {
             auto& aos = kv.second.GetArrayOfStructs();
@@ -1399,20 +893,8 @@ void BubbleManager::advance(
             }
         }
     }
-    do_breakup(derived_h, geom);
-
-    // ------------------------------------------------------------------
-    // 8. Copy host-pinned output buffers back to device MultiFabs.
-    //    fluid_force_h and o2_src_h were filled by deposit_fluid_forces
-    //    and deposit_o2_sources above; add them into the device MFs so
-    //    the LBM step can apply them as body forces.
-    // ------------------------------------------------------------------
-    amrex::MultiFab::Add(fluid_force_mf, fluid_force_h, 0, 0,
-                         fluid_force_mf.nComp(), 0);
-    amrex::MultiFab::Add(o2_src_mf, o2_src_h, 0, 0,
-                         o2_src_mf.nComp(), 0);
+    do_breakup(derived, geom);
 }
-
 // ============================================================================
 // write_stats
 // ============================================================================
@@ -1440,9 +922,7 @@ void BubbleManager::write_stats(int step, amrex::Real phys_time)
                 d_min      = std::min(d_min, d);
                 d_max      = std::max(d_max, d);
                 n_O2_total += p.rdata(BubbleIdx::N_O2);
-                if (fi < static_cast<int>(m_forces.size())) {
-                    dn_total += m_forces[fi].dn_i;
-                }
+                dn_total += p.rdata(BubbleIdx::DN_I);
                 ++fi;
             }
         }

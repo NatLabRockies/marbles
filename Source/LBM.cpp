@@ -454,16 +454,16 @@ void LBM::read_parameters()
 
         // Physical unit conversions — must be set explicitly in input file.
         // lbm.dx_outer and lbm.dt_outer are dimensionless LB units (= 1.0);
-        // dx_phys and dt_phys must be the actual SI values.
+        // dx_phys and dt_lev must be the actual SI values.
         m_bubble_params.dx_phys = m_dx_outer;  // overridden below if lbm.dx_phys provided
-        m_bubble_params.dt_phys = m_dt_outer;  // overridden below if lbm.dt_phys provided
+        m_bubble_params.dt_lev = m_dt_outer;  // overridden below if lbm.dt_lev provided
         m_bubble_params.nu_lb   = m_nu;
         {
             amrex::ParmParse pp_lbm("lbm");
             // Read actual SI values (meters, seconds) — REQUIRED for physical accuracy.
-            // dx_phys = physical cell size [m];  dt_phys = physical time step [s].
+            // dx_phys = physical cell size [m];  dt_lev = physical time step [s].
             pp_lbm.query("dx_phys", m_bubble_params.dx_phys);
-            pp_lbm.query("dt_phys", m_bubble_params.dt_phys);
+            pp_lbm.query("dt_lev", m_bubble_params.dt_lev);
         }
 
         // Concentration reference scale: 1 LB_rho ≡ m_bubble_o2_C_ref mol/m³
@@ -476,7 +476,7 @@ void LBM::read_parameters()
 
         amrex::Print() << "[BubbleManager] Bubble physics enabled.\n"
                        << "  dx_phys = " << m_bubble_params.dx_phys << " m\n"
-                       << "  dt_phys = " << m_bubble_params.dt_phys << " s\n"
+                       << "  dt_lev = " << m_bubble_params.dt_lev << " s\n"
                        << "  O2 C_ref = " << m_bubble_o2_C_ref << " mol/m3 per LB_rho\n";
     }
 }
@@ -931,8 +931,8 @@ void LBM::advance(
     // Execute only on the base level to keep a single particle container.
     // ------------------------------------------------------------------
     if (m_enable_bubbles && lev == 0) {
-        // Physical time in seconds (m_ts_new is in LB steps, dt_phys is s/step)
-        const amrex::Real phys_time = m_ts_new[lev] * m_bubble_params.dt_phys;
+        // Physical time in seconds (m_ts_new is in LB steps, dt_lev is s/step)
+        const amrex::Real phys_time = m_ts_new[lev] * m_bubble_params.dt_lev;
 
         // Temporary MultiFabs for bubble↔fluid coupling (zeroed each step)
         amrex::MultiFab bubble_force(
@@ -944,7 +944,7 @@ void LBM::advance(
 
         // Sparger injection (every step)
         // Must pass physical seconds per step, not the dimensionless LB m_dt_outer.
-        m_bubbles.inject_bubbles(m_bubble_params.dt_phys);
+        m_bubbles.inject_bubbles(m_bubble_params.dt_lev);
 
         // Determine O2 concentration MultiFab (component 0 if available)
         // A valid kLa run requires at least 1 component for dissolved O2.
@@ -1096,7 +1096,7 @@ void LBM::stream(const int lev, amrex::Vector<amrex::MultiFab>& fs)
                 }
             }
         });
-    amrex::Gpu::synchronize();
+    // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
 
     amrex::MultiFab::Copy(
         fs[lev], f_star, 0, 0, constants::N_MICRO_STATES, fs[lev].nGrowVect());
@@ -1141,7 +1141,7 @@ void LBM::clamp_negative_component_densities(const int lev)
                     }
                 }
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
 }
 
@@ -1302,7 +1302,7 @@ void LBM::macrodata_to_equilibrium(const int lev)
                     wt, ev, theta0, zero_vec, 1.0);
             }
         });
-    amrex::Gpu::synchronize();
+    // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
 }
 
 // Relax the particles toward the equilibrium state.
@@ -1368,7 +1368,7 @@ void LBM::relax_f_to_equilibrium(const int lev)
                 }
             }
         });
-    amrex::Gpu::synchronize();  // catch any CUDA error before bubble CPU code runs
+    // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier  // catch any CUDA error before bubble CPU code runs
 
     // --- Entropic alpha solve for m_f AND m_g ---
     // (Ansumali & Karlin, Phys. Rev. E 2002; Frapolli et al. thermal extension)
@@ -1511,7 +1511,7 @@ void LBM::relax_f_to_equilibrium(const int lev)
                     }
                 }
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
 
     const bool use_entropic_components = m_use_entropic_components;
@@ -1593,7 +1593,7 @@ void LBM::relax_f_to_equilibrium(const int lev)
                     }
                 }
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
     auto const& eq_unit_arrs = eq_unit.const_arrays();
 
@@ -1748,7 +1748,7 @@ void LBM::relax_f_to_equilibrium(const int lev)
             });
     }
 
-    amrex::Gpu::synchronize();
+    // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     m_f[lev].FillBoundary(Geom(lev).periodicity());
     for (int i = 0; i < m_n_components; ++i) {
         m_component_lattices[i][lev].FillBoundary(Geom(lev).periodicity());
@@ -1976,7 +1976,7 @@ void LBM::f_to_macrodata(const int lev)
                 md_arr(iv, constants::Q_CORR_Z_IDX) = amrex::Real(0.0);
             }
         });
-    amrex::Gpu::synchronize();
+    // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     m_macrodata[lev].FillBoundary(Geom(lev).periodicity());
 }
 
@@ -2058,7 +2058,7 @@ void LBM::compute_derived(const int lev)
                 d_arr(iv, constants::EPSILON_IDX) = 0.0;
             }
         });
-    amrex::Gpu::synchronize();
+    // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
 }
 
 // Compute derived quantities
@@ -2094,7 +2094,7 @@ void LBM::compute_q_corrections(const int lev)
 #endif
             }
         });
-    amrex::Gpu::synchronize();
+    // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
 }
 
 // Compute forces on EB
@@ -2251,7 +2251,7 @@ void LBM::MakeNewLevelFromCoarse(
                 frac_arrs[nbx](i, j, k, 0) = static_cast<amrex::Real>(
                     if_arrs[nbx](i, j, k, 0));
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
     initialize_mask(lev);
     m_fillpatch_op->fillpatch_from_coarse(lev, time, m_f[lev]);
@@ -2338,7 +2338,7 @@ void LBM::MakeNewLevelFromScratch(
                 frac_arrs[nbx](i, j, k, 0) = static_cast<amrex::Real>(
                     if_arrs[nbx](i, j, k, 0));
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
 
     // FSLBM (Körner 2005): sharp-interface cell-type + fill-level initialization.
@@ -2385,7 +2385,7 @@ void LBM::initialize_f(const int lev)
                 }
             });
     }
-    amrex::Gpu::synchronize();
+    // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
 
     m_f[lev].FillBoundary(Geom(lev).periodicity());
     m_g[lev].FillBoundary(Geom(lev).periodicity());
@@ -2446,7 +2446,7 @@ void LBM::initialize_moving_body_shape(int lev)
                 voxel_ptr[idx] = static_cast<uint16_t>(fab_arr(i, j, k, lbm::constants::IS_FLUID_IDX));
             });
         }
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
         
         m_using_voxel_body = true;
         
@@ -2506,7 +2506,7 @@ void LBM::init_stationary_body(int lev)
         marker.setVal(1.0);
         stlobj.fill(
             marker, marker.nGrowVect(), Geom(lev), outside_value, inside_value);
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
 
         auto const& marker_arrs = marker.const_arrays();
         auto const& mask_arrs = m_stationary_mask[lev].arrays();
@@ -2518,7 +2518,7 @@ void LBM::init_stationary_body(int lev)
                 int val = static_cast<int>(marker_arrs[nbx](i, j, k, 0));
                 mask_arrs[nbx](i, j, k) = amrex::min(mask_arrs[nbx](i, j, k), val);
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
     
     if (has_crack) {
@@ -2537,7 +2537,7 @@ void LBM::init_stationary_body(int lev)
         amrex::Gpu::copyAsync(
             amrex::Gpu::hostToDevice, crack_data.begin(), crack_data.end(),
             d_crack_data.begin());
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
 
         auto const* crack_ptr = d_crack_data.data();
         
@@ -2554,7 +2554,7 @@ void LBM::init_stationary_body(int lev)
                     mask_arr(i, j, k) = amrex::min(mask_arr(i, j, k), val);
                 });
         }
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
     
     // Also check for stationary parser function (handled in reconstruct_body_sdf, but we set flag here)
@@ -2608,7 +2608,7 @@ void LBM::initialize_is_fluid(const int lev)
                     stationary_mask_arrs[nbx](i, j, k)
                 );
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
 
     m_is_fluid[lev].FillBoundary(Geom(lev).periodicity());
@@ -2714,7 +2714,7 @@ void LBM::update_is_fluid_from_fraction_and_mark(const int lev, amrex::Real thre
                 isf_arrs[nbx](i, j, k, lbm::constants::IS_FLUID_IDX) =
                     (val >= threshold) ? 1 : 0;
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
 
     // After modifying the integer mask, recompute the boundary markers
@@ -2746,7 +2746,7 @@ void LBM::update_is_fluid_from_fraction_and_mark(const int lev, amrex::Real thre
                     if_arr(iv, lbm::constants::EB_BOUNDARY_IDX) = 1;
                 }
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
 
     // Compute IS_FLUID_SIDE
@@ -2773,7 +2773,7 @@ void LBM::update_is_fluid_from_fraction_and_mark(const int lev, amrex::Real thre
                     if_arr(iv, lbm::constants::IS_FLUID_SIDE_IDX) = 1;
                 }
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
 
     // Compute IS_FLUID_SIDE_BOUNDARY
@@ -2809,7 +2809,7 @@ void LBM::update_is_fluid_from_fraction_and_mark(const int lev, amrex::Real thre
                     if_arr(iv, IS_FLUID_SIDE_BOUNDARY) = 0;
                 }
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
 
     m_is_fluid[lev].FillBoundary(Geom(lev).periodicity());
@@ -2872,7 +2872,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
             newly_solid_arrs[nbx](i, j, k, 0) = (old_val == 1 && new_val == 0) ? 1 : 0;
         });
     }
-    amrex::Gpu::synchronize();
+    // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
 
     // Step 4b: SPILL - Distribute mass/energy from newly solid cells to OLD outer boundary layer
     // Use stencil weights (proportional to velocity) for distribution
@@ -3010,7 +3010,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                 }
             });
     }
-    amrex::Gpu::synchronize();
+    // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
 
     // Sum spilled mass from ghost cells to valid cells
     spill_f.SumBoundary(Geom(lev).periodicity());
@@ -3142,7 +3142,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                     f_comp_arrs[nbx](i, j, k, q) = 0.0;
                 }
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
 
         spill_f.SumBoundary(Geom(lev).periodicity());
         amrex::MultiFab::Add(
@@ -3323,7 +3323,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                 amrex::Gpu::Atomic::Add(&donor_count_arrs[nbx](donor_i, donor_j, donor_k, 0), 1);
             }
         });
-    amrex::Gpu::synchronize();
+    // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     
     // Synchronize donor counts across ghost cells
     donor_recipient_count.SumBoundary(Geom(lev).periodicity());
@@ -3482,7 +3482,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                 }
             }
         });
-    amrex::Gpu::synchronize();
+    // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     } // end Step 6 block
     
     // Step 7: Third pass - Reduce donor's q=0 component to conserve mass
@@ -3506,7 +3506,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
             f_arrs[nbx](i, j, k, 0) = 0.0;
             g_arrs[nbx](i, j, k, 0) = 0.0;
         });
-    amrex::Gpu::synchronize();
+    // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     } // end Step 7 block
 
     // Component lattices: Refill newly-uncovered cells using same q=0 transfer
@@ -3625,7 +3625,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                     }
                 }
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
 
         // Step 7c: Zero donor's q=0 for this component (conserve mass)
         amrex::ParallelFor(m_component_lattices[c][lev], amrex::IntVect(0),
@@ -3635,7 +3635,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                 if (curr_fluid_arrs[nbx](i, j, k, lbm::constants::IS_FLUID_IDX) != 1) return;
                 f_comp_arrs[nbx](i, j, k, 0) = 0.0;
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
 
     } // End of refill block
@@ -3681,7 +3681,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                 }
             });
     }
-    amrex::Gpu::synchronize();
+    // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
 
     // Reset components
     for (int c = 0; c < m_n_components; ++c) {
@@ -3700,7 +3700,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                     }
                 }
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
     
     // Step 9: Fill boundary cells for updated data
@@ -3935,7 +3935,7 @@ void LBM::reconstruct_body_sdf(const int lev, amrex::Real time)
             frac_arrs[nbx](i, j, k, 0) = phi;
         });
     
-    amrex::Gpu::synchronize();
+    // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     m_is_fluid_fraction[lev].FillBoundary(Geom(lev).periodicity());
 }
 
@@ -3972,7 +3972,7 @@ void LBM::fill_f_inside_eb(const int lev)
             }
         });
 
-    amrex::Gpu::synchronize();
+    // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
 }
 
 // Remake an existing level using provided BoxArray and DistributionMapping
@@ -4287,7 +4287,7 @@ LBM::get_field(const std::string& name, const int lev, const int ngrow)
             [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k, int n) noexcept {
                 mf_arrs[nbx](i, j, k, n) = is_fluid_arrs[nbx](i, j, k, n);
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
 
     const int srccomp_frac = get_field_component(name, m_fracdata_varnames);
@@ -4299,7 +4299,7 @@ LBM::get_field(const std::string& name, const int lev, const int ngrow)
             [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k, int n) noexcept {
                 mf_arrs[nbx](i, j, k, n) = frac_arrs[nbx](i, j, k, 0);
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
     
 
@@ -4340,7 +4340,7 @@ void LBM::average_down_to(int crse_lev, amrex::IntVect crse_ng)
         m_g[crse_lev + 1], m_g[crse_lev], Geom(crse_lev), crse_ng,
         refRatio(crse_lev));
 
-    amrex::Gpu::synchronize();
+    // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
 }
 
 void LBM::sanity_check_f(const int lev)
@@ -4427,7 +4427,7 @@ amrex::Vector<const amrex::MultiFab*> LBM::plot_file_mf()
                 plt_mf_arrs[nbx](i, j, k, n + cnt) =
                     is_fluid_arrs[nbx](i, j, k, n);
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
         cnt += m_is_fluid[lev].nComp();
         // copy fractional field (1 component)
         auto const& frac_arrs = m_is_fluid_fraction[lev].const_arrays();
@@ -4436,7 +4436,7 @@ amrex::Vector<const amrex::MultiFab*> LBM::plot_file_mf()
             [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k, int n) noexcept {
                 plt_mf_arrs[nbx](i, j, k, n + cnt) = frac_arrs[nbx](i, j, k, 0);
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
         cnt += 1;
 
         auto const& md_arrs = m_macrodata[lev].const_arrays();
@@ -4463,7 +4463,7 @@ amrex::Vector<const amrex::MultiFab*> LBM::plot_file_mf()
                         (rho_total > 0.0) ? (rho_comp / rho_total) : 0.0;
                     plt_mf_arrs[nbx](i, j, k, cnt) = Y_k;
                 });
-            amrex::Gpu::synchronize();
+            // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
             cnt += 1;
         }
 
@@ -4495,6 +4495,7 @@ void LBM::write_plot_file()
         //   n_o2     : mol     → C_g = n_O2/V_b [mol/m³]  (starts ~44.6, drops to 0)
         const amrex::Real inv_dx  = 1.0 / m_bubble_params.dx_phys;
         const amrex::Real pi_over_6 = amrex::Math::pi<amrex::Real>() / 6.0;
+        amrex::Gpu::synchronize();
         auto& container = m_bubbles.container();
         for (int lev = 0; lev <= container.finestLevel(); ++lev) {
             for (auto& kv : container.GetParticles(lev)) {
@@ -4512,7 +4513,7 @@ void LBM::write_plot_file()
         }
         container.WritePlotFile(
             plotfilename, "Bubbles",
-            {"vx", "vy", "vz", "diameter", "C_g_mol_m3", "ax", "ay", "az", "breakup_cooldown"});
+            {"vx", "vy", "vz", "diameter", "C_g_mol_m3", "ax", "ay", "az", "breakup_cooldown", "dn_i", "eps_cached"});
         // Write the simulation time into plt*/Bubbles/time so that the ParaView
         // AMReX Grid Reader reports the same time for both the fluid fields and
         // the bubble particles.  The AMReX particle sub-header (plt*/Bubbles/Header)
@@ -4668,7 +4669,7 @@ void LBM::write_checkpoint_file() const
                 [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
                     tmp_arrs[nbx](i,j,k) = static_cast<amrex::Real>(ct_arrs[nbx](i,j,k));
                 });
-            amrex::Gpu::synchronize();
+            // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
             amrex::VisMF::Write(tmp_mf, amrex::MultiFabFileFullPrefix(lev, checkpointname, "Level_", "cell_type"));
         }
     }
@@ -4830,7 +4831,7 @@ void LBM::read_checkpoint_file()
                 [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
                     ct_arrs[nbx](i,j,k) = static_cast<int>(std::round(tmp_arrs[nbx](i,j,k)));
                 });
-            amrex::Gpu::synchronize();
+            // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
         }
     }
 
@@ -5024,7 +5025,7 @@ void LBM::apply_reaction_source_terms(const int lev)
                 fP_arrs[nbx](iv, q) += d_P * f_eq_unit;
             }
         });
-    amrex::Gpu::synchronize();
+    // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
 }
 
 // ---------------------------------------------------------------
@@ -5094,7 +5095,7 @@ void LBM::apply_timed_catalyst_injection(const int lev)
                 }
             }
         });
-    amrex::Gpu::synchronize();
+    // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
 
     // Ensure ghost cells are consistent after the injection
     m_component_lattices[1][lev].FillBoundary(Geom(lev).periodicity());
@@ -5287,7 +5288,7 @@ void LBM::advance_phi(const int lev)
                     }
                 }
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     };
 
     const auto& geom   = Geom(lev);
@@ -5359,7 +5360,7 @@ void LBM::advance_phi(const int lev)
                 c_arrs[nbx](i, j, k, 1) = coeff * gpy * inv_mag;
                 c_arrs[nbx](i, j, k, 2) = coeff * gpz * inv_mag;
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
 
     phi_comp.FillBoundary(geom.periodicity());
@@ -5514,7 +5515,7 @@ void LBM::advance_phi(const int lev)
 
                 pn_arrs[nbx](i, j, k, 0) = phi + dt * rhs;
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
 
     // ------------------------------------------------------------------
@@ -5531,7 +5532,7 @@ void LBM::advance_phi(const int lev)
             [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
                 pn[nbx](i,j,k,0) = amrex::max(0.0, amrex::min(1.0, pn[nbx](i,j,k,0)));
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
 
     // (ii–iii) total mass M and interface cell count N_G
@@ -5567,7 +5568,7 @@ void LBM::advance_phi(const int lev)
                         amrex::max(0.0, amrex::min(1.0, p + G_per_cell));
                 }
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
 
     // ------------------------------------------------------------------
@@ -5586,7 +5587,7 @@ void LBM::advance_phi(const int lev)
                     frac[nbx](i, j, k, 0) = 0.0;
                 }
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
 
     // ------------------------------------------------------------------
@@ -5723,7 +5724,7 @@ void LBM::advance_phi(const int lev)
                     }
                 }
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
 
     // Component lattices at the free surface:
@@ -5744,7 +5745,7 @@ void LBM::advance_phi(const int lev)
                     }
                 }
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
 
     m_is_fluid[lev].FillBoundary(geom.periodicity());
@@ -5875,7 +5876,7 @@ void LBM::apply_bubble_body_force(int lev, const amrex::MultiFab& force_mf)
                 f_arrs[nbx](iv, q) += feq1 - feq0;
             }
         });
-    amrex::Gpu::synchronize();
+    // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
 }
 
 // ============================================================================
@@ -5895,8 +5896,8 @@ void LBM::apply_bubble_o2_source(int lev, const amrex::MultiFab& o2_src_mf)
 
     if (m_n_components < 1) { return; }
 
-    // Conversion: [mol/(m³·s)] * dt_phys [s] / C_ref [mol/m³ per LB_rho] = [LB_rho/step]
-    const amrex::Real conv = m_bubble_params.dt_phys / m_bubble_o2_C_ref;
+    // Conversion: [mol/(m³·s)] * dt_lev [s] / C_ref [mol/m³ per LB_rho] = [LB_rho/step]
+    const amrex::Real conv = m_bubble_params.dt_lev / m_bubble_o2_C_ref;
 
     const amrex::Real specific_gas_constant = m_R_u / m_m_bar;
     const amrex::Real l_mesh_speed          = m_mesh_speed;
@@ -5945,7 +5946,7 @@ void LBM::apply_bubble_o2_source(int lev, const amrex::MultiFab& o2_src_mf)
                 fO2_arrs[nbx](iv, q) += d_rho * f_eq_unit;
             }
         });
-    amrex::Gpu::synchronize();
+    // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
 }
 
 // ============================================================================
@@ -5977,7 +5978,7 @@ void LBM::fslbm_sync_isfluid_markers(const int lev)
                 isf_arrs[nbx](i, j, k, IS_FLUID_IDX) =
                     (ct == CELL_LIQUID || ct == CELL_INTERFACE) ? 1 : 0;
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
 
     m_is_fluid[lev].FillBoundary(Geom(lev).periodicity());
@@ -6007,7 +6008,7 @@ void LBM::fslbm_sync_isfluid_markers(const int lev)
                 else
                     if_arr(iv, EB_BOUNDARY_IDX) = 1;
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
     // IS_FLUID_SIDE: fluid cells adjacent to MOVING SOLID (impeller) only.
     //
@@ -6053,7 +6054,7 @@ void LBM::fslbm_sync_isfluid_markers(const int lev)
                 }
                 if_arr(iv, IS_FLUID_SIDE_IDX) = sees_moving_solid ? 1 : 0;
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
     {
         const stencil::Stencil stencil;
@@ -6076,7 +6077,7 @@ void LBM::fslbm_sync_isfluid_markers(const int lev)
                 else
                     if_arr(iv, IS_FLUID_SIDE_BOUNDARY_IDX) = 0;
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
     m_is_fluid[lev].FillBoundary(Geom(lev).periodicity());
 }
@@ -6145,7 +6146,7 @@ void LBM::fslbm_init_cell_type(const int lev)
                     amrex::max(l_phi_lo, amrex::min(l_phi_hi, phi_lin));
             }
         });
-    amrex::Gpu::synchronize();
+    // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
 
     m_phi_fslbm[lev].FillBoundary(geom_l.periodicity());
 
@@ -6202,7 +6203,7 @@ void LBM::fslbm_replenish_components(const int lev)
             }
         });
     }
-    amrex::Gpu::synchronize();
+    // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
 }
 
 void LBM::fslbm_replenish_g(const int lev)
@@ -6284,7 +6285,7 @@ void LBM::fslbm_replenish_g(const int lev)
                 l_mesh_speed, weights_g[q], evs_g[q],
                 l_theta0, zero_vec, amrex::Real(1.0));
         });
-    amrex::Gpu::synchronize();
+    // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
 }
 
 //  Step 5: Convert cells: phi<1e-4 -> GAS (zero f), phi>1-1e-4 -> LIQUID.
@@ -6381,7 +6382,7 @@ void LBM::fslbm_advance_surface(const int lev)
                     phi_s[nbx](i, j, k, 0) = amrex::Real(0.0);
                 }
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
 
         // --- Pass 2: Case B only (body swept OUT of a cell) ---
         // All body-vacated cells become CELL_LIQUID unconditionally.
@@ -6405,7 +6406,7 @@ void LBM::fslbm_advance_surface(const int lev)
                     // catches any low-rho residual.
                 }
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
     m_cell_type[lev].FillBoundary(Geom(lev).periodicity());
 
@@ -6464,7 +6465,7 @@ void LBM::fslbm_advance_surface(const int lev)
                         l_theta0, zero_vel, amrex::Real(1.0));
                 }
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
     m_f[lev].FillBoundary(Geom(lev).periodicity());
     m_g[lev].FillBoundary(Geom(lev).periodicity());
@@ -6537,7 +6538,7 @@ void LBM::fslbm_advance_surface(const int lev)
                         l_theta0, zero_vel, amrex::Real(1.0));
                 }
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
     m_f[lev].FillBoundary(Geom(lev).periodicity());
     m_g[lev].FillBoundary(Geom(lev).periodicity());
@@ -6606,7 +6607,7 @@ void LBM::fslbm_advance_surface(const int lev)
                     fs_w[nbx](iv, bq) = f_q;
                 }
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
 
     // -----------------------------------------------------------------------
@@ -6667,7 +6668,7 @@ void LBM::fslbm_advance_surface(const int lev)
                 nh_w[nbx](i, j, k, 1) = gpy * inv_mag;
                 nh_w[nbx](i, j, k, 2) = gpz * inv_mag;
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
     nhat_mf.FillBoundary(Geom(lev).periodicity());
 
@@ -6701,7 +6702,7 @@ void LBM::fslbm_advance_surface(const int lev)
                   + amrex::Real(0.5) * (nz_w(i,j,k+1) - nz_w(i,j,k-1));
                 kap_w[nbx](i, j, k, 0) = -div_n;  // κ = −∇·n̂
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
     kappa_mf.FillBoundary(Geom(lev).periodicity());
 
@@ -6790,7 +6791,7 @@ void LBM::fslbm_advance_surface(const int lev)
                 fs_w[nbx](iv, q) = amrex::max(
                     amrex::Real(0.0), feq_bq + feq_q - f_ro[nbx](iv, bq));
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
 
     // -----------------------------------------------------------------------
@@ -6818,7 +6819,7 @@ void LBM::fslbm_advance_surface(const int lev)
                     if (ctype == CELL_LIQUID)    rd[nbx](i,j,k,0) = rho;
                     if (ctype == CELL_INTERFACE) rd[nbx](i,j,k,1) = rho;
                 });
-            amrex::Gpu::synchronize();
+            // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
         }
         if (m_print_int > 0 && m_isteps[0] % m_print_int == 0) {
             amrex::Print() << "FSLBM rho step=" << m_isteps[0]
@@ -6865,7 +6866,7 @@ void LBM::fslbm_advance_surface(const int lev)
                 sd_arrs[nbx](i,j,k,1) = std::sqrt(mx*mx+my*my+mz*mz)
                                          / amrex::max(rho, amrex::Real(1e-10));
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
         amrex::Print() << "  surface_band(k=" << k_lo << ".." << k_hi
                        << ") liq rho=[" << surf_diag.min(0) << "," << surf_diag.max(0)
                        << "] |u|_max=" << surf_diag.max(1) << "\n";
@@ -6911,7 +6912,7 @@ void LBM::fslbm_advance_surface(const int lev)
                 }
                 dm_arrs[nbx](iv, 0) = dm;
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
 
     // -----------------------------------------------------------------------
@@ -6952,7 +6953,7 @@ void LBM::fslbm_advance_surface(const int lev)
                 // No clamping: let phi evolve naturally (for diagnostics)
                 dm_arrs[nbx](iv, 1) = amrex::Real(0.0);  // No excess redistribution
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
 
     //   phi < FSLBM_PHI_LO  ->  CELL_GAS:    zero f
@@ -7003,7 +7004,7 @@ void LBM::fslbm_advance_surface(const int lev)
                     phi_arrs[nbx](iv, 0)  = amrex::Real(1.0);
                 }
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
 
     // Zero component lattices in cells that just converted to CELL_GAS.
@@ -7022,7 +7023,7 @@ void LBM::fslbm_advance_surface(const int lev)
                             f_comp_arrs[nbx](i, j, k, q) = amrex::Real(0.0);
                     }
                 });
-            amrex::Gpu::synchronize();
+            // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
         }
     }
 
@@ -7088,7 +7089,7 @@ void LBM::fslbm_advance_surface(const int lev)
                     phi_arrs[nbx](iv, 0) += total_excess / rho;
                 }
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
 
     // -----------------------------------------------------------------------
@@ -7170,7 +7171,7 @@ void LBM::fslbm_advance_surface(const int lev)
                     }
                 }
             });
-        amrex::Gpu::synchronize();
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
 
     // -----------------------------------------------------------------------
@@ -7197,7 +7198,7 @@ void LBM::fslbm_advance_surface(const int lev)
                         }
                     }
                 });
-            amrex::Gpu::synchronize();
+            // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
         }
     }
 
