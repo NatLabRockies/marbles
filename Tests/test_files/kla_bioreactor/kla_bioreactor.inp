@@ -143,11 +143,24 @@ lbm.fslbm_contact_angle = 90.0
 # ---------------------------------------------------------------
 lbm.enable_bubbles = 1
 
-# Physical scale factors — REQUIRED: these are SI values used by bubble physics.
+# Physical scale factors — REQUIRED: these are SI values used by bubble physics
+# AND by the lbm.gravity → LB conversion (g_LB = g_phys * dt_phys² / dx_phys).
 # dx_phys = physical cell size [m];  dt_phys = omega_LB / omega_phys [s]
 # omega_LB = 0.0005 rad/step, omega_phys = 400*2π/60 = 41.888 rad/s
 lbm.dx_phys = 1.0e-3       # m  (= T/N_cells = 0.18/180)
 lbm.dt_phys = 1.19365e-5   # s  (= omega_LB / omega_phys)
+
+# Continuous-liquid gravity body force (m/s², physical SI units).
+# Converted internally to LB units:
+#   g_LB = g_phys * dt_phys² / dx_phys
+#        = -9.81 * (1.19365e-5)² / 1.0e-3
+#        ≈ -1.398e-6  (per-step velocity decrement in lattice units)
+# Applied to all CELL_LIQUID cells via exact-difference equilibrium shift on
+# both f and g.  CELL_INTERFACE is excluded (Donath 2011 p.122) because the
+# free surface already enforces the hydrostatic pressure boundary.
+# Without this, rising liquid produced by the free-surface advection has no
+# restoring force and remains suspended as floating clumps.
+lbm.gravity = 0.0 0.0 -9.81
 
 # Concentration reference: 1 LB_rho = 100 mol/m³ dissolved O₂
 # O₂ saturation = S × C_g = 0.032 × 44.6 = 1.43 mol/m³ = 0.0143 LB_rho

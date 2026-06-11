@@ -385,6 +385,18 @@ private:
     int m_n_components = 0;
     amrex::Vector<amrex::Real> m_component_diffusivities;
 
+    // Physical (SI) cell size and time step.  Default 1.0 means "already in LB
+    // units"; override via lbm.dx_phys [m] and lbm.dt_phys [s] when the input
+    // file contains a body force in physical units (e.g. lbm.gravity in m/s^2).
+    // These also feed BubbleParams (m_bubble_params.dx_phys, .dt_phys).
+    amrex::Real m_dx_phys = 1.0;
+    amrex::Real m_dt_phys = 1.0;
+
+    // External body force per unit mass in physical units [m/s^2].
+    // Converted to LB acceleration  g_LB = g_phys * dt_phys^2 / dx_phys  at the
+    // use site (apply_macroscopic_forcing).  Default = no gravity.
+    amrex::Vector<amrex::Real> m_gravity{0.0, 0.0, 0.0};
+
     // save streaming data to plot file
     bool m_save_streaming = true;
 
@@ -408,9 +420,16 @@ private:
     // ---------------------------------------------------------------
 
 public:
-    /// Apply bubble-to-fluid body force via He-Luo forcing scheme.
-    /// force_mf: 3-component body force density in LB units (force/vol).
-    void apply_bubble_body_force(int lev, const amrex::MultiFab& force_mf);
+    /// Apply macroscopic body force to the fluid distributions m_f and m_g
+    /// using the exact-difference forcing scheme:
+    ///     delta_f_q = f_eq(rho, u + F*dt/rho, T) - f_eq(rho, u, T)
+    ///     delta_g_q = g_eq(2*rho*e1, ...)        - g_eq(2*rho*e0, ...)
+    /// where the energy moments are recomputed with the shifted velocity.
+    /// Skips CELL_INTERFACE cells (Donath 2011, p122) to prevent acoustic
+    /// shocks at the FSLBM boundary.  Always adds gravity m_gravity (in LB
+    /// units g_LB = g_phys * dt_phys^2 / dx_phys); if force_mf != nullptr
+    /// also adds the bubble-induced acceleration (capped at 50x gravity).
+    void apply_macroscopic_forcing(int lev, const amrex::MultiFab* force_mf);
 
     /// Apply bubble O2 source to the dissolved-O2 component lattice.
     /// o2_src_mf: 1-component source rate in mol/(m³·s).

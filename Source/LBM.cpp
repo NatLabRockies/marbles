@@ -432,6 +432,20 @@ void LBM::read_parameters()
         pp.query("adiabatic_exponent", m_adiabaticExponent);
         pp.query("mean_molecular_mass", m_m_bar);
 
+        // Physical scales for converting body forces from SI to LB units.
+        // dx_phys [m] and dt_phys [s] must be set if lbm.gravity is non-zero
+        // (otherwise default 1.0 means "force is already in LB units").
+        // Accept "dt_lev" as a backward-compatible alias for dt_phys.
+        pp.query("dx_phys", m_dx_phys);
+        pp.query("dt_phys", m_dt_phys);
+        pp.query("dt_lev",  m_dt_phys);
+
+        // External body force per unit mass in physical units [m/s^2]
+        // (e.g.  lbm.gravity = 0.0 0.0 -9.81 ).  Stored as physical and
+        // converted to LB acceleration (g_phys * dt_phys^2 / dx_phys) at
+        // the use site (apply_macroscopic_forcing).  Default = no gravity.
+        pp.queryarr("gravity", m_gravity, 0, AMREX_SPACEDIM);
+
         m_speedOfSound_Ref = std::sqrt(
             m_adiabaticExponent * (m_R_u / m_m_bar) * m_initialTemperature);
 
@@ -452,19 +466,12 @@ void LBM::read_parameters()
     if (m_enable_bubbles) {
         BubbleManager::read_params(m_bubble_params);
 
-        // Physical unit conversions — must be set explicitly in input file.
-        // lbm.dx_outer and lbm.dt_outer are dimensionless LB units (= 1.0);
-        // dx_phys and dt_lev must be the actual SI values.
-        m_bubble_params.dx_phys = m_dx_outer;  // overridden below if lbm.dx_phys provided
-        m_bubble_params.dt_lev = m_dt_outer;  // overridden below if lbm.dt_lev provided
+        // Physical unit conversions — propagate LBM-level values into BubbleParams.
+        // m_dx_phys and m_dt_phys are populated from the lbm.dx_phys / lbm.dt_phys
+        // parser block above (defaults to 1.0 if not provided).
+        m_bubble_params.dx_phys = m_dx_phys;
+        m_bubble_params.dt_phys = m_dt_phys;
         m_bubble_params.nu_lb   = m_nu;
-        {
-            amrex::ParmParse pp_lbm("lbm");
-            // Read actual SI values (meters, seconds) — REQUIRED for physical accuracy.
-            // dx_phys = physical cell size [m];  dt_lev = physical time step [s].
-            pp_lbm.query("dx_phys", m_bubble_params.dx_phys);
-            pp_lbm.query("dt_lev", m_bubble_params.dt_lev);
-        }
 
         // Concentration reference scale: 1 LB_rho ≡ m_bubble_o2_C_ref mol/m³
         {
@@ -476,7 +483,7 @@ void LBM::read_parameters()
 
         amrex::Print() << "[BubbleManager] Bubble physics enabled.\n"
                        << "  dx_phys = " << m_bubble_params.dx_phys << " m\n"
-                       << "  dt_lev = " << m_bubble_params.dt_lev << " s\n"
+                       << "  dt_phys = " << m_bubble_params.dt_phys << " s\n"
                        << "  O2 C_ref = " << m_bubble_o2_C_ref << " mol/m3 per LB_rho\n";
     }
 }
@@ -866,11 +873,12 @@ void LBM::advance(
 
     // -----------------------------------------------------------------------
     // Free-surface m_g replenishment: after streaming, INTERFACE cells that
-    // face gas have zero incoming g populations (gas cells have g=0).  Without
-    // treatment, interface cells lose thermal energy every step → T→0 → the
-    // component collision becomes degenerate.  Fill missing incoming directions
-    // with equilibrium g at local velocity and body_temperature (reference T).
-    // This is the thermal analog of the ABB boundary condition for m_f.
+    // face gas have zero incoming g populations.  Reconstruct them with
+    // symmetric bounce-back of the outgoing populations — same closure as
+    // fslbm_replenish_components() — which gives an adiabatic (zero heat
+    // flux) interface and is energy-conservative.  Donath (2011) provides
+    // no closed-form g-replenishment; this bounce-back is the simplest
+    // closure that is consistent with the mass treatment.
     // -----------------------------------------------------------------------
     if (m_free_surface) {
         fslbm_replenish_g(lev);
@@ -931,8 +939,8 @@ void LBM::advance(
     // Execute only on the base level to keep a single particle container.
     // ------------------------------------------------------------------
     if (m_enable_bubbles && lev == 0) {
-        // Physical time in seconds (m_ts_new is in LB steps, dt_lev is s/step)
-        const amrex::Real phys_time = m_ts_new[lev] * m_bubble_params.dt_lev;
+        // Physical time in seconds (m_ts_new is in LB steps, dt_phys is s/step)
+        const amrex::Real phys_time = m_ts_new[lev] * m_bubble_params.dt_phys;
 
         // Temporary MultiFabs for bubble↔fluid coupling (zeroed each step)
         amrex::MultiFab bubble_force(
@@ -944,7 +952,7 @@ void LBM::advance(
 
         // Sparger injection (every step)
         // Must pass physical seconds per step, not the dimensionless LB m_dt_outer.
-        m_bubbles.inject_bubbles(m_bubble_params.dt_lev);
+        m_bubbles.inject_bubbles(m_bubble_params.dt_phys);
 
         // Determine O2 concentration MultiFab (component 0 if available)
         // A valid kLa run requires at least 1 component for dissolved O2.
@@ -999,8 +1007,10 @@ void LBM::advance(
         // Restore FPE trapping after bubble routines
         amrex::setFPExcept(prev_fpe);
 
-        // Apply bubble body force to fluid distributions (He-Luo scheme)
-        // Diagnostic: print max force magnitude to catch anomalous deposits.
+        // Apply macroscopic forcing (gravity + bubble back-coupling) to the
+        // f and g distributions via exact-difference equilibrium-shift.  NOT
+        // He-Luo: this thermal model has cs^2 = gamma*(R/m_bar)*T (cell-local).
+        // Diagnostic: print max bubble-force magnitude to catch anomalies.
         if (m_print_int > 0 && m_isteps[lev] % m_print_int == 0) {
             const amrex::Real Fx_max = bubble_force.norm0(0);
             const amrex::Real Fy_max = bubble_force.norm0(1);
@@ -1010,7 +1020,7 @@ void LBM::advance(
                            << "  max|Fy|=" << Fy_max
                            << "  max|Fz|=" << Fz_max << "\n";
         }
-        apply_bubble_body_force(lev, bubble_force);
+        apply_macroscopic_forcing(lev, &bubble_force);
 
         // Apply O2 source to component-0 lattice
         if (m_n_components > 0) {
@@ -1034,6 +1044,14 @@ void LBM::advance(
         if (m_bubble_params.stats_int > 0 &&
             m_isteps[lev] % m_bubble_params.stats_int == 0) {
             m_bubbles.write_stats(m_isteps[lev], phys_time);
+        }
+    } else {
+        // No bubble back-coupling on this level (either bubbles disabled or
+        // we are above the base level).  Still apply gravity body force to
+        // the continuous liquid — otherwise the free surface has no
+        // restoring force and rising fluid stays suspended.
+        if (m_gravity[0] != 0.0 || m_gravity[1] != 0.0 || m_gravity[2] != 0.0) {
+            apply_macroscopic_forcing(lev, nullptr);
         }
     }
 }
@@ -5760,31 +5778,47 @@ void LBM::advance_phi(const int lev)
 } // namespace lbm
 
 // ============================================================================
-// Bubble body force: correct forcing for the entropic thermal D3Q27 model.
+// Macroscopic body force: gravity + (optional) Lagrangian-bubble back-coupling.
 //
-// Goal: add momentum F*dt to the fluid while leaving density unchanged.
+// Goal: add momentum F*dt to the fluid while leaving density unchanged, and
+// keep total energy 2*rho*e self-consistent with the new kinetic energy.
 //
-// The wrong approach: He-Luo  delta_f = w_q * (e_q.F) / cs^2  assumes cs^2
-// = 1/3 (standard isothermal LBM) and modifies only the e_q-linear moment.
+// Wrong approach: He-Luo  delta_f_q = w_q * (e_q . F) / cs^2  assumes
+// cs^2 = 1/3 (standard isothermal LBM) and modifies only the e_q-linear
+// moment.  This thermal model has cs^2 = gamma * (R/m_bar) * T, cell-local,
+// so He-Luo is incorrect here.
 //
-// The correct approach for this model (cs^2 = Ru/m_bar * T, cell-local):
-//   delta_f_q = f_eq(rho, u + delta_u, T) - f_eq(rho, u, T)
-//   where delta_u = F * dt / rho
+// Correct exact-difference forcing for both the f and g lattices:
+//   delta_f_q = f_eq(rho, u + delta_u, T)              - f_eq(rho, u, T)
+//   delta_g_q = g_eq(2*rho*e1, q1, R-tensor1, ...)     - g_eq(2*rho*e0, ...)
+// where  delta_u = F * dt / rho  and  2*rho*e_k = rho * (2*Cv*T + |u_k|^2)
+// (rho and T unchanged; |u|^2 changes because u shifts, hence the energy
+// moment shifts too — failing to update m_g would inject a spurious internal-
+// energy source proportional to the kinetic-energy change).
 //
-// By construction of the equilibrium:
-//   sum_q  delta_f_q          = 0              (density unchanged)
-//   sum_q  e_qa * delta_f_q   = rho * delta_u  = F * dt  (correct momentum)
-//   Higher moments (stress, energy) shift self-consistently.
+// By construction:
+//   sum_q delta_f_q                         = 0                (rho unchanged)
+//   sum_q e_q . delta_f_q                   = F * dt           (correct mom.)
+//   sum_q delta_g_q                         = 2*rho*(e1 - e0)  (KE update)
+//   higher Grad moments (stress, heat flux) shift self-consistently.
 //
-// The extended stress tensor pxx = ux^2 + r_temperature + dt*omega_corr*D_CORR_X
-// (where r_temperature = P/rho = (R/m_bar)*T) is recomputed with the shifted
-// velocity; the SGS correction term is the same for both states.
+// pxx = ux^2 + r_temperature + dt*omega_corr*D_CORR_X
+//   r_temperature = (R/m_bar)*T = P/rho  is the isotropic stress entry of the
+//   product-form equilibrium — NOT the acoustic cs^2.  The shifted state uses
+//   the same r_temperature and same SGS D_CORR coefficients.
+//
+// CELL_INTERFACE cells are intentionally skipped (Donath 2011, p122) to avoid
+// acoustic shocks at the FSLBM gas-liquid boundary.
+//
+// Bubble force (force_mf, optional) is interpreted as an acceleration field
+// in LB units (velocity shift / step).  It is capped at 50x |g_LB| to defend
+// against point-particle aggregation singularities at solid boundaries.
 // ============================================================================
 namespace lbm {
 
-void LBM::apply_bubble_body_force(int lev, const amrex::MultiFab& force_mf)
+void LBM::apply_macroscopic_forcing(int lev, const amrex::MultiFab* force_mf)
 {
-    BL_PROFILE("LBM::apply_bubble_body_force()");
+    BL_PROFILE("LBM::apply_macroscopic_forcing()");
 
     const stencil::Stencil stencil;
     const auto& evs    = stencil.evs;
@@ -5795,12 +5829,40 @@ void LBM::apply_bubble_body_force(int lev, const amrex::MultiFab& force_mf)
     const amrex::Real l_gamma        = m_adiabaticExponent;
     const amrex::Real nu             = m_nu;
     const amrex::Real dt             = m_dts[lev];
+    const amrex::Real l_theta0       = stencil::Stencil::THETA0;
+
+    // Convert physical gravity (m/s^2) to LB acceleration (LB / step^2).
+    //   g_LB = g_phys * dt_phys^2 / dx_phys
+    // m_dx_phys/m_dt_phys default to 1.0 → g_LB == m_gravity (already in LB).
+    const amrex::Real grav_LB_x =
+        m_gravity[0] * m_dt_phys * m_dt_phys / m_dx_phys;
+    const amrex::Real grav_LB_y =
+        m_gravity[1] * m_dt_phys * m_dt_phys / m_dx_phys;
+    const amrex::Real grav_LB_z =
+        m_gravity[2] * m_dt_phys * m_dt_phys / m_dx_phys;
+    const amrex::Real g_mag_LB = std::sqrt(
+        grav_LB_x*grav_LB_x + grav_LB_y*grav_LB_y + grav_LB_z*grav_LB_z);
+
+    const bool has_extra = (force_mf != nullptr);
+    const bool has_gravity = (grav_LB_x != 0.0 || grav_LB_y != 0.0 || grav_LB_z != 0.0);
+    if (!has_extra && !has_gravity) { return; }
+
+    // Optional bubble-acceleration cap (50x |g_LB|, with a small floor for
+    // gravity-free runs so we never divide by zero / never trigger the cap
+    // at exactly zero).
+    const amrex::Real bubble_cap = amrex::max(g_mag_LB * 50.0, 1.0e-4);
 
     auto const& is_fluid_arrs = m_is_fluid[lev].const_arrays();
-    auto const& force_arrs    = force_mf.const_arrays();
+    auto const& ct_arrs       = m_cell_type[lev].const_arrays();
     auto const& f_arrs        = m_f[lev].arrays();
+    auto const& g_arrs        = m_g[lev].arrays();
     auto const& md_arrs       = m_macrodata[lev].const_arrays();
     auto const& d_arrs        = m_derived[lev].const_arrays();
+
+    // Force MultiArray4 — declared outside lambda so the capture is well-defined
+    // even when force_mf is null (we just never index into it in that case).
+    amrex::MultiArray4<const amrex::Real> force_arrs;
+    if (has_extra) { force_arrs = force_mf->const_arrays(); }
 
     amrex::ParallelFor(
         m_f[lev], amrex::IntVect(0),
@@ -5810,10 +5872,11 @@ void LBM::apply_bubble_body_force(int lev, const amrex::MultiFab& force_mf)
                 return;
             }
 
-            const amrex::Real Fx = force_arrs[nbx](iv, 0);
-            const amrex::Real Fy = force_arrs[nbx](iv, 1);
-            const amrex::Real Fz = force_arrs[nbx](iv, 2);
-            if (Fx == 0.0 && Fy == 0.0 && Fz == 0.0) { return; }
+            // Skip interface cells (Donath 2011, p122): forcing through the
+            // FSLBM boundary triggers acoustic shocks and instability.
+            if (ct_arrs[nbx](iv, 0) == lbm::constants::CELL_INTERFACE) {
+                return;
+            }
 
             const auto md_arr = md_arrs[nbx];
             const auto d_arr  = d_arrs[nbx];
@@ -5821,22 +5884,44 @@ void LBM::apply_bubble_body_force(int lev, const amrex::MultiFab& force_mf)
             const amrex::Real rho = md_arr(iv, constants::RHO_IDX);
             if (rho < 1.0e-12) { return; }
 
+            // Total body force = gravity + (capped) bubble acceleration.
+            amrex::Real Fx = rho * grav_LB_x;
+            amrex::Real Fy = rho * grav_LB_y;
+            amrex::Real Fz = rho * grav_LB_z;
+
+            if (has_extra) {
+                // Bubble field is an acceleration (LB velocity shift per step)
+                // already normalized to the pure-liquid reference density.  We
+                // multiply by the local rho to get a body-force density and so
+                // it cancels the 1/rho in the velocity shift below.
+                amrex::Real bFx = force_arrs[nbx](iv, 0);
+                amrex::Real bFy = force_arrs[nbx](iv, 1);
+                amrex::Real bFz = force_arrs[nbx](iv, 2);
+                bFx = amrex::min(amrex::max(bFx, -bubble_cap), bubble_cap);
+                bFy = amrex::min(amrex::max(bFy, -bubble_cap), bubble_cap);
+                bFz = amrex::min(amrex::max(bFz, -bubble_cap), bubble_cap);
+                Fx += rho * bFx;
+                Fy += rho * bFy;
+                Fz += rho * bFz;
+            }
+            if (Fx == 0.0 && Fy == 0.0 && Fz == 0.0) { return; }
+
             const amrex::Real ux = md_arr(iv, constants::VELX_IDX);
             const amrex::Real uy = md_arr(iv, constants::VELY_IDX);
             const amrex::Real uz = md_arr(iv, constants::VELZ_IDX);
 
-            const amrex::Real temperature = md_arr(iv, constants::TEMPERATURE_IDX);
+            const amrex::Real temperature =
+                md_arr(iv, constants::TEMPERATURE_IDX);
             // r_temperature = (R/m_bar)*T = P/rho — the isotropic stress entry
-            // used in the equilibrium function (pxx = ux^2 + r_temperature, etc.)
-            // Note: this is NOT cs^2; the acoustic cs^2 = gamma*(R/m_bar)*T.
-            // The momentum equilibrium only sees P/rho, not gamma.
+            // of the product-form equilibrium.  NOT the acoustic cs^2; the
+            // acoustic cs^2 = gamma*(R/m_bar)*T.  Equilibrium only sees P/rho.
             const amrex::Real r_temperature = spec_gas_const * temperature;
 
-            // SGS correction coefficient (same formula as macrodata_to_equilibrium)
+            // SGS correction coefficient (same formula as macrodata_to_equilibrium).
             const amrex::Real omega      = 1.0 / (nu / (r_temperature * dt) + 0.5);
             const amrex::Real omega_corr = (2.0 - omega) / (2.0 * omega * rho);
 
-            // Extended stress tensor at current state
+            // Extended stress tensor at the current state.
             const amrex::Real pxx_0 = ux*ux + r_temperature
                 + dt * omega_corr * d_arr(iv, constants::D_Q_CORR_X_IDX);
             const amrex::Real pyy_0 = uy*uy + r_temperature
@@ -5844,18 +5929,19 @@ void LBM::apply_bubble_body_force(int lev, const amrex::MultiFab& force_mf)
             const amrex::Real pzz_0 = uz*uz + r_temperature
                 + dt * omega_corr * d_arr(iv, constants::D_Q_CORR_Z_IDX);
 
-            // Shifted velocity: delta_u = F * dt / rho
+            // Velocity shift: delta_u = F * dt / rho.
             const amrex::Real inv_rho = 1.0 / rho;
-            amrex::Real dux = Fx * dt * inv_rho;
-            amrex::Real duy = Fy * dt * inv_rho;
-            amrex::Real duz = Fz * dt * inv_rho;
+            const amrex::Real dux = Fx * dt * inv_rho;
+            const amrex::Real duy = Fy * dt * inv_rho;
+            const amrex::Real duz = Fz * dt * inv_rho;
 
             const amrex::Real ux1 = ux + dux;
             const amrex::Real uy1 = uy + duy;
             const amrex::Real uz1 = uz + duz;
 
-            // Extended stress tensor at shifted state
-            // (kinematic u^2 changes; r_temperature and SGS D_CORR unchanged)
+            // Extended stress tensor at the shifted state.  Only the kinematic
+            // u^2 entry changes; r_temperature and the SGS D_CORR entries are
+            // identical for the two states.
             const amrex::Real pxx_1 = ux1*ux1 + r_temperature
                 + dt * omega_corr * d_arr(iv, constants::D_Q_CORR_X_IDX);
             const amrex::Real pyy_1 = uy1*uy1 + r_temperature
@@ -5866,14 +5952,64 @@ void LBM::apply_bubble_body_force(int lev, const amrex::MultiFab& force_mf)
             const amrex::RealVect vel0 = {AMREX_D_DECL(ux,  uy,  uz )};
             const amrex::RealVect vel1 = {AMREX_D_DECL(ux1, uy1, uz1)};
 
+            // ----------------------------------------------------------------
+            // Energy moments at the two states (T held fixed, |u|^2 changes):
+            //   2*rho*e = rho * (2*Cv*T + |u|^2)
+            // The Grad-expansion equilibrium for m_g uses the heat-flux vector
+            // q = 2*rho*u*h  and the R-tensor R_ab = 2*rho*u_a*u_b*(h+P/rho)
+            // + 2*P*h*delta_ab, where h = e + P/rho (both functions of T,|u|^2).
+            // theta0 = 1/3 here is the LATTICE temperature of the D3Q27 stencil
+            // (a property of the weights / abscissae) used in the Grad
+            // expansion — it is NOT the flow speed of sound.
+            // ----------------------------------------------------------------
+            const amrex::Real cv = spec_gas_const / (l_gamma - 1.0);
+
+            const amrex::Real two_rho_e0 = get_energy(temperature, rho, vel0, cv);
+            const amrex::Real two_rho_e1 = get_energy(temperature, rho, vel1, cv);
+
+            amrex::Real rxx_eq0(0.0), ryy_eq0(0.0), rzz_eq0(0.0),
+                        rxy_eq0(0.0), rxz_eq0(0.0), ryz_eq0(0.0);
+            amrex::RealVect heat_flux_0 = {AMREX_D_DECL(0.0, 0.0, 0.0)};
+            get_equilibrium_moments(rho, vel0, two_rho_e0, cv, spec_gas_const,
+                heat_flux_0, rxx_eq0, ryy_eq0, rzz_eq0, rxy_eq0, rxz_eq0, ryz_eq0);
+            const amrex::GpuArray<amrex::Real, 6> hf_flux_0 = {
+                rxx_eq0, ryy_eq0, rzz_eq0, rxy_eq0, rxz_eq0, ryz_eq0};
+
+            amrex::Real rxx_eq1(0.0), ryy_eq1(0.0), rzz_eq1(0.0),
+                        rxy_eq1(0.0), rxz_eq1(0.0), ryz_eq1(0.0);
+            amrex::RealVect heat_flux_1 = {AMREX_D_DECL(0.0, 0.0, 0.0)};
+            get_equilibrium_moments(rho, vel1, two_rho_e1, cv, spec_gas_const,
+                heat_flux_1, rxx_eq1, ryy_eq1, rzz_eq1, rxy_eq1, rxz_eq1, ryz_eq1);
+            const amrex::GpuArray<amrex::Real, 6> hf_flux_1 = {
+                rxx_eq1, ryy_eq1, rzz_eq1, rxy_eq1, rxz_eq1, ryz_eq1};
+
+            const amrex::RealVect zero_vec = {AMREX_D_DECL(0.0, 0.0, 0.0)};
+
             for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
                 const auto& ev = evs[q];
                 const amrex::Real wt = weight[q];
+
+                // m_f update — exact equilibrium difference (cs^2 = gamma*R*T,
+                // cell-local; no 1/3 assumption anywhere).
                 const amrex::Real feq0 = set_extended_equilibrium_value(
                     rho, vel0, pxx_0, pyy_0, pzz_0, l_mesh_speed, wt, ev);
                 const amrex::Real feq1 = set_extended_equilibrium_value(
                     rho, vel1, pxx_1, pyy_1, pzz_1, l_mesh_speed, wt, ev);
                 f_arrs[nbx](iv, q) += feq1 - feq0;
+
+                // m_g update — Grad-expansion equilibrium difference for the
+                // energy lattice.  Required for thermodynamic consistency:
+                // shifting u changes the kinetic energy, which is part of
+                // 2*rho*e; failing to update m_g would inject a spurious
+                // internal-energy source that would manifest as temperature
+                // drift proportional to F.u over time.
+                const amrex::Real geq0 = set_extended_grad_expansion_generic(
+                    two_rho_e0, heat_flux_0, hf_flux_0,
+                    l_mesh_speed, wt, ev, l_theta0, zero_vec, 1.0);
+                const amrex::Real geq1 = set_extended_grad_expansion_generic(
+                    two_rho_e1, heat_flux_1, hf_flux_1,
+                    l_mesh_speed, wt, ev, l_theta0, zero_vec, 1.0);
+                g_arrs[nbx](iv, q) += geq1 - geq0;
             }
         });
     // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
@@ -5896,8 +6032,8 @@ void LBM::apply_bubble_o2_source(int lev, const amrex::MultiFab& o2_src_mf)
 
     if (m_n_components < 1) { return; }
 
-    // Conversion: [mol/(m³·s)] * dt_lev [s] / C_ref [mol/m³ per LB_rho] = [LB_rho/step]
-    const amrex::Real conv = m_bubble_params.dt_lev / m_bubble_o2_C_ref;
+    // Conversion: [mol/(m³·s)] * dt_phys [s] / C_ref [mol/m³ per LB_rho] = [LB_rho/step]
+    const amrex::Real conv = m_bubble_params.dt_phys / m_bubble_o2_C_ref;
 
     const amrex::Real specific_gas_constant = m_R_u / m_m_bar;
     const amrex::Real l_mesh_speed          = m_mesh_speed;
@@ -6177,8 +6313,12 @@ void LBM::fslbm_init_cell_type(const int lev)
 // ============================================================================
 // fslbm_replenish_g: fill missing incoming g populations in INTERFACE cells
 // that face gas.  After standard stream(m_g), populations arriving from gas
-// directions are zero.  We replenish with g_eq at the local velocity and
-// reference temperature to prevent thermal energy drain at the free surface.
+// directions are zero.  Donath (2011) does not derive an analytical energy-
+// population reconstruction at the gas-liquid interface (the dissertation
+// only treats hydrodynamic mass conservation), so we adopt the same
+// adiabatic symmetric-bounce-back closure used for the species lattices.
+// This gives zero heat flux through the free surface and avoids the
+// T_ref Dirichlet artifact of the previous treatment.
 // ============================================================================
 // ============================================================================
 // fslbm_replenish_components: enforce physical impermeable lid at interface
@@ -6210,82 +6350,31 @@ void LBM::fslbm_replenish_g(const int lev)
 {
     BL_PROFILE("LBM::fslbm_replenish_g()");
     using namespace lbm::constants;
-
-    auto const& g_arrs  = m_g[lev].arrays();
-    auto const& f_arrs  = m_f[lev].const_arrays();
+    // Symmetric bounce-back of the energy populations at the free surface.
+    // Donath (2011) does not derive an analytical g-population
+    // reconstruction at the gas-liquid interface — the dissertation only
+    // treats hydrodynamic mass conservation.  We adopt the same adiabatic
+    // (no heat flux) closure used by fslbm_replenish_components() for the
+    // species lattices: any direction whose target neighbour is CELL_GAS
+    // has its outgoing population q copied into the bounced-back slot
+    // bounce_dirs[q].  This is energy-conservative (no T_ref injection,
+    // no spurious thermal spike on newly activated cells) and identical
+    // in form to the proven-stable component closure.
     auto const& ct_arrs = m_cell_type[lev].const_arrays();
-    auto const& md_arrs = m_macrodata[lev].const_arrays();
-
-    const stencil::Stencil stencil_g;
-    const auto& evs_g        = stencil_g.evs;
-    const auto& weights_g    = stencil_g.weights;
-    const auto& bounce_dirs_g = stencil_g.bounce_dirs;
-    const amrex::Real l_mesh_speed = m_mesh_speed;
-    const amrex::Real l_Rg   = m_R_u / m_m_bar;
-    const amrex::Real l_Cv   = l_Rg / (m_adiabaticExponent - 1.0);
-    const amrex::Real l_Tref = m_initialTemperature;
-    const amrex::Real l_theta0 = stencil::Stencil::THETA0;  // lattice temperature = 1/3
-
+    auto const& g_arrs  = m_g[lev].arrays();
+    const stencil::Stencil st;
     amrex::ParallelFor(
-        m_g[lev], amrex::IntVect(0), N_MICRO_STATES,
-        [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k, int q) noexcept {
+        m_g[lev],
+        [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
             const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
-            if (ct_arrs[nbx](iv, 0) != CELL_INTERFACE) { return; }
-
-            // q is the population index.  Its source cell in push-stream is
-            // iv - ev[q] = iv + ev[bq].  If that source is GAS, the streamed-in
-            // g[iv][q] is zero.
-            const int bq = bounce_dirs_g[q];
-            const auto& ev_bq = evs_g[bq];
-            const amrex::IntVect src(iv + ev_bq);
-
-            const auto& g_arr = g_arrs[nbx];
-            const auto& lb = amrex::lbound(g_arr);
-            const auto& ub = amrex::ubound(g_arr);
-            const amrex::Box gbox(
-                amrex::IntVect(AMREX_D_DECL(lb.x, lb.y, lb.z)),
-                amrex::IntVect(AMREX_D_DECL(ub.x, ub.y, ub.z)));
-            if (!gbox.contains(src)) { return; }
-
-            if (ct_arrs[nbx](src, 0) != CELL_GAS) { return; }
-
-            // This direction came from gas → fill with geq at reference T.
-            // Use velocity computed directly from f moments (avoids stale macrodata
-            // which may contain NaN from the previous step's g corruption).
-            amrex::Real rho = amrex::Real(0.0);
-            amrex::Real mx = amrex::Real(0.0);
-            amrex::Real my = amrex::Real(0.0);
-            amrex::Real mz = amrex::Real(0.0);
-            for (int qq = 0; qq < N_MICRO_STATES; ++qq) {
-                const amrex::Real fq = f_arrs[nbx](iv, qq);
-                rho += fq;
-                mx += fq * evs_g[qq][0];
-                my += fq * evs_g[qq][1];
-                mz += fq * evs_g[qq][2];
+            if (ct_arrs[nbx](iv, 0) == CELL_INTERFACE) {
+                for (int q = 0; q < N_MICRO_STATES; ++q) {
+                    if (ct_arrs[nbx](iv + st.evs[q], 0) == CELL_GAS) {
+                        g_arrs[nbx](iv, st.bounce_dirs[q]) = g_arrs[nbx](iv, q);
+                    }
+                }
             }
-            rho = amrex::max(rho, amrex::Real(0.01));
-            const amrex::Real ux = mx / rho;
-            const amrex::Real uy = my / rho;
-            const amrex::Real uz = mz / rho;
-            const amrex::RealVect vel(AMREX_D_DECL(ux, uy, uz));
-
-            // Compute g_eq at (rho, vel, T_ref)
-            const amrex::Real two_rho_e = get_energy(
-                l_Tref, rho, ux, uy, uz, l_Cv);
-            amrex::RealVect heat_flux(AMREX_D_DECL(0.0, 0.0, 0.0));
-            amrex::Real rxx(0), ryy(0), rzz(0), rxy(0), rxz(0), ryz(0);
-            get_equilibrium_moments(rho, vel, two_rho_e, l_Cv, l_Rg,
-                heat_flux, rxx, ryy, rzz, rxy, rxz, ryz);
-            const amrex::GpuArray<amrex::Real, 6> hf_eq = {
-                rxx, ryy, rzz, rxy, rxz, ryz};
-            const amrex::RealVect zero_vec(AMREX_D_DECL(0.0, 0.0, 0.0));
-
-            g_arrs[nbx](iv, q) = set_extended_grad_expansion_generic(
-                two_rho_e, heat_flux, hf_eq,
-                l_mesh_speed, weights_g[q], evs_g[q],
-                l_theta0, zero_vec, amrex::Real(1.0));
         });
-    // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
 }
 
 //  Step 5: Convert cells: phi<1e-4 -> GAS (zero f), phi>1-1e-4 -> LIQUID.
