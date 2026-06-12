@@ -1,0 +1,308 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Input Files and Controls &mdash; MARBLES 0.1 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=03e43079" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=2709fde1"></script>
+      <script src="_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Tutorials" href="Tutorials.html" />
+    <link rel="prev" title="Building" href="Building.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            MARBLES
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="Introduction.html">Introduction</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="GettingStarted.html">Getting Started</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="Building.html">Building</a></li>
+<li class="toctree-l2 current"><a class="current reference internal" href="#">Input Files and Controls</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#comprehensive-list-of-runtime-parameters">Comprehensive List of Runtime Parameters</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#amrex-settings">AMReX Settings</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#lattice-boltzmann-lbm-settings">Lattice Boltzmann (LBM) Settings</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#embedded-boundary-eb-settings">Embedded Boundary (EB) Settings</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#velocity-boundary-conditions">Velocity Boundary Conditions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#initial-conditions-ic">Initial Conditions (IC)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#tagging-and-amr-refinement">Tagging and AMR Refinement</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="Tutorials.html">Tutorials</a></li>
+<li class="toctree-l2"><a class="reference internal" href="Testing.html">Testing</a></li>
+<li class="toctree-l2"><a class="reference internal" href="Linting.html">Linting</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="LBM.html">Lattice Boltzmann Method</a></li>
+<li class="toctree-l1"><a class="reference internal" href="VandV.html">Validation and demonstration</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">MARBLES</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="GettingStarted.html">Getting Started</a></li>
+      <li class="breadcrumb-item active">Input Files and Controls</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/InputFiles.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="input-files-and-controls">
+<h1>Input Files and Controls<a class="headerlink" href="#input-files-and-controls" title="Link to this heading"></a></h1>
+<p>The input file specified on the command line is a free-format text file, one entry per row, that specifies input data processed by the AMReX <code class="docutils literal notranslate"><span class="pre">ParmParse</span></code> module.</p>
+<p>This file needs to specified along with the executable as an <cite>argv</cite> option, for example:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">mpirun</span> <span class="o">-</span><span class="n">np</span> <span class="mi">64</span> <span class="o">./</span><span class="n">marbles</span> <span class="n">inputs</span>
+</pre></div>
+</div>
+<p>Entries can be overwritten on the command line: <code class="docutils literal notranslate"><span class="pre">./marbles</span> <span class="pre">inputs</span> <span class="pre">amr.plot_int=10</span></code>.</p>
+<p>Here is an example input file:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="c1"># maximum number of time steps at base AMR level</span>
+<span class="n">max_step</span> <span class="o">=</span> <span class="mi">1000</span>
+
+<span class="c1"># coordinates of domain&#39;s lower corner</span>
+<span class="n">geometry</span><span class="o">.</span><span class="n">prob_lo</span> <span class="o">=</span> <span class="mf">0.0</span> <span class="mf">0.0</span> <span class="mf">0.0</span>
+
+<span class="c1"># coordinates of domain&#39;s upper corner</span>
+<span class="n">geometry</span><span class="o">.</span><span class="n">prob_hi</span> <span class="o">=</span> <span class="mf">96.0</span> <span class="mf">16.0</span> <span class="mf">16.0</span>
+
+<span class="c1"># flag for periodicity (here y direction is periodic)</span>
+<span class="n">geometry</span><span class="o">.</span><span class="n">is_periodic</span> <span class="o">=</span> <span class="mi">0</span> <span class="mi">1</span> <span class="mi">0</span>
+
+<span class="c1"># number of cells along each direction at base level</span>
+<span class="n">amr</span><span class="o">.</span><span class="n">n_cell</span>  <span class="o">=</span> <span class="mi">96</span> <span class="mi">16</span> <span class="mi">16</span>
+
+<span class="c1"># maximum level number allowed</span>
+<span class="n">amr</span><span class="o">.</span><span class="n">max_level</span> <span class="o">=</span> <span class="mi">0</span>
+
+<span class="c1"># maximum number of cells per box along x,y,z</span>
+<span class="n">amr</span><span class="o">.</span><span class="n">max_grid_size</span> <span class="o">=</span> <span class="mi">16</span>
+
+<span class="c1"># number of timesteps between plot files</span>
+<span class="n">amr</span><span class="o">.</span><span class="n">plot_int</span> <span class="o">=</span> <span class="mi">10</span>
+
+<span class="c1"># number of timesteps between checkpoint files</span>
+<span class="n">amr</span><span class="o">.</span><span class="n">chk_int</span> <span class="o">=</span> <span class="mi">10</span>
+
+<span class="c1"># LBM parameters</span>
+<span class="n">lbm</span><span class="o">.</span><span class="n">bc_lo</span> <span class="o">=</span> <span class="mi">2</span> <span class="mi">0</span> <span class="mi">1</span>
+<span class="n">lbm</span><span class="o">.</span><span class="n">bc_hi</span> <span class="o">=</span> <span class="mi">3</span> <span class="mi">0</span> <span class="mi">1</span>
+<span class="n">lbm</span><span class="o">.</span><span class="n">dx_outer</span> <span class="o">=</span> <span class="mf">1.0</span>
+<span class="n">lbm</span><span class="o">.</span><span class="n">dt_outer</span> <span class="o">=</span> <span class="mf">1.0</span>
+<span class="n">lbm</span><span class="o">.</span><span class="n">nu</span> <span class="o">=</span> <span class="mf">0.01733333333333333</span>
+<span class="n">lbm</span><span class="o">.</span><span class="n">save_streaming</span> <span class="o">=</span> <span class="mi">0</span>
+
+<span class="n">lbm</span><span class="o">.</span><span class="n">velocity_bc_type</span> <span class="o">=</span> <span class="s2">&quot;channel&quot;</span>
+<span class="n">velocity_bc_channel</span><span class="o">.</span><span class="n">initial_density</span> <span class="o">=</span> <span class="mf">1.0</span>
+<span class="n">velocity_bc_channel</span><span class="o">.</span><span class="n">Mach_ref</span> <span class="o">=</span> <span class="mf">0.01</span>
+<span class="n">velocity_bc_channel</span><span class="o">.</span><span class="n">initial_temperature</span> <span class="o">=</span> <span class="mf">0.03</span>
+
+<span class="n">lbm</span><span class="o">.</span><span class="n">ic_type</span> <span class="o">=</span> <span class="s2">&quot;constant&quot;</span>
+<span class="n">ic_constant</span><span class="o">.</span><span class="n">density</span> <span class="o">=</span> <span class="mf">1.0</span>
+<span class="n">ic_constant</span><span class="o">.</span><span class="n">velocity</span> <span class="o">=</span> <span class="mf">0.0</span> <span class="mf">0.0</span> <span class="mf">0.0</span>
+
+<span class="c1"># embedded boundary</span>
+<span class="n">eb2</span><span class="o">.</span><span class="n">geom_type</span> <span class="o">=</span> <span class="s2">&quot;cylinder&quot;</span>
+<span class="n">eb2</span><span class="o">.</span><span class="n">cylinder_radius</span> <span class="o">=</span> <span class="mf">2.0</span>
+<span class="n">eb2</span><span class="o">.</span><span class="n">cylinder_center</span> <span class="o">=</span> <span class="mf">32.0</span> <span class="mf">8.0</span> <span class="mf">8.0</span>
+<span class="n">eb2</span><span class="o">.</span><span class="n">cylinder_has_fluid_inside</span> <span class="o">=</span> <span class="mi">0</span>
+<span class="n">eb2</span><span class="o">.</span><span class="n">cylinder_height</span> <span class="o">=</span> <span class="mf">256.0</span>
+<span class="n">eb2</span><span class="o">.</span><span class="n">cylinder_direction</span> <span class="o">=</span> <span class="mi">1</span>
+
+<span class="c1"># amrex options for trapping FPEs</span>
+<span class="n">amrex</span><span class="o">.</span><span class="n">fpe_trap_invalid</span> <span class="o">=</span> <span class="mi">1</span>
+<span class="n">amrex</span><span class="o">.</span><span class="n">fpe_trap_zero</span> <span class="o">=</span> <span class="mi">1</span>
+<span class="n">amrex</span><span class="o">.</span><span class="n">fpe_trap_overflow</span> <span class="o">=</span> <span class="mi">1</span>
+</pre></div>
+</div>
+<p>Here is an examples of setting up tagging criteria:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="c1"># Tag inside a box and a velocity magnitude value</span>
+<span class="n">tagging</span><span class="o">.</span><span class="n">refinement_indicators</span> <span class="o">=</span> <span class="n">yLow</span> <span class="n">vel_mag</span>
+<span class="n">tagging</span><span class="o">.</span><span class="n">yLow</span><span class="o">.</span><span class="n">in_box_lo</span> <span class="o">=</span> <span class="o">-</span><span class="mf">0.1</span>  <span class="o">-</span><span class="mf">0.52</span>  <span class="o">-</span><span class="mf">0.85</span>
+<span class="n">tagging</span><span class="o">.</span><span class="n">yLow</span><span class="o">.</span><span class="n">in_box_hi</span> <span class="o">=</span>  <span class="mf">3.1</span> <span class="o">-</span><span class="mf">0.45</span>    <span class="mf">0.85</span>
+
+<span class="n">tagging</span><span class="o">.</span><span class="n">vel_mag</span><span class="o">.</span><span class="n">max_level</span>     <span class="o">=</span> <span class="mi">2</span>
+<span class="n">tagging</span><span class="o">.</span><span class="n">vel_mag</span><span class="o">.</span><span class="n">value_greater</span> <span class="o">=</span> <span class="mf">1.2e4</span>
+<span class="n">tagging</span><span class="o">.</span><span class="n">vel_mag</span><span class="o">.</span><span class="n">field_name</span>    <span class="o">=</span> <span class="n">vel_mag</span>
+</pre></div>
+</div>
+<p>The following keys are implemented: <cite>value_greater</cite>, <cite>value_less</cite>, <cite>adjacent_difference_greater</cite>, <cite>in_box_lo</cite> and <cite>in_box_hi</cite> (to specify a refinement region), <cite>max_level</cite>, <cite>start_time</cite>, and <cite>end_time</cite>. The <cite>field_name</cite> key can be any available variable.</p>
+</section>
+<section id="comprehensive-list-of-runtime-parameters">
+<h1>Comprehensive List of Runtime Parameters<a class="headerlink" href="#comprehensive-list-of-runtime-parameters" title="Link to this heading"></a></h1>
+<p>Below is a categorized list of the available runtime parameters that can be specified in the input file or overridden on the command line.</p>
+<section id="amrex-settings">
+<h2>AMReX Settings<a class="headerlink" href="#amrex-settings" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">amr.n_cell</span></code> (Array of Ints): Number of cells along each direction at the base AMR level.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">amr.max_level</span></code> (Int): Maximum AMR level allowed (0 means no refinement).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">amr.max_grid_size</span></code> (Int): Maximum number of cells per box/grid along the x, y, and z directions.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">geometry.prob_lo</span></code> (Array of Reals): Coordinates of the domain’s lower corner.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">geometry.prob_hi</span></code> (Array of Reals): Coordinates of the domain’s upper corner.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">geometry.is_periodic</span></code> (Array of Ints): Flags denoting periodicity in the x, y, and z directions (1 for true, 0 for false).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">amr.max_step</span></code> (Int): Maximum number of time steps (at the base AMR level) to run.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">amr.stop_time</span></code> (Real): Maximum physical simulation time to reach.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">amr.regrid_int</span></code> (Int): Number of base-level timesteps between AMR regridding operations.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">amr.plot_file</span></code> (String): Base name for plot files.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">amr.plot_int</span></code> (Int): Number of base-level timesteps between writing plot files.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">amr.chk_file</span></code> (String): Base name for checkpoint files (for restarting).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">amr.chk_int</span></code> (Int): Number of base-level timesteps between checkpoint files.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">amr.restart</span></code> (String): File path to a checkpoint directory to restart the simulation from.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">amr.file_name_digits</span></code> (Int): Minimum number of digits used in checkpoint and plot file names.</p></li>
+</ul>
+</section>
+<section id="lattice-boltzmann-lbm-settings">
+<h2>Lattice Boltzmann (LBM) Settings<a class="headerlink" href="#lattice-boltzmann-lbm-settings" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">lbm.dx_outer</span></code> (Real): Lattice spacing (dx) at the coarsest (outer) level.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">lbm.dt_outer</span></code> (Real): Time step (dt) at the coarsest (outer) level.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">lbm.nu</span></code> (Real): Kinematic viscosity of the fluid.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">lbm.alpha</span></code> (Real): Thermal diffusivity of the fluid.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">lbm.bc_lo</span></code>, <code class="docutils literal notranslate"><span class="pre">lbm.bc_hi</span></code> (Array of Ints): Boundary condition types for the lower and upper boundaries in each coordinate direction. Typical values include 0 (periodic), 1 (slip wall), 2 (no-slip wall), 3/4 (velocity inlet/outlet).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">lbm.ic_type</span></code> (String): Type of initial condition to apply (e.g., “constant”, “ic_taylorgreen”).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">lbm.velocity_bc_type</span></code> (String): Type of velocity boundary condition to use (e.g., “constant”, “channel”, “parabolic”).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">lbm.save_streaming</span></code>, <code class="docutils literal notranslate"><span class="pre">lbm.save_derived</span></code> (Int): Flags to save post-streaming distributions and derived quantities into plot files (1 = true, 0 = false).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">lbm.compute_forces</span></code> (Int): Flag to enable computation of forces on embedded boundaries (1 = true).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">lbm.forces_file</span></code> (String): Name of the file to save computed forces.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">lbm.initial_temperature</span></code> (Real): Initial global reference temperature.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">lbm.body_is_isothermal</span></code> (Int): Flag indicating if the embedded body maintains a constant temperature (1 = true).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">lbm.body_temperature</span></code> (Real): Temperature of the embedded isothermal body.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">lbm.adiabatic_exponent</span></code> (Real): Adiabatic exponent (gamma) of the fluid.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">lbm.mean_molecular_mass</span></code> (Real): Mean molecular mass of the fluid.</p></li>
+</ul>
+</section>
+<section id="embedded-boundary-eb-settings">
+<h2>Embedded Boundary (EB) Settings<a class="headerlink" href="#embedded-boundary-eb-settings" title="Link to this heading"></a></h2>
+<p>Prefix: <code class="docutils literal notranslate"><span class="pre">eb2.*</span></code></p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">eb2.geom_type</span></code> (String): Type of embedded geometry. Supported types include “cylinder”, “box”, and “stl”.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">eb2.cylinder_radius</span></code> (Real): Radius of the cylinder.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">eb2.cylinder_direction</span></code> (Int): Coordinate axis alignment of the cylinder (0=X, 1=Y, 2=Z).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">eb2.cylinder_center</span></code> (Array of Reals): Coordinates of the cylinder’s center.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">eb2.cylinder_has_fluid_inside</span></code> (Int): Flag to indicate if fluid exists inside the cylinder.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">eb2.cylinder_rotation</span></code>, <code class="docutils literal notranslate"><span class="pre">eb2.cylinder_rotation_axe</span></code> (Real, Int): Parameters to rotate the cylinder.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">eb2.box_lo</span></code>, <code class="docutils literal notranslate"><span class="pre">eb2.box_hi</span></code> (Array of Reals): Lower and upper bounds of a box geometry.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">eb2.box_has_fluid_inside</span></code> (Int): Flag to indicate if fluid exists inside the box.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">eb2.box_rotation</span></code>, <code class="docutils literal notranslate"><span class="pre">eb2.box_rotation_axe</span></code>, <code class="docutils literal notranslate"><span class="pre">eb2.box_rotation_center</span></code>: Rotation parameters for a box.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">eb2.stl_file</span></code> (String): Path to an STL file for complex boundary definitions.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">eb2.stl_scale</span></code> (Real): Scaling factor applied to the STL geometry.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">eb2.stl_reverse_normal</span></code> (Int): Reverses the surface normals of the STL object.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">eb2.stl_center</span></code> (Array of Reals): Coordinates to center the STL object.</p></li>
+</ul>
+<p>Prefix: <code class="docutils literal notranslate"><span class="pre">voxel_cracks.*</span></code></p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">voxel_cracks.use_voxel_cracks</span></code> (Int): Flag to enable voxelized crack geometries.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">voxel_cracks.crack_file</span></code> (String): TIFF/Image file path indicating the 3D crack mask.</p></li>
+</ul>
+</section>
+<section id="velocity-boundary-conditions">
+<h2>Velocity Boundary Conditions<a class="headerlink" href="#velocity-boundary-conditions" title="Link to this heading"></a></h2>
+<p>These parameters depend on the <code class="docutils literal notranslate"><span class="pre">lbm.velocity_bc_type</span></code> chosen. Prefixes include <code class="docutils literal notranslate"><span class="pre">velocity_bc_constant.*</span></code>, <code class="docutils literal notranslate"><span class="pre">velocity_bc_channel.*</span></code>, <code class="docutils literal notranslate"><span class="pre">velocity_bc_parabolic.*</span></code>.</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">dir</span></code>, <code class="docutils literal notranslate"><span class="pre">normal_dir</span></code>, <code class="docutils literal notranslate"><span class="pre">tangential_dir</span></code> (Int): Specification of the normal and tangential axes for the boundary velocity profile.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">Mach_ref</span></code> (Real): Reference Mach number at the boundary.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">initial_density</span></code> (Real): Initial density at the inlet/boundary.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">initial_temperature</span></code> (Real): Initial temperature at the inlet/boundary.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">adiabatic_exponent</span></code> (Real): Gamma parameter used for the local speed of sound calculation.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">mean_molecular_mass</span></code> (Real): Mean molecular mass used for local ideal gas evaluations.</p></li>
+</ul>
+</section>
+<section id="initial-conditions-ic">
+<h2>Initial Conditions (IC)<a class="headerlink" href="#initial-conditions-ic" title="Link to this heading"></a></h2>
+<p>These parameters override global fluid initializations based on the <code class="docutils literal notranslate"><span class="pre">lbm.ic_type</span></code> string (e.g., using “constant” translates to the identifier <code class="docutils literal notranslate"><span class="pre">ic_constant</span></code>). Common prefixes follow <code class="docutils literal notranslate"><span class="pre">ic_constant.*</span></code>, <code class="docutils literal notranslate"><span class="pre">ic_taylorgreen.*</span></code>, etc.</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">density</span></code>, <code class="docutils literal notranslate"><span class="pre">initial_temperature</span></code> (Real): Overridden initial density and temperature for the domain block.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">velocity</span></code>, <code class="docutils literal notranslate"><span class="pre">mach_components</span></code> (Array of Reals): Component-wise specification of velocity vector or Mach numbers.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">adiabatic_exponent</span></code>, <code class="docutils literal notranslate"><span class="pre">mean_molecular_mass</span></code> (Real): Local thermodynamic properties for the initial condition region.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">rho0</span></code>, <code class="docutils literal notranslate"><span class="pre">v0</span></code>, <code class="docutils literal notranslate"><span class="pre">omega</span></code>, <code class="docutils literal notranslate"><span class="pre">wave_length</span></code>: Specific scalar parameters for analytical formulations (e.g., for Taylor-Green vortices or tests).</p></li>
+</ul>
+</section>
+<section id="tagging-and-amr-refinement">
+<h2>Tagging and AMR Refinement<a class="headerlink" href="#tagging-and-amr-refinement" title="Link to this heading"></a></h2>
+<p>Prefix: <code class="docutils literal notranslate"><span class="pre">tagging.*</span></code> or <code class="docutils literal notranslate"><span class="pre">tagging.[indicator_name].*</span></code></p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">tagging.refinement_indicators</span></code> (Array of Strings): List of user-defined names for refinement criteria (e.g., <code class="docutils literal notranslate"><span class="pre">yLow</span></code>, <code class="docutils literal notranslate"><span class="pre">vel_mag</span></code>).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">max_level</span></code> (Int): The maximum AMR level this specific tagging rule can trigger.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">field_name</span></code> (String): The LBM state or derived variable to be checked (e.g., <code class="docutils literal notranslate"><span class="pre">density</span></code>, <code class="docutils literal notranslate"><span class="pre">vel_mag</span></code>).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">value_greater</span></code>, <code class="docutils literal notranslate"><span class="pre">value_less</span></code> (Real): Trigger refinement if the variable evaluated is above/below this threshold.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">adjacent_difference_greater</span></code> (Real): Trigger refinement if the magnitude difference between neighbor cells exceeds this threshold (often used for discontinuity/shock detection).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">in_box_lo</span></code>, <code class="docutils literal notranslate"><span class="pre">in_box_hi</span></code> (Array of Reals): Bounding box spatial limits within which the refinement tagging rule is physically active.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">start_time</span></code>, <code class="docutils literal notranslate"><span class="pre">end_time</span></code> (Real): Activate the tagging rule only within a certain physical simulation time window.</p></li>
+</ul>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="Building.html" class="btn btn-neutral float-left" title="Building" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="Tutorials.html" class="btn btn-neutral float-right" title="Tutorials" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023, the Alliance for Sustainable Energy, LLC., through National Renewable Energy Laboratory. All rights reserved.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
