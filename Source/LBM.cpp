@@ -4857,6 +4857,23 @@ void LBM::read_checkpoint_file()
         m_bubbles.Restart(m_restart_chkfile, "bubbles");
     }
 
+    // Restore the accumulated impeller rotation angle so that
+    // initialize_is_fluid → reconstruct_body_sdf places the moving body at
+    // the correct angular position from the checkpoint, not at angle = 0.
+    // Without this the impeller snaps from angle=0 to its true position in
+    // the very first advance step, triggering a full-domain refill_and_spill.
+    if (m_body_is_moving) {
+        const amrex::Real omega_mag = std::sqrt(
+            m_body_angular_velocity[0] * m_body_angular_velocity[0] +
+            m_body_angular_velocity[1] * m_body_angular_velocity[1] +
+            m_body_angular_velocity[2] * m_body_angular_velocity[2]);
+        m_body_rotation_angle = omega_mag * m_ts_new[0];
+        amrex::Print() << "[restart] Restored body rotation angle = "
+                       << m_body_rotation_angle
+                       << " rad  (omega=" << omega_mag
+                       << " rad/step × " << m_ts_new[0] << " steps)\n";
+    }
+
     // Populate the other data
     for (int lev = 0; lev <= finest_level; ++lev) {
         initialize_is_fluid(lev);
@@ -6408,6 +6425,16 @@ void LBM::fslbm_advance_surface(const int lev)
     const amrex::Real l_cv     = l_Rg / (m_adiabaticExponent - amrex::Real(1.0));
     const amrex::Real l_T_ref  = m_initialTemperature;
     const amrex::Real l_theta0 = stencil::Stencil::THETA0;
+    // Reference speed of sound at T_ref (LB units), used to cap spawned-cell
+    // velocity during gas → liquid promotion (Step 5b).  We use a fixed T_ref
+    // for the cap (rather than per-spawn T_avg) so the threshold doesn't grow
+    // with any donor-temperature drift; the Mach-0.1 limit keeps spawned cells
+    // well below the lattice stability limit Ma ≈ 0.3.
+    const amrex::Real l_cs_Tref       = std::sqrt(
+        m_adiabaticExponent * l_Rg * l_T_ref);
+    const amrex::Real l_spawn_u_max   = amrex::Real(0.1) * l_cs_Tref;
+    const amrex::Real l_spawn_T_min   = amrex::Real(0.5) * l_T_ref;
+    const amrex::Real l_spawn_T_max   = amrex::Real(2.0) * l_T_ref;
     // Surface tension + Laplace-pressure density correction for ABB BC.
     // Δρ_G = -2*sigma*kappa / (Rg * T_interface); when sigma=0 this is zero.
     const amrex::Real l_sigma              = m_fslbm_sigma;
@@ -7060,7 +7087,6 @@ void LBM::fslbm_advance_surface(const int lev)
         auto const& ct_arrs   = m_cell_type[lev].arrays();
         auto const& phi_arrs  = m_phi_fslbm[lev].arrays();
         auto const& f_arrs    = m_f[lev].arrays();
-        auto const& g_arrs    = m_g[lev].arrays();
         auto const& flag_arrs = mass_flux.arrays();   // comp 0: flag, comp 1: excess mass, comp 2: spawn flag
 
         amrex::ParallelFor(
@@ -7071,6 +7097,13 @@ void LBM::fslbm_advance_surface(const int lev)
                 const amrex::Real phi = phi_arrs[nbx](iv, 0);
                 if (phi < FSLBM_PHI_LO) {
                     // Convert to GAS.  Excess mass = phi * rho (negative or ~0).
+                    // f is zeroed here (mass goes via Step 5a phi excess); g and
+                    // component populations are DEFERRED — they are redistributed
+                    // by the spill loop below (analogous to refill_and_spill spill
+                    // for moving solids), then zeroed at the source cell.  Failing
+                    // to spill them produces an energy/species sink at every gas
+                    // conversion event, which destabilises the temperature field
+                    // once the free surface starts moving.
                     amrex::Real rho = amrex::Real(0.0);
                     for (int q = 0; q < N_MICRO_STATES; ++q)
                         rho += f_arrs[nbx](iv, q);
@@ -7080,7 +7113,6 @@ void LBM::fslbm_advance_surface(const int lev)
                     phi_arrs[nbx](iv, 0)  = amrex::Real(0.0);
                     for (int q = 0; q < N_MICRO_STATES; ++q) {
                         f_arrs[nbx](iv, q) = amrex::Real(0.0);
-                        g_arrs[nbx](iv, q) = amrex::Real(0.0);
                     }
                 } else if (phi > FSLBM_PHI_HI) {
                     // Convert to LIQUID.  Excess mass = (phi - 1) * rho (≥ 0).
@@ -7096,23 +7128,168 @@ void LBM::fslbm_advance_surface(const int lev)
         // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
 
-    // Zero component lattices in cells that just converted to CELL_GAS.
-    // m_f was already zeroed in the kernel above; component lattices must
-    // also be cleared so dissolved scalars don't persist in gas cells and
-    // contaminate liquid cells if the interface retreats back over them.
-    if (m_n_components > 0) {
-        auto const& flag_arrs_ro = mass_flux.const_arrays();
-        for (int c = 0; c < m_n_components; ++c) {
-            auto const& f_comp_arrs = m_component_lattices[c][lev].arrays();
+    // -----------------------------------------------------------------------
+    // Spill of g (energy) and component populations from cells that just
+    // converted INTERFACE → GAS.
+    //
+    // The static interface bounce-back (fslbm_replenish_g, fslbm_replenish_components)
+    // closes adiabatic transport while the surface is stationary.  Once the
+    // surface moves, voxels switch between liquid and gas every step, and
+    // bounce-back alone leaks energy / species at every conversion: simply
+    // zeroing the converted cell discards its 2ρe and component mass.
+    //
+    // Mirror the moving-solid `refill_and_spill` spill: distribute each
+    // converted cell's populations to its (currently still-fluid) lattice
+    // neighbours, weighted by the lattice weights.  This is mass/energy/
+    // species conservative globally (apart from isolated cells with no
+    // surviving fluid neighbour, which is unrecoverable in any case).
+    //
+    // Cell-type ghost cells must be fresh before this runs so that recipients
+    // across rank boundaries are evaluated correctly.
+    // -----------------------------------------------------------------------
+    m_cell_type[lev].FillBoundary(Geom(lev).periodicity());
+    {
+        const stencil::Stencil stencil_sp;
+        const auto& evs_sp     = stencil_sp.evs;
+        const auto& weights_sp = stencil_sp.weights;
+
+        // Energy lattice spill
+        amrex::MultiFab spill_g_mf(
+            m_g[lev].boxArray(), m_g[lev].DistributionMap(),
+            constants::N_MICRO_STATES, m_g[lev].nGrow());
+        spill_g_mf.setVal(amrex::Real(0.0));
+        {
+            auto const& flag_ro    = mass_flux.const_arrays();
+            auto const& ct_arrs_sp = m_cell_type[lev].const_arrays();
+            auto const& g_arrs_sp  = m_g[lev].arrays();
+            auto const& spill_g_arrs = spill_g_mf.arrays();
+
             amrex::ParallelFor(
-                m_component_lattices[c][lev],
+                m_g[lev], amrex::IntVect(0),
                 [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
-                    if (flag_arrs_ro[nbx](i, j, k, 0) > amrex::Real(0.5)) {
-                        for (int q = 0; q < N_MICRO_STATES; ++q)
-                            f_comp_arrs[nbx](i, j, k, q) = amrex::Real(0.0);
+                    if (flag_ro[nbx](i, j, k, 0) <= amrex::Real(0.5)) { return; }
+                    const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
+                    const auto& garr = g_arrs_sp[nbx];
+                    const auto lo = amrex::lbound(garr);
+                    const auto hi = amrex::ubound(garr);
+
+                    amrex::Real weight_sum = amrex::Real(0.0);
+                    for (int nq = 1; nq < N_MICRO_STATES; ++nq) {
+                        const int ni = i + evs_sp[nq][0];
+                        const int nj = j + evs_sp[nq][1];
+                        const int nk = k + evs_sp[nq][2];
+                        if (ni < lo.x || ni > hi.x || nj < lo.y || nj > hi.y ||
+                            nk < lo.z || nk > hi.z) continue;
+                        const int ctn = ct_arrs_sp[nbx](ni, nj, nk, 0);
+                        if (ctn == CELL_INTERFACE || ctn == CELL_LIQUID) {
+                            weight_sum += weights_sp[nq];
+                        }
+                    }
+                    if (weight_sum == amrex::Real(0.0)) {
+                        // Isolated converted cell with no surviving fluid neighbour;
+                        // its energy is unrecoverable.  Zero g and exit.
+                        for (int q = 0; q < N_MICRO_STATES; ++q) {
+                            g_arrs_sp[nbx](iv, q) = amrex::Real(0.0);
+                        }
+                        return;
+                    }
+                    const amrex::Real inv_w = amrex::Real(1.0) / weight_sum;
+                    for (int nq = 1; nq < N_MICRO_STATES; ++nq) {
+                        const int ni = i + evs_sp[nq][0];
+                        const int nj = j + evs_sp[nq][1];
+                        const int nk = k + evs_sp[nq][2];
+                        if (ni < lo.x || ni > hi.x || nj < lo.y || nj > hi.y ||
+                            nk < lo.z || nk > hi.z) continue;
+                        const int ctn = ct_arrs_sp[nbx](ni, nj, nk, 0);
+                        if (ctn != CELL_INTERFACE && ctn != CELL_LIQUID) continue;
+                        const amrex::Real w = weights_sp[nq] * inv_w;
+                        for (int q = 0; q < N_MICRO_STATES; ++q) {
+                            amrex::Gpu::Atomic::AddNoRet(
+                                &spill_g_arrs[nbx](ni, nj, nk, q),
+                                g_arrs_sp[nbx](iv, q) * w);
+                        }
+                    }
+                    for (int q = 0; q < N_MICRO_STATES; ++q) {
+                        g_arrs_sp[nbx](iv, q) = amrex::Real(0.0);
                     }
                 });
             // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
+        }
+        spill_g_mf.SumBoundary(Geom(lev).periodicity());
+        amrex::MultiFab::Add(m_g[lev], spill_g_mf, 0, 0,
+                             constants::N_MICRO_STATES, 0);
+        m_g[lev].FillBoundary(Geom(lev).periodicity());
+
+        // Component lattice spill (one buffer per component, reused).
+        if (m_n_components > 0) {
+            auto const& flag_ro    = mass_flux.const_arrays();
+            auto const& ct_arrs_sp = m_cell_type[lev].const_arrays();
+
+            for (int c = 0; c < m_n_components; ++c) {
+                amrex::MultiFab spill_c_mf(
+                    m_component_lattices[c][lev].boxArray(),
+                    m_component_lattices[c][lev].DistributionMap(),
+                    constants::N_MICRO_STATES,
+                    m_component_lattices[c][lev].nGrow());
+                spill_c_mf.setVal(amrex::Real(0.0));
+
+                auto const& c_arrs_sp    = m_component_lattices[c][lev].arrays();
+                auto const& spill_c_arrs = spill_c_mf.arrays();
+
+                amrex::ParallelFor(
+                    m_component_lattices[c][lev], amrex::IntVect(0),
+                    [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                        if (flag_ro[nbx](i, j, k, 0) <= amrex::Real(0.5)) { return; }
+                        const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
+                        const auto& carr = c_arrs_sp[nbx];
+                        const auto lo = amrex::lbound(carr);
+                        const auto hi = amrex::ubound(carr);
+
+                        amrex::Real weight_sum = amrex::Real(0.0);
+                        for (int nq = 1; nq < N_MICRO_STATES; ++nq) {
+                            const int ni = i + evs_sp[nq][0];
+                            const int nj = j + evs_sp[nq][1];
+                            const int nk = k + evs_sp[nq][2];
+                            if (ni < lo.x || ni > hi.x || nj < lo.y || nj > hi.y ||
+                                nk < lo.z || nk > hi.z) continue;
+                            const int ctn = ct_arrs_sp[nbx](ni, nj, nk, 0);
+                            if (ctn == CELL_INTERFACE || ctn == CELL_LIQUID) {
+                                weight_sum += weights_sp[nq];
+                            }
+                        }
+                        if (weight_sum == amrex::Real(0.0)) {
+                            for (int q = 0; q < N_MICRO_STATES; ++q) {
+                                c_arrs_sp[nbx](iv, q) = amrex::Real(0.0);
+                            }
+                            return;
+                        }
+                        const amrex::Real inv_w = amrex::Real(1.0) / weight_sum;
+                        for (int nq = 1; nq < N_MICRO_STATES; ++nq) {
+                            const int ni = i + evs_sp[nq][0];
+                            const int nj = j + evs_sp[nq][1];
+                            const int nk = k + evs_sp[nq][2];
+                            if (ni < lo.x || ni > hi.x || nj < lo.y || nj > hi.y ||
+                                nk < lo.z || nk > hi.z) continue;
+                            const int ctn = ct_arrs_sp[nbx](ni, nj, nk, 0);
+                            if (ctn != CELL_INTERFACE && ctn != CELL_LIQUID) continue;
+                            const amrex::Real w = weights_sp[nq] * inv_w;
+                            for (int q = 0; q < N_MICRO_STATES; ++q) {
+                                amrex::Gpu::Atomic::AddNoRet(
+                                    &spill_c_arrs[nbx](ni, nj, nk, q),
+                                    c_arrs_sp[nbx](iv, q) * w);
+                            }
+                        }
+                        for (int q = 0; q < N_MICRO_STATES; ++q) {
+                            c_arrs_sp[nbx](iv, q) = amrex::Real(0.0);
+                        }
+                    });
+                // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
+                spill_c_mf.SumBoundary(Geom(lev).periodicity());
+                amrex::MultiFab::Add(m_component_lattices[c][lev], spill_c_mf,
+                                     0, 0, constants::N_MICRO_STATES, 0);
+                m_component_lattices[c][lev].FillBoundary(
+                    Geom(lev).periodicity());
+            }
         }
     }
 
@@ -7228,35 +7405,188 @@ void LBM::fslbm_advance_surface(const int lev)
                     phi_arrs[nbx](iv, 0) = FSLBM_PHI_HI;
                     // PDFs already valid (cell was LIQUID)
                 } else if (ct == CELL_GAS && neighbor_converted_to_liquid) {
-                    // Promote to interface; seed PDFs from nearest fluid neighbor.
-                    // Normalize to rho=1 to prevent inheriting an elevated density
-                    // from a high-rho LIQUID neighbor — otherwise the spawned cell
-                    // enters the next step's push streaming with rho>1, amplifying
-                    // the error each conversion cycle until blow-up.
-                    ct_arrs[nbx](iv, 0)  = CELL_INTERFACE;
-                    phi_arrs[nbx](iv, 0) = FSLBM_PHI_LO;
-                    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
-                        const auto ep = amrex::IntVect::TheDimensionVector(d);
-                        for (int s : {+1, -1}) {
-                            const auto ivn = iv + s * ep;
-                            const int  ctn = ct_arrs[nbx](ivn, 0);
-                            if (ctn == CELL_LIQUID || ctn == CELL_INTERFACE) {
-                                // Compute neighbor rho = Σf so we can normalize
-                                amrex::Real rho_ivn = amrex::Real(0.0);
-                                for (int q = 0; q < N_MICRO_STATES; ++q)
-                                    rho_ivn += f_arrs[nbx](ivn, q);
-                                rho_ivn = amrex::max(rho_ivn, amrex::Real(1.0e-10));
-                                // Normalize to l_fslbm_rho_ref (not 1) so the
-                                // spawned cell enters streaming at the correct bulk density.
-                                const amrex::Real inv_rho = l_fslbm_rho_ref / rho_ivn;
-                                for (int q = 0; q < N_MICRO_STATES; ++q) {
-                                    f_arrs[nbx](iv, q) = f_arrs[nbx](ivn, q) * inv_rho;
-                                    g_arrs[nbx](iv, q) = g_arrs[nbx](ivn, q) * inv_rho;
-                                }
-                                flag_arrs[nbx](iv, 2) = amrex::Real(1.0); // Needs component spawn
-                                return;
-                            }
+                    // -----------------------------------------------------
+                    // Promote GAS → INTERFACE.  Reconstruct (f, g) from a
+                    // weight-averaged equilibrium of donors in the full
+                    // 27-stencil.  This replaces the previous "first
+                    // face-neighbour copy with rho rescale" approach,
+                    // which:
+                    //   * picked a single donor arbitrarily (no normal
+                    //     direction bias);
+                    //   * only checked 6 face neighbours (a diagonal-only
+                    //     liquid neighbourhood gave f = g = 0);
+                    //   * propagated post-collide non-equilibrium stress
+                    //     modes verbatim into the freshly spawned cell;
+                    //   * could amplify errors when the chosen donor was
+                    //     itself an INTERFACE cell with anomalous
+                    //     populations.
+                    //
+                    // The equilibrium reconstruction follows Donath 2011
+                    // §2.3.1 / Körner 2005 §3.3:  average (u, T) over
+                    // surrounding fluid cells (CELL_LIQUID preferred over
+                    // CELL_INTERFACE), then build f_eq(ρ_ref, u_avg, T_avg)
+                    // and g_eq(2ρe(ρ_ref, u_avg, T_avg), ...).  This is
+                    // mass / energy / momentum-consistent with the local
+                    // bulk flow, contains no spurious stress modes, and
+                    // is robust against single-donor noise.
+                    //
+                    // ρ is NOT averaged from donors — INTERFACE cells must
+                    // carry the bulk-liquid density ρ_ref in their LBM
+                    // populations (the volume fraction is tracked by phi),
+                    // otherwise the next push streaming step uses the
+                    // wrong density and the error compounds.
+                    // -----------------------------------------------------
+                    ct_arrs[nbx](iv, 0)   = CELL_INTERFACE;
+                    phi_arrs[nbx](iv, 0)  = FSLBM_PHI_LO;
+                    flag_arrs[nbx](iv, 2) = amrex::Real(1.0); // Needs component spawn
+
+                    // Accumulate (u, T) from LIQUID and INTERFACE donors
+                    // separately; we use LIQUID if any are present, else
+                    // fall back to INTERFACE.
+                    amrex::Real wL = amrex::Real(0.0);
+                    amrex::Real ux_L = 0.0, uy_L = 0.0, uz_L = 0.0, T_L = 0.0;
+                    amrex::Real wI = amrex::Real(0.0);
+                    amrex::Real ux_I = 0.0, uy_I = 0.0, uz_I = 0.0, T_I = 0.0;
+
+                    for (int q_nbr = 1; q_nbr < N_MICRO_STATES; ++q_nbr) {
+                        const auto ivn = iv + evs[q_nbr];
+                        const int ctn = ct_arrs[nbx](ivn, 0);
+                        if (ctn != CELL_LIQUID && ctn != CELL_INTERFACE) {
+                            continue;
                         }
+
+                        // Compute donor moments from f, g
+                        amrex::Real rho_d = amrex::Real(0.0);
+                        amrex::Real ux_d = 0.0, uy_d = 0.0, uz_d = 0.0;
+                        amrex::Real two_rho_e_d = amrex::Real(0.0);
+                        for (int q = 0; q < N_MICRO_STATES; ++q) {
+                            const amrex::Real f_q = f_arrs[nbx](ivn, q);
+                            rho_d += f_q;
+                            ux_d  += evs[q][0] * f_q;
+                            uy_d  += evs[q][1] * f_q;
+                            uz_d  += evs[q][2] * f_q;
+                            two_rho_e_d += g_arrs[nbx](ivn, q);
+                        }
+                        if (rho_d < amrex::Real(1.0e-10)) continue;
+                        const amrex::Real inv_rho_d = amrex::Real(1.0) / rho_d;
+                        ux_d *= inv_rho_d;
+                        uy_d *= inv_rho_d;
+                        uz_d *= inv_rho_d;
+
+                        const amrex::Real u2_d =
+                            ux_d * ux_d + uy_d * uy_d + uz_d * uz_d;
+                        const amrex::Real T_d =
+                            (amrex::Real(0.5) / l_cv) *
+                            (two_rho_e_d * inv_rho_d - u2_d);
+                        // Skip donors whose recovered T is unphysical so
+                        // we don't seed the new cell from a bad donor.
+                        if (!(T_d > amrex::Real(1.0e-10))) continue;
+
+                        const amrex::Real wt = weights[q_nbr];
+                        if (ctn == CELL_LIQUID) {
+                            wL   += wt;
+                            ux_L += wt * ux_d;
+                            uy_L += wt * uy_d;
+                            uz_L += wt * uz_d;
+                            T_L  += wt * T_d;
+                        } else {
+                            wI   += wt;
+                            ux_I += wt * ux_d;
+                            uy_I += wt * uy_d;
+                            uz_I += wt * uz_d;
+                            T_I  += wt * T_d;
+                        }
+                    }
+
+                    amrex::Real ux_avg, uy_avg, uz_avg, T_avg;
+                    if (wL > amrex::Real(0.0)) {
+                        const amrex::Real inv_w = amrex::Real(1.0) / wL;
+                        ux_avg = ux_L * inv_w;
+                        uy_avg = uy_L * inv_w;
+                        uz_avg = uz_L * inv_w;
+                        T_avg  = T_L  * inv_w;
+                    } else if (wI > amrex::Real(0.0)) {
+                        const amrex::Real inv_w = amrex::Real(1.0) / wI;
+                        ux_avg = ux_I * inv_w;
+                        uy_avg = uy_I * inv_w;
+                        uz_avg = uz_I * inv_w;
+                        T_avg  = T_I  * inv_w;
+                    } else {
+                        // Isolated promotion (no surviving fluid donor in
+                        // 27-stencil) — fall back to rest at T_ref.
+                        ux_avg = amrex::Real(0.0);
+                        uy_avg = amrex::Real(0.0);
+                        uz_avg = amrex::Real(0.0);
+                        T_avg  = l_T_ref;
+                    }
+
+                    // Safety clip for FSLBM gas → liquid spawn ONLY.
+                    // (Solid-body refill_and_spill uses its own validated
+                    // single-phase path — NOT clipped here.)
+                    //
+                    //   |u_avg|         ≤ 0.1·cs(T_ref)   (Mach 0.1 cap)
+                    //   T_avg           ∈ [0.5·T_ref, 2·T_ref]
+                    //
+                    // Any out-of-range (incl. NaN) average means the donor
+                    // set was anomalous — fall back to the safest possible
+                    // seed (rest at T_ref).  The Mach-0.1 limit is well
+                    // below the lattice stability bound Ma ≈ 0.3, so this
+                    // never silently distorts a physically reasonable
+                    // average; it only catches pathological cases.
+                    {
+                        const amrex::Real u2_check =
+                            ux_avg * ux_avg + uy_avg * uy_avg + uz_avg * uz_avg;
+                        const bool u_bad = !(u2_check <=
+                            l_spawn_u_max * l_spawn_u_max);   // NaN-safe
+                        const bool T_bad = !(T_avg >= l_spawn_T_min &&
+                                             T_avg <= l_spawn_T_max);
+                        if (u_bad || T_bad) {
+                            ux_avg = amrex::Real(0.0);
+                            uy_avg = amrex::Real(0.0);
+                            uz_avg = amrex::Real(0.0);
+                            T_avg  = l_T_ref;
+                        }
+                    }
+
+                    // Build equilibrium f, g at (ρ_ref, u_avg, T_avg).
+                    const amrex::RealVect vel_avg = {AMREX_D_DECL(
+                        ux_avg, uy_avg, uz_avg)};
+                    const amrex::Real u2_avg =
+                        AMREX_D_TERM(ux_avg * ux_avg, +uy_avg * uy_avg,
+                                     +uz_avg * uz_avg);
+                    const amrex::Real two_rho_e_new = l_fslbm_rho_ref *
+                        (amrex::Real(2.0) * l_cv * T_avg + u2_avg);
+                    // Extended pressure-tensor diagonal entries for the
+                    // product-form equilibrium:  pxx = u_x² + R_g·T  (NOT
+                    // just R_g·T).  This matches the convention used by
+                    // macrodata_to_equilibrium, apply_macroscopic_forcing,
+                    // and Step 1b ABB; passing only R_g·T (the bug in the
+                    // first version) drops the u² term and produces wildly
+                    // wrong f populations when |u_avg| is non-trivial.
+                    const amrex::Real RT_avg = l_Rg * T_avg;
+                    const amrex::Real pxx_new = ux_avg * ux_avg + RT_avg;
+                    const amrex::Real pyy_new = uy_avg * uy_avg + RT_avg;
+                    const amrex::Real pzz_new = uz_avg * uz_avg + RT_avg;
+
+                    amrex::RealVect heat_flux_seed = {AMREX_D_DECL(0, 0, 0)};
+                    amrex::Real rxx_n(0), ryy_n(0), rzz_n(0),
+                                rxy_n(0), rxz_n(0), ryz_n(0);
+                    get_equilibrium_moments(l_fslbm_rho_ref, vel_avg,
+                        two_rho_e_new, l_cv, l_Rg, heat_flux_seed,
+                        rxx_n, ryy_n, rzz_n, rxy_n, rxz_n, ryz_n);
+                    const amrex::GpuArray<amrex::Real, 6> hf_eq_new = {
+                        rxx_n, ryy_n, rzz_n, rxy_n, rxz_n, ryz_n};
+                    const amrex::RealVect zero_vec_n = {AMREX_D_DECL(0.0, 0.0, 0.0)};
+
+                    for (int q = 0; q < N_MICRO_STATES; ++q) {
+                        f_arrs[nbx](iv, q) = set_extended_equilibrium_value(
+                            l_fslbm_rho_ref, vel_avg,
+                            pxx_new, pyy_new, pzz_new,
+                            l_mesh_speed, weights[q], evs[q]);
+                        g_arrs[nbx](iv, q) = set_extended_grad_expansion_generic(
+                            two_rho_e_new, heat_flux_seed, hf_eq_new,
+                            l_mesh_speed, weights[q], evs[q],
+                            l_theta0, zero_vec_n, amrex::Real(1.0));
                     }
                 }
             });
