@@ -1135,9 +1135,13 @@ void LBM::advance(
         // us correlate the T anomaly with mass-side runaways at the
         // impeller wake.  Threshold |T| > 0.5 * T_ref captures the
         // moderate spikes (-0.05 to -0.2) that historically preceded
-        // catastrophic blow-up by 2-5 print intervals.
+        // catastrophic blow-up by 2-5 print intervals.  Gated on
+        // m_free_surface — only meaningful for FSLBM runs (single-
+        // phase thermal runs never hit these thresholds in practice).
         const amrex::Real T_alarm = amrex::Real(0.5) * m_initialTemperature;
-        if (T_min < -T_alarm || T_max > amrex::Real(5.0) * m_initialTemperature) {
+        if (m_free_surface &&
+            (T_min < -T_alarm ||
+             T_max > amrex::Real(5.0) * m_initialTemperature)) {
             const amrex::Real rho_max =
                 m_macrodata[lev].max(constants::RHO_IDX);
             const amrex::IntVect iv_rho =
@@ -1364,7 +1368,14 @@ void LBM::macrodata_to_equilibrium(const int lev)
     // toward the reference equilibrium, letting the cell recover over a
     // few steps without affecting healthy cells.  Only macrodata is
     // untouched, so T_diag still reports the raw T_min from the cell.
+    //
+    // Gated on m_free_surface: this safety net only protects against
+    // pathologies that arise from the FSLBM ABB / interface-cell
+    // dynamics.  Single-phase thermal runs (no free surface) keep the
+    // original collision kernel exactly as-is — the rescue branches
+    // collapse to no-ops because T_is_broken is forced to false.
     const amrex::Real l_T_ref = m_initialTemperature;
+    const bool fs_active = m_free_surface;
 
     amrex::ParallelFor(
         m_eq[lev], m_eq[lev].nGrowVect(), constants::N_MICRO_STATES,
@@ -1407,10 +1418,15 @@ void LBM::macrodata_to_equilibrium(const int lev)
                 // T_max in healthy runs sits well below 4*T_ref even
                 // with vigorous impeller stirring, so 5*T_ref leaves a
                 // comfortable margin.
+                //
+                // Gated on fs_active: in single-phase / non-FSLBM runs
+                // the rescue branch is forced off, so the kernel
+                // reduces exactly to the original (pre-rescue) code.
                 const bool T_is_broken =
-                    !std::isfinite(temperature) ||
-                    temperature <= amrex::Real(0.0) ||
-                    temperature > amrex::Real(5.0) * l_T_ref;
+                    fs_active &&
+                    (!std::isfinite(temperature) ||
+                     temperature <= amrex::Real(0.0) ||
+                     temperature > amrex::Real(5.0) * l_T_ref);
                 const amrex::Real T_safe =
                     T_is_broken ? l_T_ref : temperature;
 
@@ -1556,8 +1572,11 @@ void LBM::relax_f_to_equilibrium(const int lev)
     // comment in macrodata_to_equilibrium.  Used at every site below
     // that derives omega or p_by_rho from the cell-local T, so a
     // catastrophically broken cell pulls toward T_ref instead of
-    // amplifying.
+    // amplifying.  Gated on fs_active: in single-phase runs the
+    // rescue is forced off so the kernel reduces to the original
+    // (pre-rescue) collision code.
     const amrex::Real l_T_ref = m_initialTemperature;
+    const bool fs_active = m_free_surface;
 
     const amrex::Real l_mesh_speed = m_mesh_speed;
     const stencil::Stencil stencil;
@@ -1582,10 +1601,13 @@ void LBM::relax_f_to_equilibrium(const int lev)
                 amrex::Real temperature =
                     md_arr(iv, constants::TEMPERATURE_IDX);
                 // Per-cell numerical safety net (see macrodata_to_equilibrium).
+                // Gated on fs_active: in single-phase runs the
+                // ternary collapses to T_safe = temperature.
                 const amrex::Real T_safe =
-                    (!std::isfinite(temperature) ||
-                     temperature <= amrex::Real(0.0) ||
-                     temperature > amrex::Real(5.0) * l_T_ref)
+                    (fs_active &&
+                     (!std::isfinite(temperature) ||
+                      temperature <= amrex::Real(0.0) ||
+                      temperature > amrex::Real(5.0) * l_T_ref))
                         ? l_T_ref
                         : temperature;
                 amrex::Real omega =
@@ -1662,10 +1684,12 @@ void LBM::relax_f_to_equilibrium(const int lev)
                 const amrex::Real temperature =
                     md_arr(iv, constants::TEMPERATURE_IDX);
                 // Per-cell numerical safety net (see macrodata_to_equilibrium).
+                // Gated on fs_active.
                 const amrex::Real T_safe =
-                    (!std::isfinite(temperature) ||
-                     temperature <= amrex::Real(0.0) ||
-                     temperature > amrex::Real(5.0) * l_T_ref)
+                    (fs_active &&
+                     (!std::isfinite(temperature) ||
+                      temperature <= amrex::Real(0.0) ||
+                      temperature > amrex::Real(5.0) * l_T_ref))
                         ? l_T_ref
                         : temperature;
                 const amrex::Real omega =
@@ -1873,10 +1897,12 @@ void LBM::relax_f_to_equilibrium(const int lev)
                     // macrodata_to_equilibrium).  Cells with broken T fall
                     // back to T_ref locally so eq_ref/eq_flow remain
                     // well-defined; m_macrodata is untouched.
+                    // Gated on fs_active.
                     const amrex::Real T_safe =
-                        (!std::isfinite(temperature) ||
-                         temperature <= amrex::Real(0.0) ||
-                         temperature > amrex::Real(5.0) * l_T_ref)
+                        (fs_active &&
+                         (!std::isfinite(temperature) ||
+                          temperature <= amrex::Real(0.0) ||
+                          temperature > amrex::Real(5.0) * l_T_ref))
                             ? l_T_ref
                             : temperature;
                     const amrex::Real p_by_rho =
@@ -1956,13 +1982,15 @@ void LBM::relax_f_to_equilibrium(const int lev)
                     // the cell relaxes toward a valid local equilibrium.
                     // Component density floor remains: cells with no
                     // component mass have nothing meaningful to relax.
+                    // Gated on fs_active.
                     if (rho_comp <= 1.0e-30) {
                         return; // leave populations unchanged
                     }
                     const amrex::Real T_safe =
-                        (!std::isfinite(temperature) ||
-                         temperature <= amrex::Real(0.0) ||
-                         temperature > amrex::Real(5.0) * l_T_ref)
+                        (fs_active &&
+                         (!std::isfinite(temperature) ||
+                          temperature <= amrex::Real(0.0) ||
+                          temperature > amrex::Real(5.0) * l_T_ref))
                             ? l_T_ref
                             : temperature;
                     const amrex::Real omega_comp =
