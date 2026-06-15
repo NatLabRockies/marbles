@@ -105,7 +105,7 @@ lbm.n_components = 1
 lbm.diffusivity_component_0 = 6.40e-5
 
 lbm.initial_temperature = 0.03333
-lbm.adiabatic_exponent = 1.4
+lbm.adiabatic_exponent = 1.66666666667
 lbm.save_streaming = 0
 lbm.compute_forces = 1
 
@@ -235,7 +235,7 @@ lbm.ic_type = "constant"
 ic_constant.mach_components = 0.0 0.0 0.0
 ic_constant.density = 1.0
 ic_constant.initial_temperature = 0.03333
-ic_constant.adiabatic_exponent = 1.4
+ic_constant.adiabatic_exponent = 1.66666666667
 
 # Component 0: dissolved O₂ — starts fully deaerated (zero)
 ic_constant_component_0.mach_components = 0.0 0.0 0.0

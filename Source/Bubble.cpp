@@ -291,7 +291,8 @@ void BubbleManager::initialize(
     const amrex::Geometry&            geom,
     const amrex::BoxArray&            ba,
     const amrex::DistributionMapping& dm,
-    const BubbleParams&               params)
+    const BubbleParams&               params,
+    bool                              append_stats)
 {
     m_params = params;
     m_container.Define(geom, dm, ba);
@@ -301,7 +302,7 @@ void BubbleManager::initialize(
     // Per-hole residuals, pre-seeded to 1.0 so the first call always injects.
     m_injection_residuals.assign(m_params.n_sparger_points, 1.0);
     m_initialized = true;
-    open_stats_file();
+    open_stats_file(append_stats);
     amrex::Print() << "[BubbleManager] Initialized. n_sparger_points = "
                    << m_params.n_sparger_points << "\n";
 }
@@ -650,7 +651,7 @@ void BubbleManager::advance(
     amrex::MultiFab&           o2_src_mf,
     amrex::Real                phys_time,
     const amrex::MultiFab*     phi_mf,
-    const amrex::iMultiFab*    is_fluid_mf)
+    const amrex::iMultiFab*    cell_type_mf)
 {
     if (!m_initialized) { return; }
     if (!m_particles_ever_injected) { return; }
@@ -684,8 +685,8 @@ void BubbleManager::advance(
             auto force_arr = fluid_force_mf.array(pti);
             auto src_arr   = o2_src_mf.array(pti);
             
-            bool has_isf = (is_fluid_mf != nullptr);
-            auto isf_arr = has_isf ? is_fluid_mf->const_array(pti) : amrex::Array4<const int>{};
+            bool has_isf = (cell_type_mf != nullptr);
+            auto isf_arr = has_isf ? cell_type_mf->const_array(pti) : amrex::Array4<const int>{};
             bool has_phi = (phi_mf != nullptr);
             auto phi_arr = has_phi ? phi_mf->const_array(pti) : amrex::Array4<const amrex::Real>{};
             
@@ -826,10 +827,17 @@ void BubbleManager::advance(
                         int nck = static_cast<int>(amrex::Math::floor((new_pz - prob_lo[2]) / dx_arr[2]));
                         amrex::IntVect niv(AMREX_D_DECL(nci, ncj, nck));
                         
-                        bool new_in_solid = (!domain.contains(niv) || isf_arr(niv, 0) == 0);
+                        // Block bubbles entering MOVING-IMPELLER or STATIONARY-WALL cells only.
+                        // GAS cells (free surface headspace) are NOT solid; bubbles rising
+                        // through the surface are handled by the phi-exit check below.
+                        // Treating GAS as solid here was responsible for bubbles freezing
+                        // at the free surface and visually "passing into" the tank walls.
+                        bool new_in_solid = (!domain.contains(niv) ||
+                            isf_arr(niv, 0) == lbm::constants::CELL_SOLID);
                         if (new_in_solid) {
                             amrex::IntVect oiv(AMREX_D_DECL(ci, cj, ck));
-                            bool old_in_solid = (!domain.contains(oiv) || isf_arr(oiv, 0) == 0);
+                            bool old_in_solid = (!domain.contains(oiv) ||
+                                isf_arr(oiv, 0) == lbm::constants::CELL_SOLID);
                             if (!old_in_solid) {
                                 new_px = old_x; new_py = old_y; new_pz = old_z;
                                 p.rdata(BubbleIdx::VX) = 0; p.rdata(BubbleIdx::VY) = 0; p.rdata(BubbleIdx::VZ) = 0;
@@ -840,7 +848,8 @@ void BubbleManager::advance(
                                     for (int d_j = -1; d_j <= 1 && !found; ++d_j) {
                                         for (int d_k = -1; d_k <= 1 && !found; ++d_k) {
                                             amrex::IntVect nniv(AMREX_D_DECL(ci+d_i, cj+d_j, ck+d_k));
-                                            if (domain.contains(nniv) && isf_arr(nniv,0) == 1) {
+                                            if (domain.contains(nniv) &&
+                                                isf_arr(nniv,0) != lbm::constants::CELL_SOLID) {
                                                 new_px = (nniv[0] + 0.5) * dx_arr[0] + prob_lo[0];
                                                 new_py = (nniv[1] + 0.5) * dx_arr[1] + prob_lo[1];
                                                 new_pz = (nniv[2] + 0.5) * dx_arr[2] + prob_lo[2];
@@ -946,13 +955,18 @@ void BubbleManager::write_stats(int step, amrex::Real phys_time)
 // ============================================================================
 // Stats file helpers
 // ============================================================================
-void BubbleManager::open_stats_file()
+void BubbleManager::open_stats_file(bool append)
 {
     if (!amrex::ParallelDescriptor::IOProcessor()) { return; }
-    m_stats_stream.open(m_params.stats_file,
-                        std::ios::out | std::ios::trunc);
-    m_stats_stream << "step,phys_time_s,n_bubbles,d_mean_mm,"
-                      "d_min_mm,d_max_mm,n_O2_total_mol,dn_O2_step_mol_per_s\n";
+    if (append) {
+        m_stats_stream.open(m_params.stats_file,
+                            std::ios::out | std::ios::app);
+    } else {
+        m_stats_stream.open(m_params.stats_file,
+                            std::ios::out | std::ios::trunc);
+        m_stats_stream << "step,phys_time_s,n_bubbles,d_mean_mm,"
+                          "d_min_mm,d_max_mm,n_O2_total_mol,dn_O2_step_mol_per_s\n";
+    }
 }
 
 void BubbleManager::close_stats_file()

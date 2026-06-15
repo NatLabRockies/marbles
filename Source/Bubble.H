@@ -89,7 +89,8 @@ public:
         const amrex::Geometry&            geom,
         const amrex::BoxArray&            ba,
         const amrex::DistributionMapping& dm,
-        const BubbleParams&               params);
+        const BubbleParams&               params,
+        bool                              append_stats = false);
 
     void advance(
         amrex::Real                dt,
@@ -100,8 +101,14 @@ public:
         amrex::MultiFab&           fluid_force_mf,
         amrex::MultiFab&           o2_src_mf,
         amrex::Real                phys_time,
-        const amrex::MultiFab*     phi_mf = nullptr,
-        const amrex::iMultiFab*    is_fluid_mf = nullptr);
+        const amrex::MultiFab*     phi_mf       = nullptr,
+        // Cell-type field used for solid-wall blocking.  We accept the FSLBM
+        // m_cell_type iMultiFab (values CELL_LIQUID / CELL_INTERFACE / CELL_GAS
+        // / CELL_SOLID) rather than the raw m_is_fluid mask: the raw mask sets
+        // both GAS and SOLID to 0, so testing IS_FLUID==0 inside advance()
+        // wrongly treated bubbles rising into the gas headspace as colliding
+        // with a wall.  Testing == CELL_SOLID isolates real wall contact.
+        const amrex::iMultiFab*    cell_type_mf = nullptr);
 
     void inject_bubbles(amrex::Real dt_phys);
     void do_coalescence(amrex::Real phys_time);
@@ -120,7 +127,7 @@ private:
         const amrex::MultiFab& derived,
         const amrex::Geometry& geom);
 
-    void open_stats_file();
+    void open_stats_file(bool append = false);
     void close_stats_file();
 
     BubbleParams m_params;
