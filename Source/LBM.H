@@ -409,6 +409,27 @@ private:
     // clamp negative component densities before collision
     bool m_clamp_component_densities = false;
 
+    // Mass-fraction window [Y_min, Y_max] for the component-lattice clamp.
+    // Cells with Y_c = rho_comp / rho_main outside this window are
+    // *rescaled* (or zeroed if rho_main is too small) to drag the zeroth
+    // moment back into the physical band [0, 1] with a numerical safety
+    // margin.  Cells INSIDE the window are left untouched — small negative
+    // excursions produced by the entropic Newton solve / streaming
+    // round-off during start-up transients must be preserved (zeroing
+    // them was found to break mass conservation in the single-phase
+    // scalar transport validation tests).
+    // Defaults [-0.1, 1.1] give 10× headroom on each side of the
+    // physically valid range Y ∈ [0, 1].
+    // Set via lbm.component_y_min / lbm.component_y_max.
+    amrex::Real m_clamp_component_y_min = -0.1;
+    amrex::Real m_clamp_component_y_max =  1.1;
+
+    // Carrier-fluid density floor below which the component populations
+    // in the cell are zeroed unconditionally — "mass fraction" is
+    // meaningless when there is no carrier mass (gas / solid cells).
+    // Default 1e-6.  Set via lbm.component_rho_main_floor.
+    amrex::Real m_clamp_component_rho_main_floor = 1.0e-6;
+
     // use entropic alpha stabilisation for component lattices
     bool m_use_entropic_components = false;
 
@@ -491,6 +512,19 @@ private:
     // < 90 = hydrophilic  ;  > 90 = hydrophobic.
     // Set via lbm.fslbm_contact_angle in the input file.
     amrex::Real m_fslbm_contact_angle_deg = 90.0;
+
+    // Stranded-cell sweep search radius (LB cells).
+    // FSLBM Step 0_pre converts any CELL_INTERFACE cell that has no
+    // CELL_LIQUID in a (2R+1)^3 box of neighbours to CELL_GAS
+    // (zeroes φ, f, g).  This is a purely topological criterion:
+    // "cannot drain to bulk fluid via streaming within R steps".
+    // Default R=2 (5x5x5 box = 124 neighbours) catches isolated
+    // droplets and detached splash sheets two cells from any liquid.
+    // R=1 reduces to a strict D3Q27 isolation test (very conservative).
+    // R must not exceed m_f_nghost (=3) so reads stay inside the ghost
+    // layer.  Set to 0 to disable the sweep entirely.
+    // Set via lbm.fslbm_strand_search_radius in the input file.
+    int m_fslbm_strand_search_radius = 2;
 
     // Moving body parameters
     bool m_body_is_moving = false;

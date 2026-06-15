@@ -326,6 +326,10 @@ void LBM::read_parameters()
         pp.query("compute_forces", m_compute_forces);
         pp.query("forces_file", m_forces_file);
         pp.query("clamp_component_densities", m_clamp_component_densities);
+        pp.query("component_y_min", m_clamp_component_y_min);
+        pp.query("component_y_max", m_clamp_component_y_max);
+        pp.query("component_rho_main_floor",
+                 m_clamp_component_rho_main_floor);
         pp.query("use_entropic_components", m_use_entropic_components);
         pp.query("use_entropic_f", m_use_entropic_f);
 
@@ -405,6 +409,7 @@ void LBM::read_parameters()
             ppic.query("density", m_fslbm_rho_ref);
             pp.query("fslbm_sigma",          m_fslbm_sigma);
             pp.query("fslbm_contact_angle",  m_fslbm_contact_angle_deg);
+            pp.query("fslbm_strand_search_radius", m_fslbm_strand_search_radius);
 
             amrex::Print() << "\n=== Free Surface Configuration (FSLBM) ===" << std::endl;
             amrex::Print() << "  Interface z (LB cells)   : " << m_free_surface_z << std::endl;
@@ -414,6 +419,14 @@ void LBM::read_parameters()
             amrex::Print() << "  Contact angle θ (deg)    : " << m_fslbm_contact_angle_deg
                            << (std::abs(m_fslbm_contact_angle_deg - 90.0) < 0.01 ? "  (neutral wetting)" : "")
                            << std::endl;
+            if (m_fslbm_strand_search_radius > 0) {
+                amrex::Print() << "  Stranded-cell sweep R    : "
+                               << m_fslbm_strand_search_radius
+                               << "  (CELL_INTERFACE with no CELL_LIQUID in (2R+1)^3 box → CELL_GAS)"
+                               << std::endl;
+            } else {
+                amrex::Print() << "  Stranded-cell sweep      : DISABLED" << std::endl;
+            }
         }
     }
 
@@ -1089,12 +1102,14 @@ void LBM::advance(
     relax_f_to_equilibrium(lev);
 
     // -------------------------------------------------------------------
-    // Diagnostic: T_min / T_max on m_macrodata[TEMPERATURE_IDX].
-    // Non-fluid cells (GAS / SOLID) are zeroed by f_to_macrodata, so T_min
-    // is bounded above by 0 and T_min < 0 iff some FLUID cell has negative
-    // T.  T_max < ∞ similarly catches runaway hot cells.  Cheap (one
-    // MultiFab reduce per print interval) and only printed when neither
-    // isothermal switch is forcing T = body_temperature.
+    // Diagnostic: T_min / T_max on m_macrodata[TEMPERATURE_IDX] plus the
+    // (i,j,k) of each extremum.  Non-fluid cells (GAS / SOLID) are
+    // zeroed by f_to_macrodata, so T_min is bounded above by 0 and
+    // T_min < 0 iff some FLUID cell has negative T.  Cell location lets
+    // us correlate failures with the FSLBM rho diagnostic (impeller
+    // wake vs. interface vs. headspace).  Cheap: one min/max reduce
+    // plus one min/max-index reduce per print interval.  Only printed
+    // when neither isothermal switch is forcing T = body_temperature.
     // -------------------------------------------------------------------
     if (m_print_int > 0 && m_isteps[lev] % m_print_int == 0 &&
         !m_fluidIsIsothermal) {
@@ -1102,10 +1117,36 @@ void LBM::advance(
             m_macrodata[lev].min(constants::TEMPERATURE_IDX);
         const amrex::Real T_max =
             m_macrodata[lev].max(constants::TEMPERATURE_IDX);
+        const amrex::IntVect ivmin =
+            m_macrodata[lev].minIndex(constants::TEMPERATURE_IDX);
+        const amrex::IntVect ivmax =
+            m_macrodata[lev].maxIndex(constants::TEMPERATURE_IDX);
         amrex::Print() << "[T_diag step=" << m_isteps[lev]
                        << "] T_min=" << T_min
+                       << " @ (" << ivmin[0] << "," << ivmin[1]
+                       << "," << ivmin[2] << ")"
                        << "  T_max=" << T_max
+                       << " @ (" << ivmax[0] << "," << ivmax[1]
+                       << "," << ivmax[2] << ")"
                        << "  T_ref=" << m_initialTemperature << "\n";
+
+        // If a severe negative-T or hot-T excursion is present, also
+        // print the global main-lattice rho_max location.  This lets
+        // us correlate the T anomaly with mass-side runaways at the
+        // impeller wake.  Threshold |T| > 0.5 * T_ref captures the
+        // moderate spikes (-0.05 to -0.2) that historically preceded
+        // catastrophic blow-up by 2-5 print intervals.
+        const amrex::Real T_alarm = amrex::Real(0.5) * m_initialTemperature;
+        if (T_min < -T_alarm || T_max > amrex::Real(5.0) * m_initialTemperature) {
+            const amrex::Real rho_max =
+                m_macrodata[lev].max(constants::RHO_IDX);
+            const amrex::IntVect iv_rho =
+                m_macrodata[lev].maxIndex(constants::RHO_IDX);
+            amrex::Print() << "[T_diag_alarm step=" << m_isteps[lev]
+                           << "] rho_max=" << rho_max
+                           << " @ (" << iv_rho[0] << "," << iv_rho[1]
+                           << "," << iv_rho[2] << ")\n";
+        }
     }
 }
 
@@ -1178,37 +1219,97 @@ void LBM::stream(const int lev, amrex::Vector<amrex::MultiFab>& fs)
 void LBM::clamp_negative_component_densities(const int lev)
 {
     BL_PROFILE("LBM::clamp_negative_component_densities()");
-    
-    // Component lattices can develop negative populations through:
-    // 1. Streaming - when cells with zero density stream from boundary ghost cells,
-    //    floating point errors can create small negatives
-    // 2. Collision - relaxation of near-zero density toward equilibrium can produce negatives
-    // 
-    // Unlike m_f and m_g which are always initialized with positive equilibrium distributions,
-    // component lattices start with zeros in most of the domain and only gain mass through
-    // initial conditions in specific regions. This makes them susceptible to negative values
-    // during streaming and collision operations.
+
+    // Mass-fraction-based component clamp.
     //
-    // This clamp runs on ALL cells (interior, ghost, solid) to prevent negatives from
-    // propagating between timesteps via ghost cells.
-    
+    // Per cell, compute the species mass fraction
+    //     Y_c(i,j,k) = rho_comp(i,j,k) / rho_main(i,j,k)
+    // where rho_comp = sum_q f_comp[q] and rho_main = sum_q f_main[q] is
+    // the carrier-fluid density.  Y_c is the physically meaningful
+    // dimensionless quantity (ratio of LB densities).  Y_c ∈ [0, 1] for
+    // any well-defined mixture.
+    //
+    // Action:
+    //   - non-finite rho_comp or rho_main : zero all f_comp populations
+    //   - rho_main < rho_main_floor      : zero all f_comp (no carrier)
+    //   - Y in [Y_min, Y_max]             : LEAVE UNTOUCHED — the small
+    //                                       negative excursions from the
+    //                                       entropic Newton / streaming
+    //                                       round-off during start-up
+    //                                       transients must survive,
+    //                                       otherwise we destroy mass
+    //                                       (validated against single-
+    //                                       phase scalar transport tests).
+    //   - Y < Y_min or Y > Y_max          : RESCALE all f_comp[q] by
+    //                                       s = Y_target * rho_main / rho_comp
+    //                                       so post-clamp Y = Y_target.
+    //                                       Preserves the relative shape
+    //                                       of the q-distribution (so
+    //                                       higher moments scale
+    //                                       consistently with the zeroth
+    //                                       moment) and only corrects the
+    //                                       magnitude.
+    //
+    // Defaults [-0.1, 1.1] give a 10× margin on each side of the physical
+    // band — big enough to leave transients alone, small enough to catch
+    // catastrophic runaways (observed Y ≈ 1.5e6 in run 14305909).
+    //
+    // The clamp runs on ALL cells (interior + ghost) so any pollution
+    // entering through ghost-cell exchange is healed before the next
+    // streaming step.  m_f and m_component_lattices share the same
+    // BoxArray and ghost width, so the (i,j,k) index is valid in both.
+
+    const amrex::Real Y_min          = m_clamp_component_y_min;
+    const amrex::Real Y_max          = m_clamp_component_y_max;
+    const amrex::Real rho_main_floor = m_clamp_component_rho_main_floor;
+
+    auto const& f_main_arrs = m_f[lev].const_arrays();
+
     for (int c = 0; c < m_n_components; ++c) {
         auto const& f_comp_arrs = m_component_lattices[c][lev].arrays();
-        
+
         amrex::ParallelFor(
             m_component_lattices[c][lev],
             m_component_lattices[c][lev].nGrowVect(),
             [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
-                // Compute total density
-                amrex::Real rho_comp = 0.0;
+                amrex::Real rho_comp = amrex::Real(0.0);
+                amrex::Real rho_main = amrex::Real(0.0);
                 for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
                     rho_comp += f_comp_arrs[nbx](i, j, k, q);
+                    rho_main += f_main_arrs[nbx](i, j, k, q);
                 }
-                
-                // Zero out all populations if total density is negative
-                if (rho_comp < 0.0) {
+
+                // Catastrophic non-finite -> zero.
+                if (!std::isfinite(rho_comp) || !std::isfinite(rho_main)) {
                     for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
-                        f_comp_arrs[nbx](i, j, k, q) = 0.0;
+                        f_comp_arrs[nbx](i, j, k, q) = amrex::Real(0.0);
+                    }
+                    return;
+                }
+
+                // No carrier fluid -> mass fraction undefined; any
+                // component populations here are spurious.
+                if (rho_main < rho_main_floor) {
+                    for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+                        f_comp_arrs[nbx](i, j, k, q) = amrex::Real(0.0);
+                    }
+                    return;
+                }
+
+                const amrex::Real Y = rho_comp / rho_main;
+
+                // In-band: leave untouched.
+                if (Y >= Y_min && Y <= Y_max) { return; }
+
+                // Out-of-band: rescale all f_comp[q] so post-clamp
+                // Y = Y_target (the violated bound).  s preserves
+                // sign of rho_comp (Y_target and rho_comp share sign
+                // when out of band by the same side, so s > 0).
+                const amrex::Real Y_target = (Y < Y_min) ? Y_min : Y_max;
+                if (rho_comp != amrex::Real(0.0)) {
+                    const amrex::Real s = (Y_target * rho_main) / rho_comp;
+                    for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+                        f_comp_arrs[nbx](i, j, k, q) *= s;
                     }
                 }
             });
@@ -1255,6 +1356,15 @@ void LBM::macrodata_to_equilibrium(const int lev)
     const amrex::Real dt = m_dts[lev];
     const amrex::Real alpha = m_alpha;
     const amrex::Real theta0 = stencil::Stencil::THETA0;
+    // Reference T for the per-cell numerical safety net below.  Cells with
+    // catastrophically broken T (non-finite, non-positive, or far above
+    // the model's validity range) would produce a negative omega here and
+    // an indefinitely growing |f - f_eq| under collision.  Substituting
+    // T_ref locally turns the divergent step into a contractive one
+    // toward the reference equilibrium, letting the cell recover over a
+    // few steps without affecting healthy cells.  Only macrodata is
+    // untouched, so T_diag still reports the raw T_min from the cell.
+    const amrex::Real l_T_ref = m_initialTemperature;
 
     amrex::ParallelFor(
         m_eq[lev], m_eq[lev].nGrowVect(), constants::N_MICRO_STATES,
@@ -1285,25 +1395,64 @@ void LBM::macrodata_to_equilibrium(const int lev)
                 const amrex::Real temperature =
                     md_arr(iv, constants::TEMPERATURE_IDX);
 
+                // Per-cell numerical safety net.  Triggers on:
+                //   (a) T non-finite,
+                //   (b) T <= 0 (would give negative omega and amplify
+                //       deviations from equilibrium each step), or
+                //   (c) T > 5*T_ref (already 5x above the lattice's
+                //       expected validity range — a clear runaway
+                //       signature; catching this early prevents the
+                //       cell's two_rho_e from ballooning over the next
+                //       few steps via the f_to_macrodata feedback loop).
+                // T_max in healthy runs sits well below 4*T_ref even
+                // with vigorous impeller stirring, so 5*T_ref leaves a
+                // comfortable margin.
+                const bool T_is_broken =
+                    !std::isfinite(temperature) ||
+                    temperature <= amrex::Real(0.0) ||
+                    temperature > amrex::Real(5.0) * l_T_ref;
+                const amrex::Real T_safe =
+                    T_is_broken ? l_T_ref : temperature;
+
+                // Symmetric g-side rescue.  When T is broken, two_rho_e
+                // is also broken (T = (2 rho e/rho - |u|^2)/(2 cv)).
+                // Building eq_arr_g from the broken two_rho_e produces
+                // a runaway g_eq, which then feeds back into
+                // f_to_macrodata's T = (Sum(g)/rho - |u|^2)/(2 cv)
+                // computation, locking the cell into a self-reinforcing
+                // catastrophe.  Rebuild a clean two_rho_e_safe at
+                // T_safe with the cell's actual rho and velocity, and
+                // discard the heat-flux off-equilibrium corrections
+                // (they read q_x, P_ij from md which are also broken)
+                // by zeroing the heat_flux vector.  Healthy cells use
+                // the raw values unchanged.
+                const amrex::Real two_rho_e_safe =
+                    T_is_broken
+                        ? rho * (amrex::Real(2.0) * cv * T_safe +
+                                 AMREX_D_TERM(vel[0] * vel[0],
+                                              + vel[1] * vel[1],
+                                              + vel[2] * vel[2]))
+                        : two_rho_e;
+
                 const amrex::Real omega =
                     1.0 /
-                    (nu / (specific_gas_constant * temperature * dt) + 0.5);
+                    (nu / (specific_gas_constant * T_safe * dt) + 0.5);
                 const amrex::Real omega_one =
                     1.0 /
-                    (alpha / (specific_gas_constant * temperature * dt) + 0.5);
+                    (alpha / (specific_gas_constant * T_safe * dt) + 0.5);
                 const amrex::Real omega_one_by_omega = omega_one / omega;
                 const amrex::Real omega_corr =
                     (2.0 - omega) / (2.0 * omega * rho);
 
                 const amrex::Real pxx_ext =
-                    vel[0] * vel[0] + specific_gas_constant * temperature +
+                    vel[0] * vel[0] + specific_gas_constant * T_safe +
                     dt * (omega_corr)*d_arr(iv, constants::D_Q_CORR_X_IDX);
                 const amrex::Real pyy_ext =
-                    vel[1] * vel[1] + specific_gas_constant * temperature +
+                    vel[1] * vel[1] + specific_gas_constant * T_safe +
                     dt * (omega_corr)*d_arr(iv, constants::D_Q_CORR_Y_IDX);
                 const amrex::Real pzz_ext = AMREX_D_PICK(
                     0.0, 0.0,
-                    vel[2] * vel[2] + specific_gas_constant * temperature +
+                    vel[2] * vel[2] + specific_gas_constant * T_safe +
                         dt * (omega_corr)*d_arr(iv, constants::D_Q_CORR_Z_IDX));
 
                 eq_arr(iv, q) = set_extended_equilibrium_value(
@@ -1315,7 +1464,7 @@ void LBM::macrodata_to_equilibrium(const int lev)
 
                 amrex::RealVect heat_flux = {AMREX_D_DECL(0.0, 0.0, 0.0)};
                 get_equilibrium_moments(
-                    rho, vel, two_rho_e, cv, specific_gas_constant, heat_flux,
+                    rho, vel, two_rho_e_safe, cv, specific_gas_constant, heat_flux,
                     rxx_eq, ryy_eq, rzz_eq, rxy_eq, rxz_eq, ryz_eq);
 
                 qx_eq = heat_flux[0];
@@ -1337,28 +1486,38 @@ void LBM::macrodata_to_equilibrium(const int lev)
                 AMREX_3D_ONLY(
                     const amrex::Real qz = md_arr(iv, constants::QZ_IDX));
 
-                qx_eq *= omega_one_by_omega;
-                qy_eq *= omega_one_by_omega;
-                AMREX_3D_ONLY(qz_eq *= omega_one_by_omega);
+                // MRT off-equilibrium heat-flux correction.  Skipped on
+                // broken cells: qx, qy, qz, pxx, pxy ... read above are
+                // the cell's actual moments from f_to_macrodata, which
+                // are also corrupted when T is broken.  For broken cells,
+                // qx_eq stays at the pure equilibrium value (the
+                // heat_flux output from get_equilibrium_moments above)
+                // and the cell relaxes to a clean state.  Healthy cells
+                // get the standard MRT Prandtl correction.
+                if (!T_is_broken) {
+                    qx_eq *= omega_one_by_omega;
+                    qy_eq *= omega_one_by_omega;
+                    AMREX_3D_ONLY(qz_eq *= omega_one_by_omega);
 
-                qx_eq += (1.0 - omega_one_by_omega) *
-                         (qx AMREX_D_TERM(
-                              -2.0 * vel[0] * pxx, -2.0 * vel[1] * pxy,
-                              -2.0 * vel[2] * pxz) -
-                          vel[0] * dt * d_arr(iv, constants::D_Q_CORR_X_IDX));
+                    qx_eq += (1.0 - omega_one_by_omega) *
+                             (qx AMREX_D_TERM(
+                                  -2.0 * vel[0] * pxx, -2.0 * vel[1] * pxy,
+                                  -2.0 * vel[2] * pxz) -
+                              vel[0] * dt * d_arr(iv, constants::D_Q_CORR_X_IDX));
 
-                qy_eq += (1.0 - omega_one_by_omega) *
-                         (qy AMREX_D_TERM(
-                              -2.0 * vel[0] * pxy, -2.0 * vel[1] * pyy,
-                              -2.0 * vel[2] * pyz) -
-                          vel[1] * dt * d_arr(iv, constants::D_Q_CORR_Y_IDX));
+                    qy_eq += (1.0 - omega_one_by_omega) *
+                             (qy AMREX_D_TERM(
+                                  -2.0 * vel[0] * pxy, -2.0 * vel[1] * pyy,
+                                  -2.0 * vel[2] * pyz) -
+                              vel[1] * dt * d_arr(iv, constants::D_Q_CORR_Y_IDX));
 
-                AMREX_3D_ONLY(
-                    qz_eq +=
-                    (1.0 - omega_one_by_omega) *
-                    (qz - 2.0 * vel[0] * pxz - 2.0 * vel[1] * pyz -
-                     2.0 * vel[2] * pzz -
-                     vel[2] * dt * d_arr(iv, constants::D_Q_CORR_Z_IDX)));
+                    AMREX_3D_ONLY(
+                        qz_eq +=
+                        (1.0 - omega_one_by_omega) *
+                        (qz - 2.0 * vel[0] * pxz - 2.0 * vel[1] * pyz -
+                         2.0 * vel[2] * pzz -
+                         vel[2] * dt * d_arr(iv, constants::D_Q_CORR_Z_IDX)));
+                }
 
                 amrex::RealVect heat_flux_mrt = {
                     AMREX_D_DECL(qx_eq, qy_eq, qz_eq)};
@@ -1367,7 +1526,7 @@ void LBM::macrodata_to_equilibrium(const int lev)
                     rxx_eq, ryy_eq, rzz_eq, rxy_eq, rxz_eq, ryz_eq};
 
                 eq_arr_g(iv, q) = set_extended_grad_expansion_generic(
-                    two_rho_e, heat_flux_mrt, flux_of_heat_flux, l_mesh_speed,
+                    two_rho_e_safe, heat_flux_mrt, flux_of_heat_flux, l_mesh_speed,
                     wt, ev, theta0, zero_vec, 1.0);
             }
         });
@@ -1393,6 +1552,13 @@ void LBM::relax_f_to_equilibrium(const int lev)
     const bool fluid_is_isothermal = m_fluidIsIsothermal;
     const bool use_entropic_f     = m_use_entropic_f;
 
+    // Reference T for the per-cell numerical safety net.  See the
+    // comment in macrodata_to_equilibrium.  Used at every site below
+    // that derives omega or p_by_rho from the cell-local T, so a
+    // catastrophically broken cell pulls toward T_ref instead of
+    // amplifying.
+    const amrex::Real l_T_ref = m_initialTemperature;
+
     const amrex::Real l_mesh_speed = m_mesh_speed;
     const stencil::Stencil stencil;
     const auto& evs = stencil.evs;
@@ -1415,9 +1581,16 @@ void LBM::relax_f_to_equilibrium(const int lev)
 
                 amrex::Real temperature =
                     md_arr(iv, constants::TEMPERATURE_IDX);
+                // Per-cell numerical safety net (see macrodata_to_equilibrium).
+                const amrex::Real T_safe =
+                    (!std::isfinite(temperature) ||
+                     temperature <= amrex::Real(0.0) ||
+                     temperature > amrex::Real(5.0) * l_T_ref)
+                        ? l_T_ref
+                        : temperature;
                 amrex::Real omega =
                     1.0 /
-                    (nu / (specific_gas_constant * temperature * dt) + 0.5);
+                    (nu / (specific_gas_constant * T_safe * dt) + 0.5);
 
                 // f and g are updated here only for plain BGK; the entropic
                 // path handles both f and g in a separate cell-loop below.
@@ -1488,9 +1661,16 @@ void LBM::relax_f_to_equilibrium(const int lev)
 
                 const amrex::Real temperature =
                     md_arr(iv, constants::TEMPERATURE_IDX);
+                // Per-cell numerical safety net (see macrodata_to_equilibrium).
+                const amrex::Real T_safe =
+                    (!std::isfinite(temperature) ||
+                     temperature <= amrex::Real(0.0) ||
+                     temperature > amrex::Real(5.0) * l_T_ref)
+                        ? l_T_ref
+                        : temperature;
                 const amrex::Real omega =
-                    1.0 / (nu / (specific_gas_constant * temperature * dt) + 0.5);
-                const amrex::Real p_by_rho = specific_gas_constant * temperature;
+                    1.0 / (nu / (specific_gas_constant * T_safe * dt) + 0.5);
+                const amrex::Real p_by_rho = specific_gas_constant * T_safe;
 
                 // BGK target (q-corrected, already stored in m_eq)
                 amrex::GpuArray<amrex::Real, NQ> eq_all;
@@ -1668,6 +1848,16 @@ void LBM::relax_f_to_equilibrium(const int lev)
         m_eq[lev].nGrowVect());
     {
         auto const& eq_unit_arrs = eq_unit.arrays();
+        // Per-kernel NaN-report throttle.  Without this, a single broken
+        // cell × 27 directions × thousands of cells fills tens of GB of log
+        // in seconds when the simulation goes unstable.  Cap the total
+        // number of [EQ_UNIT_NaN] printfs per relax_f_to_equilibrium()
+        // call at MAX_NAN_REPORTS — enough to characterize the failure
+        // pattern (a handful of cells with detailed q-direction info) but
+        // bounded.
+        constexpr int MAX_NAN_REPORTS = 16;
+        amrex::Gpu::DeviceScalar<int> ds_nan_eq(0);
+        int* p_nan_eq = ds_nan_eq.dataPtr();
         amrex::ParallelFor(
             eq_unit, eq_unit.nGrowVect(),
             [=] AMREX_GPU_DEVICE(
@@ -1679,11 +1869,18 @@ void LBM::relax_f_to_equilibrium(const int lev)
 
                     const amrex::Real temperature =
                         md_arr(iv, constants::TEMPERATURE_IDX);
-                    // Strict-positivity guard: skip cells where T is non-finite or non-positive.
-                    // Required to keep R_g*T > 0 so the H-function reference is well-defined.
-                    if (!std::isfinite(temperature) || temperature <= amrex::Real(0.0)) { return; }
+                    // Per-cell numerical safety net (see
+                    // macrodata_to_equilibrium).  Cells with broken T fall
+                    // back to T_ref locally so eq_ref/eq_flow remain
+                    // well-defined; m_macrodata is untouched.
+                    const amrex::Real T_safe =
+                        (!std::isfinite(temperature) ||
+                         temperature <= amrex::Real(0.0) ||
+                         temperature > amrex::Real(5.0) * l_T_ref)
+                            ? l_T_ref
+                            : temperature;
                     const amrex::Real p_by_rho =
-                        specific_gas_constant * temperature;
+                        specific_gas_constant * T_safe;
 
                     // Flow equilibrium: rho=1, local velocity
                     const amrex::RealVect vel = {AMREX_D_DECL(
@@ -1709,11 +1906,14 @@ void LBM::relax_f_to_equilibrium(const int lev)
                             1.0, zero_vel, p_by_rho, p_by_rho, p_by_rho,
                             l_mesh_speed, weight[q], evs[q]);
                         if (std::isnan(eq_flow) || std::isnan(eq_ref)) {
-                            printf("[EQ_UNIT_NaN] cell=(%d,%d,%d) q=%d "
-                                   "eq_flow=%e eq_ref=%e T=%e vel=(%e,%e,%e)\n",
-                                   iv[0], iv[1], iv[2], q,
-                                   eq_flow, eq_ref, temperature,
-                                   vel[0], vel[1], vel[2]);
+                            const int n = amrex::Gpu::Atomic::Add(p_nan_eq, 1);
+                            if (n < MAX_NAN_REPORTS) {
+                                printf("[EQ_UNIT_NaN] cell=(%d,%d,%d) q=%d "
+                                       "eq_flow=%e eq_ref=%e T=%e vel=(%e,%e,%e)\n",
+                                       iv[0], iv[1], iv[2], q,
+                                       eq_flow, eq_ref, temperature,
+                                       vel[0], vel[1], vel[2]);
+                            }
                         }
                         eq_unit_arr(iv, q) = eq_flow;
                         eq_unit_arr(iv, q + NQ) = eq_ref;
@@ -1727,6 +1927,11 @@ void LBM::relax_f_to_equilibrium(const int lev)
     for (int c = 0; c < m_n_components; ++c) {
         auto const& f_comp_arrs = m_component_lattices[c][lev].arrays();
         amrex::Real diff = m_component_diffusivities[c];
+
+        // Per-kernel NaN-report throttle (see eq_unit block above).
+        constexpr int MAX_NAN_REPORTS_COMP = 16;
+        amrex::Gpu::DeviceScalar<int> ds_nan_comp(0);
+        int* p_nan_comp = ds_nan_comp.dataPtr();
 
         amrex::ParallelFor(
             m_component_lattices[c][lev], m_eq[lev].nGrowVect(),
@@ -1745,16 +1950,24 @@ void LBM::relax_f_to_equilibrium(const int lev)
 
                     const amrex::Real temperature =
                         md_arr(iv, constants::TEMPERATURE_IDX);
-                    // Strict-positivity / mass guard: skip cells where T is
-                    // non-finite / non-positive or where the component density
-                    // is below floating-point noise.
-                    if (!std::isfinite(temperature) || temperature <= amrex::Real(0.0) ||
-                        rho_comp <= 1.0e-30) {
+                    // Per-cell numerical safety net (see
+                    // macrodata_to_equilibrium).  Cells with broken T are
+                    // evaluated at T_ref so omega_comp is well-defined and
+                    // the cell relaxes toward a valid local equilibrium.
+                    // Component density floor remains: cells with no
+                    // component mass have nothing meaningful to relax.
+                    if (rho_comp <= 1.0e-30) {
                         return; // leave populations unchanged
                     }
+                    const amrex::Real T_safe =
+                        (!std::isfinite(temperature) ||
+                         temperature <= amrex::Real(0.0) ||
+                         temperature > amrex::Real(5.0) * l_T_ref)
+                            ? l_T_ref
+                            : temperature;
                     const amrex::Real omega_comp =
                         1.0 /
-                        (diff / (specific_gas_constant * temperature * dt) +
+                        (diff / (specific_gas_constant * T_safe * dt) +
                          0.5);
 
                     // Scale cached unit-density shape by rho_comp
@@ -1849,14 +2062,17 @@ void LBM::relax_f_to_equilibrium(const int lev)
                         amrex::Real f_new = f_comp_arr(iv, q) +
                             alpha_use * (eq_all[q] - f_comp_arr(iv, q));
                         if (std::isnan(f_new) || std::isinf(f_new)) {
-                            printf("[COMP_NaN] cell=(%d,%d,%d) q=%d "
-                                   "f_old=%e eq=%e rho_comp=%e "
-                                   "T=%e omega_comp=%e alpha_use=%e "
-                                   "eq_unit_flow=%e eq_unit_ref=%e\n",
-                                   iv[0], iv[1], iv[2], q,
-                                   f_comp_arr(iv, q), eq_all[q], rho_comp,
-                                   temperature, omega_comp, alpha_use,
-                                   eq_unit_arr(iv, q), eq_unit_arr(iv, q + NQ));
+                            const int n = amrex::Gpu::Atomic::Add(p_nan_comp, 1);
+                            if (n < MAX_NAN_REPORTS_COMP) {
+                                printf("[COMP_NaN] cell=(%d,%d,%d) q=%d "
+                                       "f_old=%e eq=%e rho_comp=%e "
+                                       "T=%e omega_comp=%e alpha_use=%e "
+                                       "eq_unit_flow=%e eq_unit_ref=%e\n",
+                                       iv[0], iv[1], iv[2], q,
+                                       f_comp_arr(iv, q), eq_all[q], rho_comp,
+                                       temperature, omega_comp, alpha_use,
+                                       eq_unit_arr(iv, q), eq_unit_arr(iv, q + NQ));
+                            }
                         }
                         f_comp_arr(iv, q) = f_new;
                     }
@@ -6685,6 +6901,79 @@ void LBM::fslbm_advance_surface(const int lev)
     }
     m_cell_type[lev].FillBoundary(Geom(lev).periodicity());
 
+    // -----------------------------------------------------------------------
+    // Step 0_pre: Sweep stranded CELL_INTERFACE cells (topological test).
+    //
+    // Impeller splash, bursting bubbles, and surface chop occasionally
+    // detach small parcels of interface cells from the bulk fluid.  Once
+    // isolated, an interface cell:
+    //   - cannot drain via surface-tension / hydrostatic relaxation (no
+    //     LIQUID neighbour to push/pull mass through)
+    //   - keeps relaxing toward an equilibrium built from the asymmetric
+    //     f/g treatment at gas neighbours (ABB on f at ρ_ref vs.
+    //     bounce-back replenishment on g at local velocity).
+    // Over thousands of steps this asymmetry biases T < 0 in the parcel
+    // and eventually corrupts the bulk via FillBoundary stencils.
+    //
+    // Topological criterion: a cell is "stranded" iff
+    //   ct == CELL_INTERFACE
+    //   AND no CELL_LIQUID exists in a (2R+1)^3 box around it.
+    // R = m_fslbm_strand_search_radius (default 2 → 5x5x5 = 125 cells).
+    // R must be ≤ m_f_nghost (=3) so reads stay inside the ghost layer.
+    // R = 0 disables the sweep.
+    //
+    // This is geometry-independent: works for tilted surfaces, sloshing,
+    // deeply submerged moving bodies — anywhere a parcel of interface
+    // cells loses its physical connection to the bulk liquid system.
+    //
+    // Action: convert to CELL_GAS, zero φ, zero f, zero g.  The next
+    // fslbm_sync_isfluid_markers call (immediately below) will flip
+    // IS_FLUID → 0 so the cell stops contributing to the LBM update.
+    // Mass / energy lost ≈ a handful of cells × ρ_ref — physically
+    // negligible compared to the bulk fluid mass and to the mass leakage
+    // FSLBM already absorbs through the φ-normalisation pass.
+    //
+    // Placement: AFTER body-sync (so we don't undo a Case B vacate→LIQUID),
+    // BEFORE the existing fslbm_sync_isfluid_markers (which then derives
+    // the updated IS_FLUID from the cleaned-up cell_type).
+    // -----------------------------------------------------------------------
+    if (m_fslbm_strand_search_radius > 0) {
+        const int R = m_fslbm_strand_search_radius;
+        auto const& ct_str  = m_cell_type[lev].arrays();
+        auto const& phi_str = m_phi_fslbm[lev].arrays();
+        auto const& f_str   = m_f[lev].arrays();
+        auto const& g_str   = m_g[lev].arrays();
+        amrex::ParallelFor(
+            m_cell_type[lev], amrex::IntVect(0),
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                if (ct_str[nbx](i, j, k, 0) != CELL_INTERFACE) { return; }
+                // (2R+1)^3 box search with early exit on first LIQUID hit.
+                for (int dk = -R; dk <= R; ++dk) {
+                    for (int dj = -R; dj <= R; ++dj) {
+                        for (int di = -R; di <= R; ++di) {
+                            if (di == 0 && dj == 0 && dk == 0) { continue; }
+                            if (ct_str[nbx](i + di, j + dj, k + dk, 0)
+                                == CELL_LIQUID) {
+                                return; // connected to bulk — leave alone
+                            }
+                        }
+                    }
+                }
+                // Stranded: convert to gas and wipe populations.
+                ct_str[nbx](i, j, k, 0)  = CELL_GAS;
+                phi_str[nbx](i, j, k, 0) = amrex::Real(0.0);
+                for (int q = 0; q < N_MICRO_STATES; ++q) {
+                    f_str[nbx](i, j, k, q) = amrex::Real(0.0);
+                    g_str[nbx](i, j, k, q) = amrex::Real(0.0);
+                }
+            });
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
+        m_cell_type[lev].FillBoundary(Geom(lev).periodicity());
+        m_phi_fslbm[lev].FillBoundary(Geom(lev).periodicity());
+        m_f[lev].FillBoundary(Geom(lev).periodicity());
+        m_g[lev].FillBoundary(Geom(lev).periodicity());
+    }
+
     // Now that m_cell_type reflects the post-body-motion state, derive IS_FLUID
     // directly from it.  This corrects the IS_FLUID that refill_and_spill set from
     // the SDF (which used threshold=0.5 and would clobber FSLBM interface cells).
@@ -7027,11 +7316,56 @@ void LBM::fslbm_advance_surface(const int lev)
                 // Only apply if the source neighbor is GAS
                 if (ct_arrs[nbx](src, 0) != CELL_GAS) { return; }
 
-                const amrex::Real ux = md_arrs[nbx](iv, VELX_IDX);
-                const amrex::Real uy = md_arrs[nbx](iv, VELY_IDX);
-                const amrex::Real uz = md_arrs[nbx](iv, VELZ_IDX);
+                const amrex::Real ux_raw = md_arrs[nbx](iv, VELX_IDX);
+                const amrex::Real uy_raw = md_arrs[nbx](iv, VELY_IDX);
+                const amrex::Real uz_raw = md_arrs[nbx](iv, VELZ_IDX);
+
+                // ABB velocity cap (Mach 0.1).
+                //
+                // The Grad expansion inside set_extended_equilibrium_value
+                // is a 2nd-order Taylor in (u/c_s).  It is monotone and
+                // accurate for |u|/c_s ≲ 0.1 and grows progressively
+                // pathological above that.  At Ma ≈ 0.3+ the expansion
+                // produces non-monotone (and potentially negative)
+                // population values, which streaming then deposits into
+                // adjacent CELL_LIQUID neighbours as huge rho excursions
+                // (observed: surface-chop cell with |u|=0.43 at step
+                // 127800 produced ρ_max=717 in a neighbour 12 cells below
+                // the surface; chain reaction within ~1200 steps).
+                //
+                // Step 5b (gas→liquid spawn) already applies the same
+                // Ma-0.1 cap via l_spawn_u_max for the same reason.
+                // Apply it here for consistency: at high local Mach the
+                // cell can still hold its raw u in m_macrodata for
+                // visualisation, but the ABB reconstruction uses the
+                // capped velocity so the gas-side reconstruction stays
+                // in the validity range of the lattice equilibrium.
+                amrex::Real u_mag2 =
+                    ux_raw * ux_raw + uy_raw * uy_raw + uz_raw * uz_raw;
+                if (!std::isfinite(u_mag2)) { u_mag2 = amrex::Real(0.0); }
+                const amrex::Real u_max2 = l_spawn_u_max * l_spawn_u_max;
+                const amrex::Real scale =
+                    (u_mag2 > u_max2)
+                        ? std::sqrt(u_max2 / u_mag2)
+                        : amrex::Real(1.0);
+                const amrex::Real ux = ux_raw * scale;
+                const amrex::Real uy = uy_raw * scale;
+                const amrex::Real uz = uz_raw * scale;
                 const amrex::RealVect vel(AMREX_D_DECL(ux, uy, uz));
-                const amrex::Real T_iv = md_arrs[nbx](iv, TEMPERATURE_IDX);
+                const amrex::Real T_iv_raw =
+                    md_arrs[nbx](iv, TEMPERATURE_IDX);
+                // Mirror the per-cell T-safety net from the collision
+                // kernels (see macrodata_to_equilibrium): if the
+                // interface cell's macrodata T is non-finite, non-positive,
+                // or far outside the validity range, fall back to T_ref
+                // so the pressure tensor diagonal R_g·T stays positive
+                // and the equilibrium expansion stays well-defined.
+                const amrex::Real T_iv =
+                    (!std::isfinite(T_iv_raw) ||
+                     T_iv_raw <= amrex::Real(0.0) ||
+                     T_iv_raw > amrex::Real(5.0) * l_T_ref)
+                        ? l_T_ref
+                        : T_iv_raw;
 
                 // Gas-side density for ABB (Donath 2011, §2.3.3):
                 //   ρ_gas = p_gas / c_s² = (p_V + Δp_σ) / (R_g · T)

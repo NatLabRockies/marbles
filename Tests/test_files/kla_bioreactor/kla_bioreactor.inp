@@ -111,7 +111,19 @@ lbm.compute_forces = 1
 
 # Enable entropic alpha stabilisation — required for Sc = 500 scalar transport
 lbm.use_entropic_components = 1
-lbm.clamp_component_densities = 0
+# Component-lattice clamp based on the species mass fraction
+#   Y_c = rho_comp / rho_main.
+# Cells with Y_c outside [Y_min, Y_max] are rescaled (or zeroed if rho_main
+# is too small) back to the bound; cells inside the band are left untouched
+# so the small negative excursions from the entropic Newton during start-up
+# are preserved (zeroing them was found to break mass conservation in the
+# single-phase scalar transport validation tests).
+# Defaults Y_min=-0.1, Y_max=1.1 give 10x margin around the physical
+# range Y ∈ [0, 1].  Catches catastrophic runaways while preserving
+# transients.
+lbm.clamp_component_densities = 1
+# lbm.component_y_min = -0.1   # default
+# lbm.component_y_max =  1.1   # default
 
 # Entropic alpha stabilisation for the main f distribution.
 # Required: spill deposits create rho≈3.8 at impeller tips (far from equilibrium).
