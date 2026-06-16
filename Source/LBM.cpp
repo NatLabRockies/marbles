@@ -7678,30 +7678,64 @@ void LBM::fslbm_advance_surface(const int lev)
     //   S_q = 0.5*(phi_iv+phi_ivn) if ivn is INTERFACE
     //   S_q = 0               if ivn is GAS or SOLID
     // -----------------------------------------------------------------------
-    // Diagnostic: rho min/max for LIQUID and INTERFACE cells
+    // Diagnostic: rho min/max for LIQUID and INTERFACE cells, plus mass-budget
+    //   comp 0: rho on CELL_LIQUID cells (else 0)
+    //   comp 1: rho on CELL_INTERFACE cells (else 0)
+    //   comp 2: rho * phi on CELL_INTERFACE cells (volume-weighted liquid, else 0)
+    //   comp 3: 1 if cell is CELL_LIQUID    (else 0)  — cell counter
+    //   comp 4: 1 if cell is CELL_INTERFACE (else 0)  — cell counter
+    //   comp 5: 1 if cell is CELL_GAS       (else 0)  — cell counter
+    // Sums of comp 0 + comp 2 give total liquid mass (bulk + interface fill).
+    // Cell counts let us see whether descending interface is due to mass loss
+    // or to cells flipping LIQUID → INTERFACE → GAS.
     {
-        amrex::MultiFab rho_diag(boxArray(lev), DistributionMap(lev), 2, 0,
+        amrex::MultiFab rho_diag(boxArray(lev), DistributionMap(lev), 6, 0,
                                  amrex::MFInfo(), *(m_factory[lev]));
         rho_diag.setVal(amrex::Real(0.0));
         {
             auto const& rd   = rho_diag.arrays();
             auto const& f_ro = m_f[lev].const_arrays();
             auto const& ct   = m_cell_type[lev].const_arrays();
+            auto const& ph   = m_phi_fslbm[lev].const_arrays();
             amrex::ParallelFor(rho_diag,
                 [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
                     const int ctype = ct[nbx](i,j,k,0);
-                    if (ctype != CELL_LIQUID && ctype != CELL_INTERFACE) return;
-                    amrex::Real rho = amrex::Real(0.0);
-                    for (int q = 0; q < N_MICRO_STATES; ++q) rho += f_ro[nbx](i,j,k,q);
-                    if (ctype == CELL_LIQUID)    rd[nbx](i,j,k,0) = rho;
-                    if (ctype == CELL_INTERFACE) rd[nbx](i,j,k,1) = rho;
+                    if (ctype == CELL_LIQUID) {
+                        amrex::Real rho = amrex::Real(0.0);
+                        for (int q = 0; q < N_MICRO_STATES; ++q) rho += f_ro[nbx](i,j,k,q);
+                        rd[nbx](i,j,k,0) = rho;
+                        rd[nbx](i,j,k,3) = amrex::Real(1.0);
+                    } else if (ctype == CELL_INTERFACE) {
+                        amrex::Real rho = amrex::Real(0.0);
+                        for (int q = 0; q < N_MICRO_STATES; ++q) rho += f_ro[nbx](i,j,k,q);
+                        const amrex::Real phi = ph[nbx](i,j,k,0);
+                        rd[nbx](i,j,k,1) = rho;
+                        rd[nbx](i,j,k,2) = rho * phi;
+                        rd[nbx](i,j,k,4) = amrex::Real(1.0);
+                    } else if (ctype == CELL_GAS) {
+                        rd[nbx](i,j,k,5) = amrex::Real(1.0);
+                    }
                 });
             // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
         }
         if (m_print_int > 0 && m_isteps[0] % m_print_int == 0) {
+            const amrex::Real m_liq      = rho_diag.sum(0);
+            const amrex::Real m_ifc_bare = rho_diag.sum(1);
+            const amrex::Real m_ifc_vw   = rho_diag.sum(2);
+            const amrex::Real n_liq      = rho_diag.sum(3);
+            const amrex::Real n_ifc      = rho_diag.sum(4);
+            const amrex::Real n_gas      = rho_diag.sum(5);
             amrex::Print() << "FSLBM rho step=" << m_isteps[0]
                            << " liq=[" << rho_diag.min(0) << "," << rho_diag.max(0) << "]"
                            << " ifc=[" << rho_diag.min(1) << "," << rho_diag.max(1) << "]\n";
+            amrex::Print() << "[mass_diag step=" << m_isteps[0]
+                           << "] M_liq=" << m_liq
+                           << " M_ifc=" << m_ifc_bare
+                           << " M_ifc_vw=" << m_ifc_vw
+                           << " M_tot=" << (m_liq + m_ifc_vw)
+                           << " N_liq=" << static_cast<long>(n_liq)
+                           << " N_ifc=" << static_cast<long>(n_ifc)
+                           << " N_gas=" << static_cast<long>(n_gas) << "\n";
             if (rho_diag.max(0) > amrex::Real(2.0)) {
                 amrex::IntVect mx = rho_diag.maxIndex(0);
                 amrex::Print() << "  liq rho_max cell=" << mx << " step=" << m_isteps[0] << "\n";
@@ -7957,22 +7991,39 @@ void LBM::fslbm_advance_surface(const int lev)
                 if (ct_arrs[nbx](iv, 0) != CELL_INTERFACE) { return; }
 
                 amrex::Real total_excess = amrex::Real(0.0);
-                // Look at face-connected neighbors (6 directions)
-                for (int d = 0; d < AMREX_SPACEDIM; ++d) {
-                    const auto ep = amrex::IntVect::TheDimensionVector(d);
-                    for (int s : {+1, -1}) {
-                        const amrex::IntVect ivn = iv + s * ep;
-                        const amrex::Real fl = flag_arrs[nbx](ivn, 0);
-                        if (fl > amrex::Real(0.5) || fl < amrex::Real(-0.5)) {
-                            // This neighbor converted.  Count how many
-                            // INTERFACE cells are its neighbors (for equal split).
+                // Full 27-stencil on BOTH the receiver side (this loop) AND
+                // the recipient-count side (inner loop below).  Mass conservation
+                // requires both stencils to be identical: each converter's excess
+                // is split among its N_recip INTERFACE neighbours, and each
+                // recipient picks up shares from the converters that include it
+                // in their stencil.  The previous face-only (6-neighbour) version
+                // silently dropped excess whenever a converter had no face-
+                // INTERFACE neighbours (common during bubble-burst events that
+                // convert many surface cells simultaneously).
+                for (int di = -1; di <= 1; ++di) {
+                    for (int dj = -1; dj <= 1; ++dj) {
+                        for (int dk = -1; dk <= 1; ++dk) {
+                            if (di == 0 && dj == 0 && dk == 0) continue;
+                            const amrex::IntVect ivn(
+                                AMREX_D_DECL(iv[0] + di, iv[1] + dj, iv[2] + dk));
+                            const amrex::Real fl = flag_arrs[nbx](ivn, 0);
+                            if (!(fl > amrex::Real(0.5) || fl < amrex::Real(-0.5))) {
+                                continue;  // not a converter
+                            }
+                            // Converter at ivn: count its INTERFACE neighbours
+                            // using the SAME 27-stencil.
                             int n_ifc_nbrs = 0;
-                            for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
-                                const auto ep2 = amrex::IntVect::TheDimensionVector(dd);
-                                for (int ss : {+1, -1}) {
-                                    const amrex::IntVect ivnn = ivn + ss * ep2;
-                                    if (ct_arrs[nbx](ivnn, 0) == CELL_INTERFACE) {
-                                        ++n_ifc_nbrs;
+                            for (int ddi = -1; ddi <= 1; ++ddi) {
+                                for (int ddj = -1; ddj <= 1; ++ddj) {
+                                    for (int ddk = -1; ddk <= 1; ++ddk) {
+                                        if (ddi == 0 && ddj == 0 && ddk == 0) continue;
+                                        const amrex::IntVect ivnn(
+                                            AMREX_D_DECL(ivn[0] + ddi,
+                                                         ivn[1] + ddj,
+                                                         ivn[2] + ddk));
+                                        if (ct_arrs[nbx](ivnn, 0) == CELL_INTERFACE) {
+                                            ++n_ifc_nbrs;
+                                        }
                                     }
                                 }
                             }
@@ -7993,6 +8044,55 @@ void LBM::fslbm_advance_surface(const int lev)
                 }
             });
         // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 5a (diagnostic): mass-budget audit.
+    // For every converter (flag != 0), check whether it had at least one
+    // CELL_INTERFACE neighbour in the 27-stencil at distribution time.
+    // Converters with zero recipients contribute their full excess to
+    // unrecoverable mass loss.  Sum and print the totals so we can quantify
+    // whether the widened stencil is sufficient or whether a further fallback
+    // (global accumulator, search radius expansion, etc.) is needed.
+    // -----------------------------------------------------------------------
+    if (m_print_int > 0 && m_isteps[0] % m_print_int == 0) {
+        amrex::MultiFab leak_diag(boxArray(lev), DistributionMap(lev), 3, 0,
+                                  amrex::MFInfo(), *(m_factory[lev]));
+        leak_diag.setVal(amrex::Real(0.0));
+        {
+            auto const& ld_arrs   = leak_diag.arrays();
+            auto const& flag_arrs = mass_flux.const_arrays();
+            auto const& ct_arrs   = m_cell_type[lev].const_arrays();
+            amrex::ParallelFor(
+                leak_diag,
+                [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                    const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
+                    const amrex::Real fl = flag_arrs[nbx](iv, 0);
+                    if (!(fl > amrex::Real(0.5) || fl < amrex::Real(-0.5))) return;
+                    int n_ifc_nbrs = 0;
+                    for (int ddi = -1; ddi <= 1; ++ddi)
+                    for (int ddj = -1; ddj <= 1; ++ddj)
+                    for (int ddk = -1; ddk <= 1; ++ddk) {
+                        if (ddi == 0 && ddj == 0 && ddk == 0) continue;
+                        const amrex::IntVect ivnn(
+                            AMREX_D_DECL(iv[0]+ddi, iv[1]+ddj, iv[2]+ddk));
+                        if (ct_arrs[nbx](ivnn, 0) == CELL_INTERFACE) ++n_ifc_nbrs;
+                    }
+                    const amrex::Real excess = flag_arrs[nbx](iv, 1);
+                    ld_arrs[nbx](i,j,k,0) = amrex::Real(1.0);                 // converter count
+                    if (n_ifc_nbrs == 0) {
+                        ld_arrs[nbx](i,j,k,1) = amrex::Real(1.0);             // lost converter count
+                        ld_arrs[nbx](i,j,k,2) = excess;                       // lost mass
+                    }
+                });
+        }
+        const amrex::Real n_conv      = leak_diag.sum(0);
+        const amrex::Real n_lost      = leak_diag.sum(1);
+        const amrex::Real m_lost_step = leak_diag.sum(2);
+        amrex::Print() << "[leak_diag step=" << m_isteps[0]
+                       << "] N_conv=" << static_cast<long>(n_conv)
+                       << " N_lost=" << static_cast<long>(n_lost)
+                       << " M_lost_step=" << m_lost_step << "\n";
     }
 
     // -----------------------------------------------------------------------
@@ -8027,13 +8127,23 @@ void LBM::fslbm_advance_surface(const int lev)
 
                 bool neighbor_converted_to_gas    = false;
                 bool neighbor_converted_to_liquid = false;
-                for (int d = 0; d < AMREX_SPACEDIM; ++d) {
-                    const auto ep = amrex::IntVect::TheDimensionVector(d);
-                    for (int s : {+1, -1}) {
-                        const amrex::Real fl = flag_arrs_ro[nbx](iv + s * ep, 0);
-                        if (fl > amrex::Real(0.5))  neighbor_converted_to_gas    = true;
-                        if (fl < amrex::Real(-0.5)) neighbor_converted_to_liquid = true;
-                    }
+                // Full 27-stencil: LBM streams along all 26 D3Q27 directions,
+                // so the INTERFACE band must be maintained for ALL 26 LIQUID-GAS
+                // adjacencies, not just the 6 face ones.  Face-only checks left
+                // LIQUID and GAS cells corner-adjacent to each other after a
+                // diagonal/edge converter event; the next Step 1a push from
+                // LIQUID toward that GAS neighbour drops f_q on the floor
+                // (Step 1a writes nothing for GAS neighbours), causing a slow
+                // monotone mass leak unrelated to bubble bursts.
+                for (int di = -1; di <= 1; ++di)
+                for (int dj = -1; dj <= 1; ++dj)
+                for (int dk = -1; dk <= 1; ++dk) {
+                    if (di == 0 && dj == 0 && dk == 0) continue;
+                    const amrex::IntVect ivn_chk(
+                        AMREX_D_DECL(iv[0]+di, iv[1]+dj, iv[2]+dk));
+                    const amrex::Real fl = flag_arrs_ro[nbx](ivn_chk, 0);
+                    if (fl > amrex::Real(0.5))  neighbor_converted_to_gas    = true;
+                    if (fl < amrex::Real(-0.5)) neighbor_converted_to_liquid = true;
                 }
 
                 if (ct == CELL_LIQUID && neighbor_converted_to_gas) {
