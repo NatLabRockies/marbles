@@ -431,6 +431,7 @@ void LBM::read_parameters()
             pp.query("fslbm_sigma",          m_fslbm_sigma);
             pp.query("fslbm_contact_angle",  m_fslbm_contact_angle_deg);
             pp.query("fslbm_strand_search_radius", m_fslbm_strand_search_radius);
+            pp.query("fslbm_interface_isothermal", m_fslbm_interface_isothermal);
 
             amrex::Print() << "\n=== Free Surface Configuration (FSLBM) ===" << std::endl;
             amrex::Print() << "  Interface z (LB cells)   : " << m_free_surface_z << std::endl;
@@ -448,6 +449,9 @@ void LBM::read_parameters()
             } else {
                 amrex::Print() << "  Stranded-cell sweep      : DISABLED" << std::endl;
             }
+            amrex::Print() << "  Interface T = T_ref BC   : "
+                           << (m_fslbm_interface_isothermal ? "ON  (g rebuilt at T_ref each step on CELL_INTERFACE)" : "OFF (interface T evolves from g moments)")
+                           << std::endl;
         }
     }
 
@@ -1605,6 +1609,27 @@ void LBM::relax_f_to_equilibrium(const int lev)
     const amrex::Real l_T_ref = m_initialTemperature;
     const bool fs_active = m_free_surface;
 
+    // Dirichlet T = T_ref boundary condition at FSLBM interface cells.
+    // When active (lbm.fslbm_interface_isothermal = 1), every
+    // CELL_INTERFACE cell has its g distribution overwritten with
+    // g_eq(rho, vel, T_ref) after each collision branch.  See the
+    // comment block at the declaration of m_fslbm_interface_isothermal
+    // in LBM.H.  The flag is gated on m_free_surface (only meaningful
+    // for FSLBM runs).
+    const bool interface_isothermal =
+        m_free_surface && m_fslbm_interface_isothermal;
+    const amrex::Real l_cv = specific_gas_constant
+                             / (m_adiabaticExponent - amrex::Real(1.0));
+    const amrex::Real l_theta0 = stencil::Stencil::THETA0;
+    // Only build the const_arrays handle when we actually need it
+    // (m_cell_type is only allocated in FSLBM runs).  Use a single
+    // dummy MultiFab for the non-FSLBM path so the kernel capture is
+    // always valid; the kernel never reads from it because the
+    // interface_isothermal branch is dead-code in that case.
+    auto const& ct_arrs_relax = interface_isothermal
+        ? m_cell_type[lev].const_arrays()
+        : m_is_fluid[lev].const_arrays(); // unused capture placeholder
+
     const amrex::Real l_mesh_speed = m_mesh_speed;
     const stencil::Stencil stencil;
     const auto& evs = stencil.evs;
@@ -1648,7 +1673,12 @@ void LBM::relax_f_to_equilibrium(const int lev)
                     g_arr(iv, q) += omega * (eq_arr_g(iv, q) - g_arr(iv, q));
 
                     if (body_is_isothermal) {
-                        if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_SIDE_IDX) == 1) {
+                        // Thermal BC applies to layer 1 AND layer 2 fluid cells
+                        // adjacent to the moving body — single-layer reach was
+                        // missing isolated voxels at impeller-tip corners where
+                        // the IS_FLUID_SIDE neighbour test fails geometrically.
+                        if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_SIDE_IDX) == 1 ||
+                            is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_SIDE_BOUNDARY_IDX) == 1) {
                             g_arr(iv, q) = eq_arr_g(iv, q);
                         }
                     }
@@ -1860,9 +1890,13 @@ void LBM::relax_f_to_equilibrium(const int lev)
                         (eq_arr_g(iv, q) - g_arr(iv, q));
                 }
 
-                // Isothermal forcing on g for boundary layer cells
+                // Isothermal forcing on g for boundary layer cells — layers 1+2
+                // around the moving body.  Layer 2 inclusion covers isolated
+                // voxels at impeller-tip corners that the strict-layer-1 mask
+                // misses (no CELL_SOLID neighbour in the 27-stencil).
                 if (body_is_isothermal) {
-                    if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_SIDE_IDX) == 1) {
+                    if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_SIDE_IDX) == 1 ||
+                        is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_SIDE_BOUNDARY_IDX) == 1) {
                         for (int q = 0; q < NQ; ++q) {
                             g_arr(iv, q) = eq_arr_g(iv, q);
                         }
@@ -2132,14 +2166,84 @@ void LBM::relax_f_to_equilibrium(const int lev)
                         f_comp_arr(iv, q) = f_new;
                     }
 
-                    // Force component to equilibrium on layer 1
+                    // Force component to equilibrium on body boundary layers 1+2.
+                    // Mirrors the g-lattice extension above for consistency.
                     if (body_is_isothermal) {
-                        if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_SIDE_IDX) == 1) {
+                        if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_SIDE_IDX) == 1 ||
+                            is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_SIDE_BOUNDARY_IDX) == 1) {
                             for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
                                 f_comp_arr(iv, q) = eq_all[q];
                             }
                         }
                     }
+                }
+            });
+    }
+
+    // -------------------------------------------------------------------
+    // Dirichlet thermal boundary at FSLBM CELL_INTERFACE cells: T = T_ref.
+    // After all collision branches, for every CELL_INTERFACE cell, rebuild
+    // g_eq using the cell's actual (rho, u) and T = T_ref, then overwrite
+    // g_arr.  This is the lattice analogue of "the gas headspace is in
+    // thermal equilibrium with atmosphere" — surface tension and vapour
+    // transport homogenise temperature across the interface much faster
+    // than the lattice can resolve, so any T anomaly injected by the ABB
+    // / replenish_g / streaming asymmetries at the interface is healed
+    // within one step instead of accumulating over thousands of steps.
+    //
+    // f is left untouched, so mass and momentum are conserved.  Only the
+    // energy lattice g is constrained, and only at the (one-cell-thick)
+    // interface band — the bulk fluid evolves freely, so any nontrivial
+    // thermal physics in the liquid bulk is preserved.
+    //
+    // Gated on m_free_surface AND m_fslbm_interface_isothermal.  Default
+    // off; activate via lbm.fslbm_interface_isothermal = 1.
+    // -------------------------------------------------------------------
+    if (interface_isothermal) {
+        constexpr int NQ = constants::N_MICRO_STATES;
+        const amrex::Real two_rho_e_unit_fac =
+            amrex::Real(2.0) * l_cv * l_T_ref;
+        amrex::ParallelFor(
+            m_f[lev], m_eq[lev].nGrowVect(),
+            [=] AMREX_GPU_DEVICE(
+                int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k)) noexcept {
+                const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
+                if (ct_arrs_relax[nbx](iv, 0) != lbm::constants::CELL_INTERFACE) {
+                    return;
+                }
+                const auto md_arr = md_arrs[nbx];
+                const auto g_arr  = g_arrs[nbx];
+
+                const amrex::Real rho = md_arr(iv, lbm::constants::RHO_IDX);
+                const amrex::RealVect vel = {AMREX_D_DECL(
+                    md_arr(iv, lbm::constants::VELX_IDX),
+                    md_arr(iv, lbm::constants::VELY_IDX),
+                    md_arr(iv, lbm::constants::VELZ_IDX))};
+                const amrex::Real u2 = AMREX_D_TERM(vel[0]*vel[0],
+                                                    + vel[1]*vel[1],
+                                                    + vel[2]*vel[2]);
+                // 2*rho*e at T_ref:  2*rho*e = rho*(2*Cv*T + |u|^2)
+                const amrex::Real two_rho_e =
+                    rho * (two_rho_e_unit_fac + u2);
+
+                // Pure-equilibrium g target at T_ref (heat-flux
+                // vector and off-equilibrium stress corrections all
+                // zero — by construction of "pure equilibrium").
+                amrex::RealVect heat_flux = {AMREX_D_DECL(0, 0, 0)};
+                amrex::Real rxx_eq(0), ryy_eq(0), rzz_eq(0),
+                            rxy_eq(0), rxz_eq(0), ryz_eq(0);
+                get_equilibrium_moments(
+                    rho, vel, two_rho_e, l_cv, specific_gas_constant,
+                    heat_flux, rxx_eq, ryy_eq, rzz_eq,
+                    rxy_eq, rxz_eq, ryz_eq);
+                const amrex::GpuArray<amrex::Real, 6> flux_of_heat_flux = {
+                    rxx_eq, ryy_eq, rzz_eq, rxy_eq, rxz_eq, ryz_eq};
+                const amrex::RealVect zero_vec{AMREX_D_DECL(0, 0, 0)};
+                for (int q = 0; q < NQ; ++q) {
+                    g_arr(iv, q) = set_extended_grad_expansion_generic(
+                        two_rho_e, heat_flux, flux_of_heat_flux,
+                        l_mesh_speed, weight[q], evs[q],
+                        l_theta0, zero_vec, amrex::Real(1.0));
                 }
             });
     }
@@ -2309,7 +2413,12 @@ void LBM::f_to_macrodata(const int lev)
                 temperature = get_temperature(two_rho_e, rho, u, v, w, cv);
 
                 if (body_is_isothermal) {
-                    if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_SIDE_IDX) == 1) {
+                    // Clamp T to body_temperature on layers 1+2 around the
+                    // moving body.  Layer 2 inclusion catches voxels at
+                    // impeller-tip corners whose 27-stencil contains no
+                    // CELL_SOLID neighbour (geometric quirk of thin blade tips).
+                    if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_SIDE_IDX) == 1 ||
+                        is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_SIDE_BOUNDARY_IDX) == 1) {
                         temperature = body_temperature;
                     }
                 }
@@ -6545,6 +6654,16 @@ void LBM::apply_bubble_o2_source(int lev, const amrex::MultiFab& o2_src_mf)
 
     const amrex::Real specific_gas_constant = m_R_u / m_m_bar;
     const amrex::Real l_mesh_speed          = m_mesh_speed;
+    // T_ref pinning at FSLBM CELL_INTERFACE cells.  When
+    // lbm.fslbm_interface_isothermal is on, the equilibrium shape used
+    // to deposit the O2 source must match the interface BC (T = T_ref);
+    // otherwise the bubble source injects mass at the cell's currently-
+    // measured T, which over many steps drifts the interface T away from
+    // T_ref and undoes the BC.  Bulk LIQUID cells continue to use the
+    // local T as before.
+    const amrex::Real l_T_ref = m_initialTemperature;
+    const bool interface_isothermal =
+        m_free_surface && m_fslbm_interface_isothermal;
 
     const stencil::Stencil stencil;
     const auto& evs    = stencil.evs;
@@ -6554,6 +6673,11 @@ void LBM::apply_bubble_o2_source(int lev, const amrex::MultiFab& o2_src_mf)
     auto const& src_arrs      = o2_src_mf.const_arrays();
     auto const& md_arrs       = m_macrodata[lev].const_arrays();
     auto const& fO2_arrs      = m_component_lattices[0][lev].arrays();
+    // Same placeholder pattern as relax_f_to_equilibrium: when the BC
+    // is off (or m_cell_type is unallocated) ct_arrs is unused.
+    auto const& ct_arrs = interface_isothermal
+        ? m_cell_type[lev].const_arrays()
+        : m_is_fluid[lev].const_arrays();
 
     amrex::ParallelFor(
         m_component_lattices[0][lev], amrex::IntVect(0),
@@ -6571,13 +6695,21 @@ void LBM::apply_bubble_o2_source(int lev, const amrex::MultiFab& o2_src_mf)
             // Max physical: ~100 mol/(m³·s) × conv ≈ 1.2e-5 LB_rho/step.
             if (!std::isfinite(d_rho) || amrex::Math::abs(d_rho) > 1.0e-3) { return; }
 
-            // Local fluid velocity and r_temperature = (R/m_bar)*T = P/rho
+            // Local fluid velocity and r_temperature = (R/m_bar)*T = P/rho.
+            // For CELL_INTERFACE under the isothermal BC, override T with
+            // T_ref so the deposit is consistent with the interface
+            // boundary condition.
             const amrex::RealVect vel = {AMREX_D_DECL(
                 md_arrs[nbx](iv, constants::VELX_IDX),
                 md_arrs[nbx](iv, constants::VELY_IDX),
                 md_arrs[nbx](iv, constants::VELZ_IDX))};
-            const amrex::Real r_temperature =
-                specific_gas_constant * md_arrs[nbx](iv, constants::TEMPERATURE_IDX);
+            const bool use_T_ref =
+                interface_isothermal &&
+                (ct_arrs[nbx](iv, 0) == lbm::constants::CELL_INTERFACE);
+            const amrex::Real T_used = use_T_ref
+                ? l_T_ref
+                : md_arrs[nbx](iv, constants::TEMPERATURE_IDX);
+            const amrex::Real r_temperature = specific_gas_constant * T_used;
 
             // Equilibrium stress entries (no viscous correction — pure kinematic)
             const amrex::Real pxx_eq = vel[0]*vel[0] + r_temperature;
@@ -6924,6 +7056,13 @@ void LBM::fslbm_advance_surface(const int lev)
     const amrex::Real l_cs_Tref       = std::sqrt(
         m_adiabaticExponent * l_Rg * l_T_ref);
     const amrex::Real l_spawn_u_max   = amrex::Real(0.1) * l_cs_Tref;
+    // When the FSLBM interface T = T_ref boundary condition is active,
+    // every CELL_INTERFACE in the run is pinned to T_ref each step.
+    // Step 5b spawn cells are by construction CELL_INTERFACE; seeding
+    // them at the donor-averaged T_avg (which itself is now T_ref) is
+    // equivalent to seeding at T_ref directly, but we make this explicit
+    // to avoid any drift introduced by the donor average.
+    const bool l_interface_isothermal = m_fslbm_interface_isothermal;
     // Surface tension + Laplace-pressure density correction for ABB BC.
     // Δρ_G = -2*sigma*kappa / (Rg * T_interface); when sigma=0 this is zero.
     const amrex::Real l_sigma              = m_fslbm_sigma;
@@ -7474,12 +7613,28 @@ void LBM::fslbm_advance_surface(const int lev)
                 // or far outside the validity range, fall back to T_ref
                 // so the pressure tensor diagonal R_g·T stays positive
                 // and the equilibrium expansion stays well-defined.
+                //
+                // Additionally, when the FSLBM interface T = T_ref BC
+                // is active (lbm.fslbm_interface_isothermal = 1), the
+                // ABB reconstruction MUST also use T_ref so f and g
+                // see a consistent thermodynamic state at the interface.
+                // The post-collision BC pins g to T_ref each step, but
+                // ABB runs before the BC kicks in for this step (it's
+                // part of the streaming sub-step at the start of
+                // fslbm_advance_surface), so we explicitly enforce
+                // T_ref here rather than relying on whatever macrodata
+                // happened to read after the previous step.  The
+                // macroscopic T in m_macrodata is left untouched (it's
+                // observation-only at this point in the step), so this
+                // does not affect any other kernel.
                 const amrex::Real T_iv =
-                    (!std::isfinite(T_iv_raw) ||
-                     T_iv_raw <= amrex::Real(0.0) ||
-                     T_iv_raw > amrex::Real(5.0) * l_T_ref)
+                    l_interface_isothermal
                         ? l_T_ref
-                        : T_iv_raw;
+                        : ((!std::isfinite(T_iv_raw) ||
+                            T_iv_raw <= amrex::Real(0.0) ||
+                            T_iv_raw > amrex::Real(5.0) * l_T_ref)
+                               ? l_T_ref
+                               : T_iv_raw);
 
                 // Gas-side density for ABB (Donath 2011, §2.3.3):
                 //   ρ_gas = p_gas / c_s² = (p_V + Δp_σ) / (R_g · T)
@@ -8028,6 +8183,14 @@ void LBM::fslbm_advance_surface(const int lev)
                             uz_avg = amrex::Real(0.0);
                             T_avg  = l_T_ref;
                         }
+                    }
+
+                    // Interface T=T_ref boundary condition (when active):
+                    // spawn cells are by construction CELL_INTERFACE.  Use
+                    // T_ref directly for the seed equilibrium so the BC is
+                    // consistent on the very first step the cell exists.
+                    if (l_interface_isothermal) {
+                        T_avg = l_T_ref;
                     }
 
                     // Build equilibrium f, g at (ρ_ref, u_avg, T_avg).

@@ -532,6 +532,26 @@ private:
     // Set via lbm.fslbm_strand_search_radius in the input file.
     int m_fslbm_strand_search_radius = 2;
 
+    // Dirichlet thermal boundary condition at FSLBM interface cells:
+    //   T(CELL_INTERFACE) = T_ref  (= m_initialTemperature)
+    // Physical justification: the gas headspace (and any free-surface
+    // interface cell facing it) is in thermal equilibrium with the
+    // atmospheric reservoir.  Surface tension / vapour transport
+    // homogenises temperature across the interface much faster than
+    // the lattice can resolve.
+    //
+    // Implementation: after the normal collision step, for each
+    // CELL_INTERFACE cell, REBUILD g_eq using the cell's actual
+    // (rho, u) and T = T_ref, then overwrite g_arr.  f is left
+    // untouched, so mass and momentum are conserved.  Any T anomaly
+    // injected by the ABB / replenish_g / streaming asymmetries at
+    // the interface is healed within one step instead of accumulating
+    // over thousands of steps until a single cell blows up.
+    //
+    // Default 0 (legacy: interface T evolves freely from g moments).
+    // Set lbm.fslbm_interface_isothermal = 1 to activate.
+    bool m_fslbm_interface_isothermal = false;
+
     // Moving body parameters
     bool m_body_is_moving = false;
     amrex::GpuArray<amrex::Real, 3> m_body_velocity = {0.0, 0.0, 0.0};
