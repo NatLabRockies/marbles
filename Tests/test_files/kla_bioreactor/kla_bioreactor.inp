@@ -260,6 +260,13 @@ ic_constant_component_0.initial_temperature = 0.03333
 body.is_moving = true
 body.velocity = 0.0 0.0 0.0
 body.angular_velocity = 0.0 0.0 0.0005  # rad/step  => 400 RPM physical  (Ma=0.067)
+# Linear startup ramp on the angular velocity to avoid hitting walls at full
+# Mach during spin-up (the from-zero run 14310435 produced rho=300+ at the
+# baffle wall during steps ~125000 with instant-on).  The ramp interpolates
+# linearly from 0 at step 0 to the target above at step ramp_steps.
+# 50000 steps = 0.597 s physical (roughly 4 impeller revolutions at target
+# RPM, and ~0.6x the bench-scale spin-up time).  Set 0 for legacy instant-on.
+body.angular_velocity_ramp_steps = 50000
 # Impeller centre: horizontal centre of tank, 50 cells off bottom (z = -90+50=-40)
 body.center = 90.0 90.0 -40.0
 

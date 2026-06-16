@@ -140,6 +140,12 @@ public:
     // position/orientation without numerical diffusion.
     void reconstruct_body_sdf(const int lev, amrex::Real time);
 
+    // Update m_body_angular_velocity from the target value and the ramp
+    // schedule.  No-op when m_body_angular_velocity_ramp_steps == 0
+    // (legacy instant-on behaviour).  Called at the start of advance()
+    // before any kernel captures m_body_angular_velocity.
+    void update_body_angular_velocity_for_ramp();
+
     // Advance the conservative phase-field (Chiu & Lin 2011, Eq. 18) for
     // the free liquid-gas surface by one LBM time step.
     // Evolves m_is_fluid_fraction in place; calls refill_and_spill internally.
@@ -529,7 +535,20 @@ private:
     // Moving body parameters
     bool m_body_is_moving = false;
     amrex::GpuArray<amrex::Real, 3> m_body_velocity = {0.0, 0.0, 0.0};
+    // m_body_angular_velocity is the CURRENT (possibly ramped) angular
+    // velocity used by every body kernel.  m_body_angular_velocity_target
+    // is the steady-state value read from the input file
+    // (body.angular_velocity).  m_body_angular_velocity_ramp_steps
+    // controls a linear ramp at startup (step 0 -> 0; ramp_steps -> target):
+    //   0  : no ramp; impeller spins at the target rate from step 0 (legacy)
+    //   N>0: omega(step) = (step / N) * target   for step <= N
+    //        omega(step) =                target for step >  N
+    // A long ramp lets the wall boundary layers develop without seeing the
+    // full Ma=0.067 jet at startup, which produced CELL_LIQUID rho
+    // excursions to ~300 at the baffle wall in run 14310435 (from-zero).
     amrex::GpuArray<amrex::Real, 3> m_body_angular_velocity = {0.0, 0.0, 0.0};
+    amrex::GpuArray<amrex::Real, 3> m_body_angular_velocity_target = {0.0, 0.0, 0.0};
+    int m_body_angular_velocity_ramp_steps = 0;
     amrex::GpuArray<amrex::Real, 3> m_body_center = {0.0, 0.0, 0.0};
     amrex::Real m_body_rotation_angle = 0.0;  // accumulated rotation
     std::string m_body_geom_type = "";

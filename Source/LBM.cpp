@@ -377,19 +377,40 @@ void LBM::read_parameters()
         pp.queryarr("velocity", vel_tmp, 0, 3);
         pp.queryarr("angular_velocity", omega_tmp, 0, 3);
         pp.queryarr("center", center_tmp, 0, 3);
-        
+        pp.query("angular_velocity_ramp_steps",
+                 m_body_angular_velocity_ramp_steps);
+
         for (int i = 0; i < 3; ++i) {
             m_body_velocity[i] = vel_tmp[i];
-            m_body_angular_velocity[i] = omega_tmp[i];
+            // Target = what the user typed in body.angular_velocity.
+            // The mutable m_body_angular_velocity (the value all body
+            // kernels read) starts at 0 if a ramp is requested,
+            // otherwise jumps to the target immediately.  The current
+            // value is recomputed each advance() step in
+            // update_body_angular_velocity_for_ramp().
+            m_body_angular_velocity_target[i] = omega_tmp[i];
+            m_body_angular_velocity[i] =
+                (m_body_angular_velocity_ramp_steps > 0)
+                    ? amrex::Real(0.0)
+                    : omega_tmp[i];
             m_body_center[i] = center_tmp[i];
         }
-        
+
         if (m_body_is_moving) {
             amrex::Print() << "\n=== Moving Body Configuration ===" << std::endl;
             amrex::Print() << "Body velocity: (" << m_body_velocity[0] << ", "
                           << m_body_velocity[1] << ", " << m_body_velocity[2] << ")" << std::endl;
-            amrex::Print() << "Angular velocity: (" << m_body_angular_velocity[0] << ", "
-                          << m_body_angular_velocity[1] << ", " << m_body_angular_velocity[2] << ")" << std::endl;
+            amrex::Print() << "Angular velocity (target): ("
+                          << m_body_angular_velocity_target[0] << ", "
+                          << m_body_angular_velocity_target[1] << ", "
+                          << m_body_angular_velocity_target[2] << ")" << std::endl;
+            if (m_body_angular_velocity_ramp_steps > 0) {
+                amrex::Print() << "Angular velocity ramp: linear over "
+                              << m_body_angular_velocity_ramp_steps
+                              << " steps (step 0 -> 0; ramp_steps -> target)" << std::endl;
+            } else {
+                amrex::Print() << "Angular velocity ramp: disabled (instant-on at step 0)" << std::endl;
+            }
             amrex::Print() << "Rotation center: (" << m_body_center[0] << ", "
                           << m_body_center[1] << ", " << m_body_center[2] << ")" << std::endl;
         }
@@ -750,6 +771,12 @@ void LBM::advance(
 
     m_ts_old[lev] = m_ts_new[lev]; // old time is now current time (time)
     m_ts_new[lev] += dt_lev;       // new time is ahead
+
+    // Update m_body_angular_velocity from the ramp schedule before any
+    // body kernel runs.  No-op when ramp_steps == 0 (legacy behaviour).
+    if (m_body_is_moving) {
+        update_body_angular_velocity_for_ramp();
+    }
 
     // --- O2 mass tracking diagnostic (per-step) --- DISABLED for performance
     // To re-enable: uncomment this block and the corresponding measurement blocks below.
@@ -4071,6 +4098,47 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
     m_is_fluid[lev].FillBoundary(Geom(lev).periodicity());
 }
 
+void LBM::update_body_angular_velocity_for_ramp()
+{
+    BL_PROFILE("LBM::update_body_angular_velocity_for_ramp()");
+
+    // No-op path: legacy instant-on (ramp_steps == 0).  After end of
+    // ramp also no-op (target stays clamped on entry once reached).
+    const int N = m_body_angular_velocity_ramp_steps;
+    if (N <= 0) {
+        // Ensure target is in effect even if user sets target after init.
+        for (int i = 0; i < 3; ++i) {
+            m_body_angular_velocity[i] = m_body_angular_velocity_target[i];
+        }
+        return;
+    }
+
+    // Linear ramp.  Use level-0 step index — the body is rigid, so its
+    // angular velocity is a single global property; refining levels
+    // do not change the schedule.
+    const int step = m_isteps[0];
+    amrex::Real frac = (step >= N)
+                           ? amrex::Real(1.0)
+                           : (static_cast<amrex::Real>(step)
+                              / static_cast<amrex::Real>(N));
+    for (int i = 0; i < 3; ++i) {
+        m_body_angular_velocity[i] =
+            frac * m_body_angular_velocity_target[i];
+    }
+
+    // First few steps and the final clamp step report the new value so
+    // we can verify the schedule from the log.  After ramp completion
+    // we go silent (the steady-state target value won't change again).
+    if (m_print_int > 0 && (step % m_print_int == 0) && step <= N) {
+        amrex::Print() << "[body_omega_ramp step=" << step
+                       << "] frac=" << frac
+                       << " omega=("
+                       << m_body_angular_velocity[0] << ","
+                       << m_body_angular_velocity[1] << ","
+                       << m_body_angular_velocity[2] << ")\n";
+    }
+}
+
 void LBM::reconstruct_body_sdf(const int lev, amrex::Real time)
 {
     BL_PROFILE("LBM::reconstruct_body_sdf()");
@@ -5225,20 +5293,38 @@ void LBM::read_checkpoint_file()
     }
 
     // Restore the accumulated impeller rotation angle so that
-    // initialize_is_fluid → reconstruct_body_sdf places the moving body at
+    // initialize_is_fluid -> reconstruct_body_sdf places the moving body at
     // the correct angular position from the checkpoint, not at angle = 0.
     // Without this the impeller snaps from angle=0 to its true position in
     // the very first advance step, triggering a full-domain refill_and_spill.
+    //
+    // Integrating omega(s) ds across a linear ramp [0, N]:
+    //   if T <= N:   theta = (omega_target / 2) * (T^2 / N)
+    //   if T  > N:   theta = omega_target * (T - 0.5 * N)
+    // Reduces to omega_target * T when N == 0 (no ramp; legacy behaviour).
     if (m_body_is_moving) {
-        const amrex::Real omega_mag = std::sqrt(
-            m_body_angular_velocity[0] * m_body_angular_velocity[0] +
-            m_body_angular_velocity[1] * m_body_angular_velocity[1] +
-            m_body_angular_velocity[2] * m_body_angular_velocity[2]);
-        m_body_rotation_angle = omega_mag * m_ts_new[0];
+        const amrex::Real omega_mag_target = std::sqrt(
+            m_body_angular_velocity_target[0] * m_body_angular_velocity_target[0] +
+            m_body_angular_velocity_target[1] * m_body_angular_velocity_target[1] +
+            m_body_angular_velocity_target[2] * m_body_angular_velocity_target[2]);
+        const amrex::Real T = m_ts_new[0];
+        const int N = m_body_angular_velocity_ramp_steps;
+        amrex::Real theta = 0.0;
+        if (N <= 0) {
+            theta = omega_mag_target * T;
+        } else if (T <= static_cast<amrex::Real>(N)) {
+            theta = amrex::Real(0.5) * omega_mag_target * (T * T)
+                  / static_cast<amrex::Real>(N);
+        } else {
+            theta = omega_mag_target *
+                    (T - amrex::Real(0.5) * static_cast<amrex::Real>(N));
+        }
+        m_body_rotation_angle = theta;
         amrex::Print() << "[restart] Restored body rotation angle = "
                        << m_body_rotation_angle
-                       << " rad  (omega=" << omega_mag
-                       << " rad/step × " << m_ts_new[0] << " steps)\n";
+                       << " rad  (omega_target=" << omega_mag_target
+                       << " rad/step, ramp_steps=" << N
+                       << ", restart step=" << T << ")\n";
     }
 
     // Populate the other data
