@@ -7192,6 +7192,13 @@ void LBM::fslbm_advance_surface(const int lev)
     // -----------------------------------------------------------------------
     if (m_fslbm_strand_search_radius > 0) {
         const int R = m_fslbm_strand_search_radius;
+        // Per-step diagnostic: count stranded cells and the M_tot mass lost
+        // by zeroing them.  At conversion time the cell's contribution to
+        // M_tot is phi*rho (real liquid mass), so we accumulate that.
+        amrex::MultiFab strand_diag(boxArray(lev), DistributionMap(lev), 2, 0,
+                                    amrex::MFInfo(), *(m_factory[lev]));
+        strand_diag.setVal(amrex::Real(0.0));
+        auto const& sd_arrs = strand_diag.arrays();
         auto const& ct_str  = m_cell_type[lev].arrays();
         auto const& phi_str = m_phi_fslbm[lev].arrays();
         auto const& f_str   = m_f[lev].arrays();
@@ -7212,7 +7219,12 @@ void LBM::fslbm_advance_surface(const int lev)
                         }
                     }
                 }
-                // Stranded: convert to gas and wipe populations.
+                // Stranded: account for the M_tot loss before wiping.
+                amrex::Real rho_str = amrex::Real(0.0);
+                for (int q = 0; q < N_MICRO_STATES; ++q)
+                    rho_str += f_str[nbx](i, j, k, q);
+                sd_arrs[nbx](i, j, k, 0) = amrex::Real(1.0);                       // count
+                sd_arrs[nbx](i, j, k, 1) = phi_str[nbx](i, j, k, 0) * rho_str;     // M_tot lost
                 ct_str[nbx](i, j, k, 0)  = CELL_GAS;
                 phi_str[nbx](i, j, k, 0) = amrex::Real(0.0);
                 for (int q = 0; q < N_MICRO_STATES; ++q) {
@@ -7221,6 +7233,13 @@ void LBM::fslbm_advance_surface(const int lev)
                 }
             });
         // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
+        if (m_print_int > 0 && m_isteps[0] % m_print_int == 0) {
+            const amrex::Real n_str = strand_diag.sum(0);
+            const amrex::Real m_str = strand_diag.sum(1);
+            amrex::Print() << "[strand_diag step=" << m_isteps[0]
+                           << "] N_strand=" << static_cast<long>(n_str)
+                           << " M_strand=" << m_str << "\n";
+        }
         m_cell_type[lev].FillBoundary(Geom(lev).periodicity());
         m_phi_fslbm[lev].FillBoundary(Geom(lev).periodicity());
         m_f[lev].FillBoundary(Geom(lev).periodicity());
@@ -7242,7 +7261,15 @@ void LBM::fslbm_advance_surface(const int lev)
     // -----------------------------------------------------------------------
     {
         const amrex::Real rho_repair_threshold = amrex::Real(0.01) * l_fslbm_rho_ref;
+        // Per-step diagnostic: count low-rho repairs and the M_tot mass injected.
+        // Repair re-seeds f to feq(rho_ref); cell contribution to M_tot grows from
+        // phi*rho_old to phi*rho_ref, gain = phi*(rho_ref - rho_old).
+        amrex::MultiFab repair_diag(boxArray(lev), DistributionMap(lev), 2, 0,
+                                    amrex::MFInfo(), *(m_factory[lev]));
+        repair_diag.setVal(amrex::Real(0.0));
+        auto const& rd_arrs = repair_diag.arrays();
         auto const& ct_r   = m_cell_type[lev].const_arrays();
+        auto const& phi_r  = m_phi_fslbm[lev].const_arrays();
         auto const& f_r    = m_f[lev].arrays();
         auto const& g_r    = m_g[lev].arrays();
         const auto& l_evs_r     = evs;
@@ -7258,6 +7285,13 @@ void LBM::fslbm_advance_surface(const int lev)
                 amrex::Real rho = amrex::Real(0.0);
                 for (int q = 0; q < N_MICRO_STATES; ++q) rho += f_r[nbx](i, j, k, q);
                 if (rho >= rho_repair_threshold) { return; }
+                // Account for M_tot injection.  Effective phi for the contribution
+                // is 1 for LIQUID, phi for INTERFACE.
+                const amrex::Real phi_eff = (ct == CELL_INTERFACE)
+                    ? phi_r[nbx](i, j, k, 0)
+                    : amrex::Real(1.0);
+                rd_arrs[nbx](i, j, k, 0) = amrex::Real(1.0);                  // count
+                rd_arrs[nbx](i, j, k, 1) = phi_eff * (l_fslbm_rho_ref - rho); // M_tot injected
                 // Seed f to feq(rho_ref, u=0, T_ref) and g to the correct
                 // thermal equilibrium g_eq(2ρe_ref, u=0, T_ref).
                 const amrex::RealVect zero_vel(AMREX_D_DECL(0, 0, 0));
@@ -7283,6 +7317,13 @@ void LBM::fslbm_advance_surface(const int lev)
                 }
             });
         // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
+        if (m_print_int > 0 && m_isteps[0] % m_print_int == 0) {
+            const amrex::Real n_rep = repair_diag.sum(0);
+            const amrex::Real m_rep = repair_diag.sum(1);
+            amrex::Print() << "[repair_diag step=" << m_isteps[0]
+                           << "] N_repair=" << static_cast<long>(n_rep)
+                           << " M_repair_inj=" << m_rep << "\n";
+        }
     }
     m_f[lev].FillBoundary(Geom(lev).periodicity());
     m_g[lev].FillBoundary(Geom(lev).periodicity());
@@ -7311,7 +7352,15 @@ void LBM::fslbm_advance_surface(const int lev)
     // -----------------------------------------------------------------------
     {
         const amrex::Real rho_ceil_ifc = amrex::Real(5.0) * l_fslbm_rho_ref;
+        // Per-step diagnostic: count overshoot clamps and the M_tot mass lost.
+        // Clamp resets f to feq(rho_ref); cell contribution to M_tot drops from
+        // phi*rho_old to phi*rho_ref, loss = phi*(rho_old - rho_ref).
+        amrex::MultiFab clamp_diag(boxArray(lev), DistributionMap(lev), 2, 0,
+                                   amrex::MFInfo(), *(m_factory[lev]));
+        clamp_diag.setVal(amrex::Real(0.0));
+        auto const& cd_arrs = clamp_diag.arrays();
         auto const& ct_ob   = m_cell_type[lev].const_arrays();
+        auto const& phi_ob  = m_phi_fslbm[lev].const_arrays();
         auto const& f_ob    = m_f[lev].arrays();
         auto const& g_ob    = m_g[lev].arrays();
         const auto& l_evs_ob     = evs;
@@ -7333,6 +7382,14 @@ void LBM::fslbm_advance_surface(const int lev)
                     ? rho_ceil_ifc
                     : amrex::Real(1.0e30);  // only catches NaN/Inf for LIQUID
                 if (!(rho > rho_ceil)) { return; }
+                // Account for M_tot loss.  rho here may be NaN/Inf for the
+                // LIQUID NaN-catch path; in that case the recorded loss is
+                // bogus, but the count is still valid.
+                const amrex::Real phi_eff = (ct == CELL_INTERFACE)
+                    ? phi_ob[nbx](i, j, k, 0)
+                    : amrex::Real(1.0);
+                cd_arrs[nbx](i, j, k, 0) = amrex::Real(1.0);                              // count
+                cd_arrs[nbx](i, j, k, 1) = phi_eff * (rho - l_fslbm_rho_ref);              // M_tot lost
                 const amrex::RealVect zero_vel(AMREX_D_DECL(0, 0, 0));
                 amrex::RealVect heat_flux_ob(AMREX_D_DECL(0, 0, 0));
                 const amrex::Real two_rho_e_ob = get_energy(
@@ -7356,6 +7413,13 @@ void LBM::fslbm_advance_surface(const int lev)
                 }
             });
         // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
+        if (m_print_int > 0 && m_isteps[0] % m_print_int == 0) {
+            const amrex::Real n_clp = clamp_diag.sum(0);
+            const amrex::Real m_clp = clamp_diag.sum(1);
+            amrex::Print() << "[clamp_diag step=" << m_isteps[0]
+                           << "] N_clamp=" << static_cast<long>(n_clp)
+                           << " M_clamp_lost=" << m_clp << "\n";
+        }
     }
     m_f[lev].FillBoundary(Geom(lev).periodicity());
     m_g[lev].FillBoundary(Geom(lev).periodicity());
@@ -8111,12 +8175,29 @@ void LBM::fslbm_advance_surface(const int lev)
     m_f[lev].FillBoundary(Geom(lev).periodicity());
     m_g[lev].FillBoundary(Geom(lev).periodicity());
     {
+        // Per-step diagnostic for Step 5b spawn-mass accounting.
+        //   comp 0: 1 if demote (LIQUID -> INTERFACE)   else 0
+        //   comp 1: M_tot loss for demote = (1 - PHI_HI) * rho
+        //   comp 2: 1 if promote (GAS -> INTERFACE)     else 0
+        //   comp 3: M_tot gain for promote = PHI_LO * rho_ref
+        // Always allocated (4 components, ~8MB at 180^3) so the kernel can
+        // unconditionally capture / write; only summed and printed on
+        // diagnostic steps.
+        amrex::MultiFab spawn_diag(boxArray(lev), DistributionMap(lev), 4, 0,
+                                   amrex::MFInfo(), *(m_factory[lev]));
+        spawn_diag.setVal(amrex::Real(0.0));
+        const bool diag_active =
+            (m_print_int > 0 && m_isteps[0] % m_print_int == 0);
+
         auto const& ct_arrs   = m_cell_type[lev].arrays();
         auto const& phi_arrs  = m_phi_fslbm[lev].arrays();
         auto const& f_arrs    = m_f[lev].arrays();
         auto const& g_arrs    = m_g[lev].arrays();
         auto const& flag_arrs_ro = mass_flux.const_arrays();
         auto const& flag_arrs    = mass_flux.arrays();
+        auto const& sd_arrs   = spawn_diag.arrays();
+        const amrex::Real l_phi_hi_local = FSLBM_PHI_HI;
+        const amrex::Real l_phi_lo_local = FSLBM_PHI_LO;
 
         amrex::ParallelFor(
             m_cell_type[lev],
@@ -8151,6 +8232,12 @@ void LBM::fslbm_advance_surface(const int lev)
                     ct_arrs[nbx](iv, 0)  = CELL_INTERFACE;
                     phi_arrs[nbx](iv, 0) = FSLBM_PHI_HI;
                     // PDFs already valid (cell was LIQUID)
+                    amrex::Real rho_pre = amrex::Real(0.0);
+                    for (int q = 0; q < N_MICRO_STATES; ++q)
+                        rho_pre += f_arrs[nbx](iv, q);
+                    sd_arrs[nbx](i, j, k, 0) = amrex::Real(1.0);
+                    sd_arrs[nbx](i, j, k, 1) =
+                        (amrex::Real(1.0) - l_phi_hi_local) * rho_pre;
                 } else if (ct == CELL_GAS && neighbor_converted_to_liquid) {
                     // -----------------------------------------------------
                     // Promote GAS → INTERFACE.  Reconstruct (f, g) from a
@@ -8343,9 +8430,24 @@ void LBM::fslbm_advance_surface(const int lev)
                             l_mesh_speed, weights[q], evs[q],
                             l_theta0, zero_vec_n, amrex::Real(1.0));
                     }
+                    sd_arrs[nbx](i, j, k, 2) = amrex::Real(1.0);
+                    sd_arrs[nbx](i, j, k, 3) =
+                        l_phi_lo_local * l_fslbm_rho_ref;
                 }
             });
         // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
+        if (diag_active) {
+            const amrex::Real n_dem = spawn_diag.sum(0);
+            const amrex::Real m_dem = spawn_diag.sum(1);
+            const amrex::Real n_pro = spawn_diag.sum(2);
+            const amrex::Real m_pro = spawn_diag.sum(3);
+            amrex::Print() << "[spawn_diag step=" << m_isteps[0]
+                           << "] N_demote=" << static_cast<long>(n_dem)
+                           << " M_demote_loss=" << m_dem
+                           << " N_promote=" << static_cast<long>(n_pro)
+                           << " M_promote_gain=" << m_pro
+                           << " net=" << (m_pro - m_dem) << "\n";
+        }
     }
 
     // -----------------------------------------------------------------------
