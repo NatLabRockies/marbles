@@ -162,6 +162,47 @@ lbm.fslbm_contact_angle = 90.0
 # lattices are unaffected — mass and momentum conservation untouched.
 lbm.fslbm_interface_isothermal = 1
 
+# Step 1b ABB local-density blending (Option B mass-conservation fix).
+# Replace the gas-side ABB target density
+#   ρ_G = ρ_ref + Δρ_laplace
+# with
+#   ρ_G = (1 − β) · ρ_ref + β · ρ_iv_smooth + Δρ_laplace
+# where ρ_iv_smooth is a 6-face-neighbour average of CELL_LIQUID/CELL_INTERFACE
+# pre-stream densities.  β = 0 reproduces legacy behaviour (mass leak).
+# β > 0 reduces the systematic asymmetry at INTERFACE-GAS links in the
+# compressible regime.  Empirically β ≤ 0.3 is stable; β ≥ 0.5 risks
+# positive feedback.  In compressible kLa runs β = 0.2 EMPIRICALLY MADE THE
+# LEAK 30× WORSE (~17/step vs 0.5/step) — Schwarzmeier 2023 §5 "no variant
+# balances forces at a free interface in motion" applies.  Reverted to 0.
+lbm.fslbm_abb_local_rho_blend = 0.0
+
+# Variant D: ABB φ-correction (Schwarzmeier 2023 motivated; Marbles original).
+# Snapshot Σ_q f at every CELL_INTERFACE before Step 1a, recompute after
+# Step 3, subtract the un-weighted bulk streaming flux Δm_full; route the
+# residual Δm_ABB into the φ field.  In compressible kLa runs (14397288,
+# 14416145) this destabilised the interface band — N_ifc roughly doubled
+# within 13k steps and M_tot drained ~25× faster than the no-correction
+# baseline.  Per-cell ABB-only routing is too noisy.  Disabled.
+lbm.fslbm_abb_mass_correction = 0
+
+# Variant E: global f₀ mass clamp (June 2026, recommended).
+# At end of every fslbm_advance_surface call:
+#   M_current  = Σ_{LIQ} ρ + Σ_{IFC} φ·ρ        (same as [mass_diag] M_tot)
+#   ε_cell     = (M_target − M_current) / N_ifc
+#   f[iv][0]  += ε_cell  for every CELL_INTERFACE cell
+# Since c_0 = 0, this preserves momentum, stress, and all higher moments
+# — only ρ shifts.  M_target is captured at the first call (≈ initial
+# fill mass).  Per-pass restoration is ε_cell · Σ_{IFC} φ ≈ 0.5·deficit,
+# so 99% of any transient gap closes within ~10 steps; the slight
+# under-relaxation is intentionally stabilising.
+lbm.fslbm_global_mass_clamp = 1
+# Interval (steps) between clamp passes.  Each pass costs ~150 µs on 180³ H100
+# (one MultiFab::sum reduction + small kernel + FillBoundary on m_f).  At
+# leak rate ~1 mass/step and target ~3.4e6, N=10 keeps deficit bounded
+# at ~10 units (3e-6 relative) which is well below noise.  Set to 1 to
+# clamp every step (~3% step-time overhead, exact mass preservation).
+lbm.fslbm_global_mass_clamp_interval = 10
+
 # ---------------------------------------------------------------
 # Bubble module
 # ---------------------------------------------------------------
@@ -251,6 +292,22 @@ bubble.eps_max        = 50.0         # m²/s³
 # Statistics output
 bubble.stats_int  = 800             # steps between CSV writes (~0.01 s physical)
 bubble.stats_file = "bubble_stats.csv"
+
+# Force-deposition safety mechanisms (June 2026).
+# Run 14348303 reached |F_x|=1253 LB units at step 205000 (vs typical ~1e-4),
+# correlated with the receding free surface and bubble passage through cells
+# of unphysical state.  Two independent guards keep this bounded:
+#
+#  (1) force_cap_factor: cap |F_couple| at cap·m_eff·|g| (≈50× gravity).
+#      Set 0 to disable.  Default 50 = ample headroom over physical peaks
+#      while bounded enough to prevent unbounded LB injection.
+#  (2) require_liquid_host: skip force deposit when the bubble's host
+#      cell is not CELL_LIQUID (i.e. bubble is in INTERFACE / GAS / SOLID).
+#      Drag/added-mass calculated from interpolated u_fluid in those cells
+#      is unphysical (gas-side ABB equilibrium, ρ≈0, etc.).  Set 0 to
+#      disable.  Default 1 (enabled).
+bubble.force_cap_factor    = 50.0
+bubble.require_liquid_host = 1
 
 # ---------------------------------------------------------------
 # Initial conditions

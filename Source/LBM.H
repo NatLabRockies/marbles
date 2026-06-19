@@ -552,6 +552,111 @@ private:
     // Set lbm.fslbm_interface_isothermal = 1 to activate.
     bool m_fslbm_interface_isothermal = false;
 
+    // Local-density blending for the Step 1b ABB gas-side target ρ_G.
+    //
+    // Compressible-FSLBM mass leak (June 2026): with ρ_G = ρ_ref and
+    // local cells driven to ρ_iv > ρ_ref by the impeller-driven flow,
+    // each INTERFACE-GAS link injects ≈ 2·w_q·(ρ_G − ρ_iv) of mass,
+    // which is systematically negative in the entire surface band.
+    // Summed over ~88k cells × ~10 gas links per step ≈ −2-3 mass/step.
+    //
+    // The Donath/Körner FSLBM hides this because they assume
+    // incompressibility (ρ_iv ≈ ρ_ref).  In the compressible regime,
+    // we blend the ABB target toward the local cell density:
+    //
+    //   ρ_G = (1 − β) · ρ_ref + β · ρ_iv_smoothed   (then add Δρ_laplace)
+    //
+    // where ρ_iv_smoothed is a 6-face-neighbour-average of CELL_LIQUID
+    // and CELL_INTERFACE densities (skipping GAS/SOLID).  β=0 is the
+    // legacy ρ_G = ρ_ref.  β=1 is fully local — the existing code
+    // comment in Step 1b warns this creates a positive feedback loop;
+    // empirically β ≤ 0.3 is safe.  Recommended for compressible runs:
+    // β = 0.2.  Set lbm.fslbm_abb_local_rho_blend in the input file.
+    amrex::Real m_fslbm_abb_local_rho_blend = 0.0;
+
+    // Per-cell phi-correction (Variant D, June 2026; corrected formula).
+    //
+    // Closes the FSLBM compressible-regime mass leak by routing only
+    // the GAS-link ABB-induced f-mass change at INTERFACE cells back
+    // into the phi field.  Per-cell algorithm at each FSLBM step:
+    //   m_pre[iv]   = Σ_q f[iv][q]                       (Step 0c snapshot, comp 0)
+    //   Δm_full[iv] = Σ_{q : nbr(q) ∈ LIQ/IFC}            (Step 0c, comp 1)
+    //                    ( f_pre[nbr(q)][bq] − f_pre[iv][q] )
+    //   ... step 1a / 1b / 2 / 3 / 4 run ...
+    //   m_post[iv]  = Σ_q f[iv][q]                       (after Step 3)
+    //   Δm_ABB      = (m_post − m_pre) − Δm_full
+    //   phi[iv] -= Δm_ABB / max(rho_post, ε·ρ_ref)
+    //
+    // Δm_full is the un-weighted (S_q ≡ 1) bulk-fluid streaming flux —
+    // i.e. what the post-stream m_post would be if there were no ABB.
+    // Subtracting it from (m_post − m_pre) leaves precisely the GAS-link
+    // ABB residual, which is the actual leak.  Solid bounce-back at iv
+    // contributes 0 to (m_post − m_pre) so it needs no separate term.
+    //
+    // f and g moments are NOT modified, so velocity, temperature, and
+    // stress are untouched.  Only phi (the volume-fraction ledger) is
+    // adjusted.  Schwarzmeier 2023 §3.3 proves no ABB variant balances
+    // forces at moving interfaces, so the leak is fundamental; this
+    // closes the bookkeeping at the post-processing level.
+    //
+    // The previous (mass_flux[0]-based) formulation was incorrect: it
+    // used Step 2's Körner-weighted Δm_intended in place of Δm_full,
+    // which leaks (1 − S_q)·flux at every IFC-IFC link into "unintended"
+    // and destabilises the interface band (run 14397288: 6× worse leak
+    // than the no-correction baseline 14348303).
+    //
+    // Default 0 (legacy: leak observable as M_tot drift).  Set
+    // lbm.fslbm_abb_mass_correction = 1 to activate.
+    bool m_fslbm_abb_mass_correction = false;
+
+    // Per-cell pre-FSLBM-step buffer used by the phi correction above.
+    // Allocated 2 components, no ghost.  Filled at the very top of
+    // fslbm_advance_surface for INTERFACE cells; read by the correction
+    // kernel just after Step 4.
+    //   comp 0: m_pre   = Σ_q f_pre[iv][q]
+    //   comp 1: Δm_full = un-weighted Σ over LIQ/IFC links
+    amrex::Vector<amrex::MultiFab> m_pre_fslbm_mass;
+
+    // Variant E: global f₀ mass clamp (June 2026).
+    //
+    // At the end of each fslbm_advance_surface call, compute the current
+    // total fluid mass
+    //   M_current = Σ_{LIQUID} ρ_iv + Σ_{INTERFACE} φ_iv · ρ_iv
+    // (same formula the [mass_diag] line prints as M_tot), compare with
+    // the target captured at the first call, and inject the per-cell
+    // deficit
+    //   ε_cell = (M_target − M_current) / N_ifc
+    // into f[iv][0] at every CELL_INTERFACE cell.  Because c₀ = 0, the
+    // injection preserves momentum, stress, heat-flux contribution, and
+    // every other moment of f — only ρ shifts.  Per-pass mass restoration
+    // is ε_cell · Σ_{IFC} φ_iv ≈ 0.5·deficit (under-relaxed by <φ>_ifc),
+    // so 99% of any transient gap closes within ~10 steps; the slight
+    // under-relaxation is intentionally stabilising.
+    //
+    // Default 0.  Set lbm.fslbm_global_mass_clamp = 1 to activate.
+    // Mutually compatible with Variant D, though enabling both is
+    // pointless (E does the bookkeeping correction globally).
+    bool m_fslbm_global_mass_clamp = false;
+
+    // Interval (in steps) between clamp passes.  Each pass costs ~one
+    // 3-component MultiFab::sum() + one small ParallelFor over
+    // CELL_INTERFACE cells + one FillBoundary on m_f (~150 µs/step on
+    // 180³ H100, or ~3% of step time; worse on multi-GPU where the
+    // reduction crosses the network).  Default 10 keeps the deficit
+    // bounded at ~10× per-step leak (~10 mass units = 3×10⁻⁶ relative
+    // to M_target ~3.4e6) which is still well below noise.  Set to 1
+    // to clamp every step.  Ignored when m_fslbm_global_mass_clamp = 0.
+    int m_fslbm_global_mass_clamp_interval = 10;
+
+    // Target mass captured at first call to fslbm_advance_surface.  Stays
+    // < 0 until then; on first call M_target = M_current_at_step_0.
+    // NOTE: not currently checkpointed — restarts re-capture from the
+    // first post-restart step (so M_target locks in any leak that
+    // occurred up to the checkpoint).  Acceptable for cold-start runs;
+    // restart support is a few-line addition in read_checkpoint_file
+    // if/when needed.
+    amrex::Real m_fslbm_mass_target = amrex::Real(-1.0);
+
     // Moving body parameters
     bool m_body_is_moving = false;
     amrex::GpuArray<amrex::Real, 3> m_body_velocity = {0.0, 0.0, 0.0};

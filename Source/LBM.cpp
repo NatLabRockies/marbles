@@ -128,6 +128,7 @@ LBM::LBM()
     m_stationary_mask.resize(nlevs_max);
     m_cell_type.resize(nlevs_max);
     m_phi_fslbm.resize(nlevs_max);
+    m_pre_fslbm_mass.resize(nlevs_max);
 
     m_factory.resize(nlevs_max);
     // BCs
@@ -432,6 +433,11 @@ void LBM::read_parameters()
             pp.query("fslbm_contact_angle",  m_fslbm_contact_angle_deg);
             pp.query("fslbm_strand_search_radius", m_fslbm_strand_search_radius);
             pp.query("fslbm_interface_isothermal", m_fslbm_interface_isothermal);
+            pp.query("fslbm_abb_local_rho_blend", m_fslbm_abb_local_rho_blend);
+            pp.query("fslbm_abb_mass_correction", m_fslbm_abb_mass_correction);
+            pp.query("fslbm_global_mass_clamp", m_fslbm_global_mass_clamp);
+            pp.query("fslbm_global_mass_clamp_interval",
+                     m_fslbm_global_mass_clamp_interval);
 
             amrex::Print() << "\n=== Free Surface Configuration (FSLBM) ===" << std::endl;
             amrex::Print() << "  Interface z (LB cells)   : " << m_free_surface_z << std::endl;
@@ -452,6 +458,28 @@ void LBM::read_parameters()
             amrex::Print() << "  Interface T = T_ref BC   : "
                            << (m_fslbm_interface_isothermal ? "ON  (g rebuilt at T_ref each step on CELL_INTERFACE)" : "OFF (interface T evolves from g moments)")
                            << std::endl;
+            amrex::Print() << "  ABB local-ρ blend β      : "
+                           << m_fslbm_abb_local_rho_blend
+                           << (m_fslbm_abb_local_rho_blend > 0.0
+                                  ? "  (Option B: ρ_G = (1−β)·ρ_ref + β·<ρ_iv>_neighbour-avg)"
+                                  : "  (legacy: ρ_G = ρ_ref; mass leak in compressible regime)")
+                           << std::endl;
+            amrex::Print() << "  ABB mass correction       : "
+                           << (m_fslbm_abb_mass_correction
+                                  ? "ON  (Variant D: route unintended ABB f-mass change into φ field)"
+                                  : "OFF (legacy: f-mass change is silent leak)")
+                           << std::endl;
+            amrex::Print() << "  Global f₀ mass clamp      : "
+                           << (m_fslbm_global_mass_clamp
+                                  ? "ON  (Variant E: per-step ε = (M_target − M_current)/N_ifc into f[iv][0])"
+                                  : "OFF")
+                           << std::endl;
+            if (m_fslbm_global_mass_clamp) {
+                amrex::Print() << "  Global clamp interval    : every "
+                               << m_fslbm_global_mass_clamp_interval
+                               << " step(s)"
+                               << std::endl;
+            }
         }
     }
 
@@ -2731,6 +2759,8 @@ void LBM::MakeNewLevelFromCoarse(
     m_cell_type[lev].setVal(constants::CELL_LIQUID);
     m_phi_fslbm[lev].define(ba, dm, 1, m_f_nghost);
     m_phi_fslbm[lev].setVal(amrex::Real(1.0));
+    m_pre_fslbm_mass[lev].define(ba, dm, 2, 0);
+    m_pre_fslbm_mass[lev].setVal(amrex::Real(0.0));
 
     m_ts_new[lev] = time;
     m_ts_old[lev] = constants::LOW_NUM;
@@ -2816,6 +2846,8 @@ void LBM::MakeNewLevelFromScratch(
     m_cell_type[lev].setVal(constants::CELL_LIQUID);
     m_phi_fslbm[lev].define(ba, dm, 1, m_f_nghost);
     m_phi_fslbm[lev].setVal(amrex::Real(1.0));
+    m_pre_fslbm_mass[lev].define(ba, dm, 2, 0);
+    m_pre_fslbm_mass[lev].setVal(amrex::Real(0.0));
 
     m_ts_new[lev] = time;
     m_ts_old[lev] = constants::LOW_NUM;
@@ -4573,6 +4605,8 @@ void LBM::RemakeLevel(
     m_cell_type[lev].setVal(constants::CELL_LIQUID);
     m_phi_fslbm[lev].define(ba, dm, 1, m_f_nghost);
     m_phi_fslbm[lev].setVal(amrex::Real(1.0));
+    m_pre_fslbm_mass[lev].define(ba, dm, 2, 0);
+    m_pre_fslbm_mass[lev].setVal(amrex::Real(0.0));
 
     initialize_is_fluid(lev);
     initialize_mask(lev);
@@ -4615,6 +4649,7 @@ void LBM::ClearLevel(int lev)
     m_mask[lev].clear();
     m_cell_type[lev].clear();
     m_phi_fslbm[lev].clear();
+    m_pre_fslbm_mass[lev].clear();
 }
 
 // Set the user defined BC functions
@@ -5327,6 +5362,13 @@ void LBM::read_checkpoint_file()
         // next CUDA stream sync.
         m_stationary_mask[lev].define(
             ba, dm, 1, m_is_fluid[lev].nGrow());
+        // m_pre_fslbm_mass is NOT checkpointed (transient per-step buffer for
+        // ABB φ-correction; refilled at the start of every
+        // fslbm_advance_surface call when m_fslbm_abb_mass_correction is on).
+        // It just needs to exist so the snapshot kernel has valid storage on
+        // restart.  Comp 0 = m_pre, comp 1 = Δm_full (un-weighted streaming).
+        m_pre_fslbm_mass[lev].define(ba, dm, 2, 0);
+        m_pre_fslbm_mass[lev].setVal(amrex::Real(0.0));
     }
 
     // read in the MultiFab data
@@ -7066,6 +7108,11 @@ void LBM::fslbm_advance_surface(const int lev)
     // Surface tension + Laplace-pressure density correction for ABB BC.
     // Δρ_G = -2*sigma*kappa / (Rg * T_interface); when sigma=0 this is zero.
     const amrex::Real l_sigma              = m_fslbm_sigma;
+    // Step 1b ABB: blend factor between ρ_ref (legacy) and a smoothed local
+    // density.  See LBM.H comment on m_fslbm_abb_local_rho_blend.  β=0 keeps
+    // legacy behaviour (mass leak); β>0 reduces the systematic asymmetry at
+    // INTERFACE-GAS links by tracking the local cell density.
+    const amrex::Real l_abb_local_rho_blend = m_fslbm_abb_local_rho_blend;
     // Contact angle θ_W: cos(θ) used as ghost-phi modifier for solid neighbors.
     // φ_ghost = φ_fluid + cos(θ) * |∇_tangential φ|
     // θ=90° → cos=0 → φ_ghost = φ_fluid (neutral wetting, original Körner).
@@ -7425,6 +7472,80 @@ void LBM::fslbm_advance_surface(const int lev)
     m_g[lev].FillBoundary(Geom(lev).periodicity());
 
     // -----------------------------------------------------------------------
+    // Step 0c: Pre-FSLBM snapshot (Variant D φ-correction).
+    //
+    // Capture two per-INTERFACE-cell quantities BEFORE Step 1a/1b run:
+    //
+    //   comp 0 = m_pre    = Σ_q f_pre[iv][q]
+    //   comp 1 = Δm_full  = Σ_{q : nbr(q) ∈ LIQ/IFC}
+    //                          ( f_pre[nbr(q)][bq] − f_pre[iv][q] )
+    //
+    // Δm_full is the bulk-fluid streaming flux that LANDS at iv from its
+    // LIQ/IFC neighbours, with NO Körner wet-area weighting (S_q ≡ 1).
+    // It equals the part of (m_post − m_pre) that comes purely from
+    // ordinary streaming on fluid links.  The remaining part is the
+    // ABB-induced flux from gas links, which is precisely the "leak" we
+    // want to absorb into the φ ledger:
+    //
+    //   Δm_ABB = (m_post − m_pre) − Δm_full
+    //
+    // Solid bounce-back contributes 0 to (m_post − m_pre): the bounce
+    // writes f_star[iv][bq] = f_pre[iv][q], removing exactly the same
+    // amount that the push of f_pre[iv][q] subtracts from iv's slot q.
+    // We therefore do NOT add a solid term to Δm_full.
+    //
+    // The link enumeration mirrors Step 2 (uses `evs`, `bounce_dirs`,
+    // `fbox`), differing only in the unit weight S_q ≡ 1 for fluid
+    // neighbours.  m_f / m_cell_type ghost cells were just refreshed
+    // by the FillBoundary calls at the end of Step 0b, so iv ± c_q
+    // reads are safe.
+    // -----------------------------------------------------------------------
+    if (m_fslbm_abb_mass_correction) {
+        auto const& f_pre  = m_f[lev].const_arrays();
+        auto const& ct_pre = m_cell_type[lev].const_arrays();
+        auto const& mp_pre = m_pre_fslbm_mass[lev].arrays();
+        amrex::ParallelFor(
+            m_pre_fslbm_mass[lev],
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
+                if (ct_pre[nbx](iv, 0) != CELL_INTERFACE) {
+                    mp_pre[nbx](iv, 0) = amrex::Real(0.0);
+                    mp_pre[nbx](iv, 1) = amrex::Real(0.0);
+                    return;
+                }
+
+                // m_pre.
+                amrex::Real m_pre_local = amrex::Real(0.0);
+                for (int q = 0; q < N_MICRO_STATES; ++q) {
+                    m_pre_local += f_pre[nbx](iv, q);
+                }
+                mp_pre[nbx](iv, 0) = m_pre_local;
+
+                // Δm_full: un-weighted Σ over LIQ/IFC links.
+                const auto& f_arr = f_pre[nbx];
+                const auto& lb    = amrex::lbound(f_arr);
+                const auto& ub    = amrex::ubound(f_arr);
+                const amrex::Box fbox(
+                    amrex::IntVect(AMREX_D_DECL(lb.x, lb.y, lb.z)),
+                    amrex::IntVect(AMREX_D_DECL(ub.x, ub.y, ub.z)));
+
+                amrex::Real dm_full = amrex::Real(0.0);
+                for (int q = 0; q < N_MICRO_STATES; ++q) {
+                    const auto& ev = evs[q];
+                    const int   bq = bounce_dirs[q];
+                    const amrex::IntVect ivn(iv + ev);
+                    if (!fbox.contains(ivn)) { continue; }
+                    const int ct_n = ct_pre[nbx](ivn, 0);
+                    if (ct_n == CELL_LIQUID || ct_n == CELL_INTERFACE) {
+                        dm_full += f_pre[nbx](ivn, bq) - f_pre[nbx](iv, q);
+                    }
+                }
+                mp_pre[nbx](iv, 1) = dm_full;
+            });
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
+    }
+
+    // -----------------------------------------------------------------------
     // Allocate working storage
     // f_star     : post-stream PDFs
     // mass_flux  : mass increment Δm per interface cell
@@ -7711,14 +7832,83 @@ void LBM::fslbm_advance_surface(const int lev)
                 //   κ < 0 (center of curvature in liquid) → lower gas pressure.
                 // Sign convention: κ = −∇·n̂ where n̂ points liquid→gas.
                 //
-                // IMPORTANT: We use ρ_ref (NOT the local cell density ρ_iv)
-                // as the base.  Using ρ_iv creates a positive feedback loop:
-                // elevated ρ → ABB targets elevated ρ → more mass injected → blow-up.
+                // Compressible-FSLBM mass-conservation fix (Option B, June 2026):
+                // In the incompressible Donath/Körner FSLBM, ρ_iv ≈ ρ_ref so the
+                // per-link ABB injection is symmetric and cell mass is preserved.
+                // In our compressible regime, the impeller drives ρ_iv > ρ_ref
+                // throughout the surface band, and each link contributes
+                // ≈ 2·w_q·(ρ_ref − ρ_iv) of mass (negative).  Summed over the
+                // surface this leaks ~2-3 mass units per step.
+                //
+                // Mitigation: blend the ABB target density toward the local
+                // cell density,
+                //
+                //   ρ_G_base = (1 − β) · ρ_ref + β · ρ_iv_smooth
+                //
+                // where ρ_iv_smooth is a 6-face-neighbour average of CELL_LIQUID
+                // and CELL_INTERFACE pre-stream densities (skipping GAS/SOLID
+                // neighbours).  β=0 reproduces the legacy ρ_G = ρ_ref.  β=1
+                // would close the loop perfectly but is known to cause runaway
+                // feedback (elevated ρ → higher target → more injection).
+                // Empirically β ≤ 0.3 is stable; the default is set in
+                // m_fslbm_abb_local_rho_blend (LBM.H), exposed as
+                // lbm.fslbm_abb_local_rho_blend in the input file.
+                //
+                // The Laplace correction Δρ_laplace is then added to the
+                // blended base.  This keeps surface tension physics intact.
+                amrex::Real rho_iv_smooth = l_fslbm_rho_ref;
+                if (l_abb_local_rho_blend > amrex::Real(0.0)) {
+                    // Self-density (always available on INTERFACE cells)
+                    amrex::Real rho_iv_self = amrex::Real(0.0);
+                    for (int qq = 0; qq < N_MICRO_STATES; ++qq) {
+                        rho_iv_self += f_ro[nbx](iv, qq);
+                    }
+                    amrex::Real rho_acc = rho_iv_self;
+                    int n_acc = 1;
+                    // 6-face neighbours; skip if neighbour is GAS/SOLID
+                    // (no fluid mass to sample) or out-of-bounds.
+                    constexpr int faces[6][3] = {
+                        { 1, 0, 0}, {-1, 0, 0},
+                        { 0, 1, 0}, { 0,-1, 0},
+                        { 0, 0, 1}, { 0, 0,-1}};
+                    for (int f = 0; f < 6; ++f) {
+                        const amrex::IntVect ivn(
+                            AMREX_D_DECL(iv[0] + faces[f][0],
+                                         iv[1] + faces[f][1],
+                                         iv[2] + faces[f][2]));
+                        if (!fbox.contains(ivn)) { continue; }
+                        const int ct_n = ct_arrs[nbx](ivn, 0);
+                        if (ct_n != CELL_LIQUID && ct_n != CELL_INTERFACE) {
+                            continue;
+                        }
+                        amrex::Real rho_n = amrex::Real(0.0);
+                        for (int qq = 0; qq < N_MICRO_STATES; ++qq) {
+                            rho_n += f_ro[nbx](ivn, qq);
+                        }
+                        // Skip pathological neighbours (negative / NaN /
+                        // far-overshoot rho); these would poison the
+                        // smoothed average.  Use ρ_ref-relative bounds.
+                        if (!std::isfinite(rho_n)) { continue; }
+                        if (rho_n < amrex::Real(0.1) * l_fslbm_rho_ref) {
+                            continue;
+                        }
+                        if (rho_n > amrex::Real(5.0) * l_fslbm_rho_ref) {
+                            continue;
+                        }
+                        rho_acc += rho_n;
+                        ++n_acc;
+                    }
+                    rho_iv_smooth = rho_acc / amrex::Real(n_acc);
+                }
+                const amrex::Real rho_G_base =
+                    (amrex::Real(1.0) - l_abb_local_rho_blend) * l_fslbm_rho_ref
+                  + l_abb_local_rho_blend * rho_iv_smooth;
+
                 const amrex::Real kappa_iv = kap_arr[nbx](iv, 0);
                 const amrex::Real delta_rho_laplace =
                     -amrex::Real(2.0) * l_sigma * kappa_iv / (l_Rg * l_T_ref);
                 const amrex::Real rho_G = amrex::max(
-                    l_fslbm_rho_ref + delta_rho_laplace,
+                    rho_G_base + delta_rho_laplace,
                     l_fslbm_rho_ref * amrex::Real(1.0e-3));
 
                 const amrex::Real pxx = ux * ux + l_Rg * T_iv;
@@ -7929,6 +8119,106 @@ void LBM::fslbm_advance_surface(const int lev)
                 dm_arrs[nbx](iv, 1) = amrex::Real(0.0);  // No excess redistribution
             });
         // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 4b: φ-correction (Variant D, corrected June 2026).
+    //
+    // After Steps 1a/1b/3 have run, the post-stream f-mass at iv decomposes:
+    //
+    //   m_post − m_pre  =  Δm_full  +  Δm_ABB
+    //
+    // where Δm_full is the unweighted streaming flux from LIQ/IFC neighbours
+    // (captured in Step 0c, comp 1) and Δm_ABB is the residual from the
+    // gas-side ABB pull, which is what genuinely drives the leak.  Step 2's
+    // `mass_flux[0]` is Δm_intended = Σ S_q · (...) — the Körner-weighted
+    // version — so subtracting it does NOT isolate Δm_ABB.  At every
+    // IFC-IFC link with S_q < 1, a fraction (1 − S_q) of legitimate bulk
+    // streaming bleeds into "unintended" and corrupts φ, destabilising
+    // the interface band (see runs 14397288 vs 14348303 for evidence).
+    //
+    // Correct formula:
+    //
+    //   Δm_ABB = (m_post − m_pre) − Δm_full
+    //   φ[iv] -= Δm_ABB / max(rho_post, ε·ρ_ref)
+    //
+    // Solid bounce-back contributes 0 to (m_post − m_pre) per cell, so
+    // no separate solid-term subtraction is needed.  f and g moments
+    // are NOT modified — only the φ ledger absorbs Δm_ABB, exactly the
+    // same way Step 4 absorbs Δm_intended for the bulk streaming flux.
+    //
+    // This must run BEFORE the comp 0 reset below (the reset reuses
+    // mass_flux comp 0 as a Step-5 conversion flag).
+    // -----------------------------------------------------------------------
+    if (m_fslbm_abb_mass_correction) {
+        const amrex::Real l_eps_rho_floor =
+            amrex::Real(1.0e-4) * l_fslbm_rho_ref;
+        auto const& phi_arrs = m_phi_fslbm[lev].arrays();
+        auto const& f_ro_cur = m_f[lev].const_arrays();
+        auto const& ct_arrs  = m_cell_type[lev].const_arrays();
+        auto const& mp_pre   = m_pre_fslbm_mass[lev].const_arrays();
+
+        amrex::ParallelFor(
+            m_phi_fslbm[lev],
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
+                if (ct_arrs[nbx](iv, 0) != CELL_INTERFACE) { return; }
+
+                amrex::Real m_post = amrex::Real(0.0);
+                for (int q = 0; q < N_MICRO_STATES; ++q) {
+                    m_post += f_ro_cur[nbx](iv, q);
+                }
+                const amrex::Real m_pre   = mp_pre[nbx](iv, 0);
+                const amrex::Real dm_full = mp_pre[nbx](iv, 1);
+                const amrex::Real dm_ABB  = (m_post - m_pre) - dm_full;
+
+                const amrex::Real rho_eff =
+                    amrex::max(m_post, l_eps_rho_floor);
+                phi_arrs[nbx](iv, 0) -= dm_ABB / rho_eff;
+            });
+        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
+
+        if (m_print_int > 0 && m_isteps[0] % m_print_int == 0) {
+            // Diagnostic: report total m_pre / m_post / Δm_full / Δm_ABB at
+            // INTERFACE cells.  Allocates a small 4-component scratch MF.
+            amrex::MultiFab abb_diag(
+                m_phi_fslbm[lev].boxArray(),
+                m_phi_fslbm[lev].DistributionMap(),
+                4, 0);
+            abb_diag.setVal(amrex::Real(0.0));
+            auto const& diag_arrs = abb_diag.arrays();
+            auto const& f_ro_d    = m_f[lev].const_arrays();
+            auto const& ct_arrs_d = m_cell_type[lev].const_arrays();
+            auto const& mp_pre_d  = m_pre_fslbm_mass[lev].const_arrays();
+            amrex::ParallelFor(
+                abb_diag,
+                [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                    const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
+                    if (ct_arrs_d[nbx](iv, 0) != CELL_INTERFACE) { return; }
+                    amrex::Real m_post = amrex::Real(0.0);
+                    for (int q = 0; q < N_MICRO_STATES; ++q) {
+                        m_post += f_ro_d[nbx](iv, q);
+                    }
+                    const amrex::Real m_pre   = mp_pre_d[nbx](iv, 0);
+                    const amrex::Real dm_full = mp_pre_d[nbx](iv, 1);
+                    const amrex::Real dm_ABB  = (m_post - m_pre) - dm_full;
+                    diag_arrs[nbx](iv, 0) = m_pre;
+                    diag_arrs[nbx](iv, 1) = m_post;
+                    diag_arrs[nbx](iv, 2) = dm_full;
+                    diag_arrs[nbx](iv, 3) = dm_ABB;
+                });
+            // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
+            const amrex::Real M_pre_total  = abb_diag.sum(0);
+            const amrex::Real M_post_total = abb_diag.sum(1);
+            const amrex::Real dm_full_tot  = abb_diag.sum(2);
+            const amrex::Real dm_ABB_tot   = abb_diag.sum(3);
+            amrex::Print() << "[abb_corr step=" << m_isteps[0]
+                           << "] M_pre=" << M_pre_total
+                           << " M_post=" << M_post_total
+                           << " Dm_full=" << dm_full_tot
+                           << " Dm_ABB=" << dm_ABB_tot
+                           << "\n";
+        }
     }
 
     //   phi < FSLBM_PHI_LO  ->  CELL_GAS:    zero f
@@ -8486,6 +8776,112 @@ void LBM::fslbm_advance_surface(const int lev)
     m_phi_fslbm[lev].FillBoundary(Geom(lev).periodicity());
     m_f[lev].FillBoundary(Geom(lev).periodicity());
     m_g[lev].FillBoundary(Geom(lev).periodicity());
+
+    // -----------------------------------------------------------------------
+    // Step 7: Global f₀ mass clamp (Variant E, June 2026).
+    //
+    // Sum the current liquid mass M_current = Σ_{LIQUID} ρ + Σ_{IFC} φ·ρ
+    // and inject the deficit per CELL_INTERFACE cell into f[iv][0]:
+    //   ε_cell = (M_target − M_current) / N_ifc;  f[iv][0] += ε_cell
+    // Because the rest-velocity has c₀ = 0, this preserves momentum,
+    // stress, heat-flux contribution from f, and all higher-moment
+    // hydrodynamics; only ρ shifts.
+    //
+    // M_target is captured at the first call (cold-start: equals the
+    // exact initial mass; restart: locks in any pre-checkpoint leak —
+    // restart-aware target-from-header would be a future refinement).
+    //
+    // Gated on m_fslbm_global_mass_clamp_interval to amortise the global
+    // MultiFab::sum() reduction (~150 µs on 180³ H100, multi-GPU worse).
+    // The first call (m_fslbm_mass_target < 0) is forced regardless of
+    // interval so M_target locks in at step 0.
+    //
+    // Position rationale: AFTER Step 6 (so N_ifc reflects the
+    // post-conversion cell layout) and AFTER all FillBoundary calls
+    // (so ghost cells are fresh).  We re-FillBoundary m_f at the end
+    // to propagate the f[iv][0] change to neighbours' ghost rows in
+    // time for the next stream pass.
+    // -----------------------------------------------------------------------
+    if (m_fslbm_global_mass_clamp) {
+        const bool is_capture_step = (m_fslbm_mass_target < amrex::Real(0.0));
+        const int  interval = amrex::max(1, m_fslbm_global_mass_clamp_interval);
+        const bool is_interval_step = (m_isteps[0] % interval == 0);
+        if (is_capture_step || is_interval_step) {
+        // 3-component scratch MF:
+        //   comp 0: ρ on CELL_LIQUID    (else 0)
+        //   comp 1: ρ·φ on CELL_INTERFACE (else 0)
+        //   comp 2: 1 on CELL_INTERFACE  (else 0)  — N_ifc counter
+        amrex::MultiFab clamp_acc(
+            boxArray(lev), DistributionMap(lev), 3, 0,
+            amrex::MFInfo(), *(m_factory[lev]));
+        clamp_acc.setVal(amrex::Real(0.0));
+        {
+            auto const& ca_arrs = clamp_acc.arrays();
+            auto const& f_ro_E  = m_f[lev].const_arrays();
+            auto const& ct_E    = m_cell_type[lev].const_arrays();
+            auto const& phi_E   = m_phi_fslbm[lev].const_arrays();
+            amrex::ParallelFor(
+                clamp_acc,
+                [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                    const int ct = ct_E[nbx](i, j, k, 0);
+                    if (ct == CELL_LIQUID) {
+                        amrex::Real r = amrex::Real(0.0);
+                        for (int q = 0; q < N_MICRO_STATES; ++q) {
+                            r += f_ro_E[nbx](i, j, k, q);
+                        }
+                        ca_arrs[nbx](i, j, k, 0) = r;
+                    } else if (ct == CELL_INTERFACE) {
+                        amrex::Real r = amrex::Real(0.0);
+                        for (int q = 0; q < N_MICRO_STATES; ++q) {
+                            r += f_ro_E[nbx](i, j, k, q);
+                        }
+                        ca_arrs[nbx](i, j, k, 1) = r * phi_E[nbx](i, j, k, 0);
+                        ca_arrs[nbx](i, j, k, 2) = amrex::Real(1.0);
+                    }
+                });
+            // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
+        }
+        const amrex::Real M_liq_now    = clamp_acc.sum(0);
+        const amrex::Real M_ifc_vw_now = clamp_acc.sum(1);
+        const amrex::Real N_ifc_now    = clamp_acc.sum(2);
+        const amrex::Real M_current    = M_liq_now + M_ifc_vw_now;
+
+        if (m_fslbm_mass_target < amrex::Real(0.0)) {
+            m_fslbm_mass_target = M_current;
+            amrex::Print() << "[fslbm_clamp] M_target captured at step "
+                           << m_isteps[0] << " : " << m_fslbm_mass_target
+                           << "\n";
+        }
+
+        if (N_ifc_now > amrex::Real(0.5)) {
+            const amrex::Real deficit  = m_fslbm_mass_target - M_current;
+            const amrex::Real eps_cell = deficit / N_ifc_now;
+            auto const& f_w_E = m_f[lev].arrays();
+            auto const& ct_E2 = m_cell_type[lev].const_arrays();
+            amrex::ParallelFor(
+                m_f[lev],
+                [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                    if (ct_E2[nbx](i, j, k, 0) != CELL_INTERFACE) { return; }
+                    f_w_E[nbx](i, j, k, 0) += eps_cell;
+                });
+            // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
+
+            // Propagate the f[iv][0] change to neighbour ghost cells so the
+            // next stream pass reads the updated value.
+            m_f[lev].FillBoundary(Geom(lev).periodicity());
+
+            if (m_print_int > 0 && m_isteps[0] % m_print_int == 0) {
+                amrex::Print() << "[fslbm_clamp step=" << m_isteps[0]
+                               << "] M_target=" << m_fslbm_mass_target
+                               << " M_current=" << M_current
+                               << " deficit=" << deficit
+                               << " eps_cell=" << eps_cell
+                               << " N_ifc=" << static_cast<long>(N_ifc_now)
+                               << "\n";
+            }
+        }
+        } // end is_capture_step || is_interval_step
+    }
 }
 
 } // namespace lbm

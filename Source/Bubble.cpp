@@ -281,6 +281,23 @@ void BubbleManager::read_params(BubbleParams& p)
 
         pp.query("stats_int",  p.stats_int);
         pp.query("stats_file", p.stats_file);
+
+        // Force-deposition safety mechanisms (June 2026).
+        pp.query("force_cap_factor",    p.force_cap_factor);
+        pp.query("require_liquid_host", p.require_liquid_host);
+
+        amrex::Print() << "[bubble] force_cap_factor    = "
+                       << p.force_cap_factor
+                       << (p.force_cap_factor > 0.0
+                              ? "  (|F_couple| <= cap·m_eff·|g|)"
+                              : "  (DISABLED)")
+                       << "\n";
+        amrex::Print() << "[bubble] require_liquid_host = "
+                       << p.require_liquid_host
+                       << (p.require_liquid_host
+                              ? "  (skip force deposit when host cell != CELL_LIQUID)"
+                              : "  (DISABLED — deposit at every host cell)")
+                       << "\n";
     }
 }
 
@@ -757,17 +774,68 @@ void BubbleManager::advance(
                 // 3. Deposit drag+added mass coupling force back to fluid
                 // LB force = SI Force / (rho * dx^4 / dt^2)
                 amrex::Real conv = (prms.dt_phys * prms.dt_phys) / (prms.rho_fluid * V_cell * dx_phys);
-                amrex::Real Ffx = -(FAx + FDx) * conv;
-                amrex::Real Ffy = -(FAy + FDy) * conv;
-                amrex::Real Ffz = -(FAz + FDz) * conv;
+
+                // -------- Safety mechanism 1: per-bubble force cap --------
+                // Bound |F_couple| at cap_factor · m_eff · |g_grav|.  This
+                // prevents a single anomalous fluid-velocity sample (e.g.
+                // bubble briefly inside a stale interpolation stencil that
+                // includes gas-side or post-impeller transient cells) from
+                // injecting unbounded forces into the LB grid.  At
+                // cap=50, the ceiling is ~50·m_eff·g — well above the
+                // ~10·m_eff·g peak observed in physically clean runs.
+                amrex::Real F_couple_x = FAx + FDx;
+                amrex::Real F_couple_y = FAy + FDy;
+                amrex::Real F_couple_z = FAz + FDz;
+                if (prms.force_cap_factor > 0.0) {
+                    const amrex::Real F_max =
+                        prms.force_cap_factor * m_eff * std::abs(prms.g_grav);
+                    const amrex::Real Fmag = std::sqrt(
+                        F_couple_x * F_couple_x +
+                        F_couple_y * F_couple_y +
+                        F_couple_z * F_couple_z);
+                    if (Fmag > F_max && Fmag > 0.0) {
+                        const amrex::Real s = F_max / Fmag;
+                        F_couple_x *= s;
+                        F_couple_y *= s;
+                        F_couple_z *= s;
+                    }
+                    // Also catch NaN/Inf — replace with zero so the deposit
+                    // is harmless rather than poisoning the fluid grid.
+                    if (!std::isfinite(F_couple_x)) F_couple_x = 0.0;
+                    if (!std::isfinite(F_couple_y)) F_couple_y = 0.0;
+                    if (!std::isfinite(F_couple_z)) F_couple_z = 0.0;
+                }
+
+                amrex::Real Ffx = -F_couple_x * conv;
+                amrex::Real Ffy = -F_couple_y * conv;
+                amrex::Real Ffz = -F_couple_z * conv;
                 
                 int ci = static_cast<int>(amrex::Math::floor((px - prob_lo[0]) / dx_arr[0]));
                 int cj = static_cast<int>(amrex::Math::floor((py - prob_lo[1]) / dx_arr[1]));
                 int ck = static_cast<int>(amrex::Math::floor((pz - prob_lo[2]) / dx_arr[2]));
                 if (domain.contains(amrex::IntVect(AMREX_D_DECL(ci, cj, ck)))) {
-                    amrex::Gpu::Atomic::AddNoRet(&force_arr(ci,cj,ck,0), Ffx);
-                    amrex::Gpu::Atomic::AddNoRet(&force_arr(ci,cj,ck,1), Ffy);
-                    amrex::Gpu::Atomic::AddNoRet(&force_arr(ci,cj,ck,2), Ffz);
+                    // -------- Safety mechanism 2: liquid-host gating --------
+                    // Drag/added-mass forces computed from interpolated fluid
+                    // velocity are only physically meaningful when the host
+                    // cell is bulk liquid.  When the bubble passes through
+                    // CELL_INTERFACE (free-surface band) or briefly sits in
+                    // CELL_GAS (above-surface) or CELL_SOLID (impeller-swept
+                    // volume), the interpolation stencil pulls in stale or
+                    // ABB-equilibrium populations and produces unphysical
+                    // u_fluid values.  Skip the deposit in those cases; the
+                    // bubble's own kinematic state still updates.
+                    bool deposit = true;
+                    if (prms.require_liquid_host && has_isf) {
+                        const int ct_host = isf_arr(ci, cj, ck, 0);
+                        if (ct_host != lbm::constants::CELL_LIQUID) {
+                            deposit = false;
+                        }
+                    }
+                    if (deposit) {
+                        amrex::Gpu::Atomic::AddNoRet(&force_arr(ci,cj,ck,0), Ffx);
+                        amrex::Gpu::Atomic::AddNoRet(&force_arr(ci,cj,ck,1), Ffy);
+                        amrex::Gpu::Atomic::AddNoRet(&force_arr(ci,cj,ck,2), Ffz);
+                    }
                 }
                 
                 // 4. O2 Volumetric Source

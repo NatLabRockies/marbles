@@ -75,6 +75,37 @@ struct BubbleParams
 
     int         stats_int             = 200;
     std::string stats_file            = "bubble_stats.csv";
+
+    // -----------------------------------------------------------------------
+    // Force-deposition safety mechanisms (June 2026).
+    //
+    // Symptom: kLa run 14348303 reached |F_x|=1253 in lattice units at step
+    // 205000, vs typical ~1e-4.  Two independent safety mechanisms guard
+    // against unphysical force-deposition:
+    //
+    //  (1) Per-bubble force cap.  Bound the magnitude of the coupling force
+    //      |F_couple| = |F_drag + F_added_mass| at  cap_factor · m_eff · |g|
+    //      so a single anomalous fluid sample cannot push the bubble (and
+    //      the back-deposited fluid force) to unphysical values.  Capping
+    //      at 50 × |g| · m_eff means the bubble can experience up to 50g
+    //      acceleration — well above the ~10g peak observed in well-resolved
+    //      sparger-impeller flows but small enough to bound the LB force
+    //      injection.  Disabled when force_cap_factor <= 0.
+    //
+    //  (2) Cell-type gating.  When the bubble's host cell is not CELL_LIQUID
+    //      (i.e. it sits in CELL_INTERFACE / CELL_GAS / CELL_SOLID), skip
+    //      the force-deposition entirely.  Drag computed from interpolated
+    //      velocity / density samples that include CELL_GAS neighbours is
+    //      not physically meaningful (the gas cells have ρ=0 and stale or
+    //      gas-side ABB-equilibrium populations).  A bubble passing through
+    //      the receding free-surface band briefly enters this regime; once
+    //      it drops back into bulk liquid, the deposit resumes.  The bubble
+    //      itself still gets advected (its own velocity / position update is
+    //      in a separate kernel), so the bubble doesn't get "stuck"; only
+    //      the fluid coupling pause.  Disabled when require_liquid_host=0.
+    // -----------------------------------------------------------------------
+    amrex::Real force_cap_factor      = 50.0;
+    int         require_liquid_host   = 1;
 };
 
 class BubbleManager
