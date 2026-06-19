@@ -471,7 +471,7 @@ void LBM::read_parameters()
                            << std::endl;
             amrex::Print() << "  Global f₀ mass clamp      : "
                            << (m_fslbm_global_mass_clamp
-                                  ? "ON  (Variant E: per-step ε = (M_target − M_current)/N_ifc into f[iv][0])"
+                                  ? "ON  (Variant E: per-step ε = (M_target − M_current)/N_liq into f[iv][0] on LIQUID)"
                                   : "OFF")
                            << std::endl;
             if (m_fslbm_global_mass_clamp) {
@@ -8778,14 +8778,32 @@ void LBM::fslbm_advance_surface(const int lev)
     m_g[lev].FillBoundary(Geom(lev).periodicity());
 
     // -----------------------------------------------------------------------
-    // Step 7: Global f₀ mass clamp (Variant E, June 2026).
+    // Step 7: Global f₀ mass clamp (Variant E, June 2026; revised June 19).
     //
     // Sum the current liquid mass M_current = Σ_{LIQUID} ρ + Σ_{IFC} φ·ρ
-    // and inject the deficit per CELL_INTERFACE cell into f[iv][0]:
-    //   ε_cell = (M_target − M_current) / N_ifc;  f[iv][0] += ε_cell
+    // and inject the deficit per CELL_LIQUID cell into f[iv][0]:
+    //   ε_cell = (M_target − M_current) / N_liq;  f[iv][0] += ε_cell
     // Because the rest-velocity has c₀ = 0, this preserves momentum,
     // stress, heat-flux contribution from f, and all higher-moment
     // hydrodynamics; only ρ shifts.
+    //
+    // INJECTION TARGET = LIQUID (not INTERFACE).
+    //
+    // Earlier draft applied ε to CELL_INTERFACE cells.  In run 14422476
+    // the impeller spin-up (step ~26800) drove the surface band into a
+    // strongly compressed regime (ρ_ifc → 2.5, T → 0.064 vs T_ref =
+    // 0.033) and the ABB started bleeding 30+ mass per step.  ε_cell
+    // grew to ~0.5 — comparable to f_0 = ρ·w_0 ≈ 0.3 itself — and the
+    // resulting ~150 % perturbation of the rest population destabilised
+    // the band even further, ultimately destroying the free surface.
+    //
+    // Spreading the same deficit over N_liq ≈ 3.4 M cells (vs N_ifc ≈
+    // 25 k) reduces |ε_cell| by ~140×, keeping it permanently in the
+    // small-perturbation regime even when the underlying ABB leak is
+    // pathological.  CELL_INTERFACE cells are also far more sensitive
+    // to bookkeeping nudges (they participate in conversion thresholds
+    // φ < φ_lo / φ > φ_hi); LIQUID cells just absorb the bump as
+    // ordinary density and let normal LBM streaming redistribute it.
     //
     // M_target is captured at the first call (cold-start: equals the
     // exact initial mass; restart: locks in any pre-checkpoint leak —
@@ -8796,7 +8814,7 @@ void LBM::fslbm_advance_surface(const int lev)
     // The first call (m_fslbm_mass_target < 0) is forced regardless of
     // interval so M_target locks in at step 0.
     //
-    // Position rationale: AFTER Step 6 (so N_ifc reflects the
+    // Position rationale: AFTER Step 6 (so N_liq reflects the
     // post-conversion cell layout) and AFTER all FillBoundary calls
     // (so ghost cells are fresh).  We re-FillBoundary m_f at the end
     // to propagate the f[iv][0] change to neighbours' ghost rows in
@@ -8810,7 +8828,7 @@ void LBM::fslbm_advance_surface(const int lev)
         // 3-component scratch MF:
         //   comp 0: ρ on CELL_LIQUID    (else 0)
         //   comp 1: ρ·φ on CELL_INTERFACE (else 0)
-        //   comp 2: 1 on CELL_INTERFACE  (else 0)  — N_ifc counter
+        //   comp 2: 1 on CELL_LIQUID    (else 0)  — N_liq counter
         amrex::MultiFab clamp_acc(
             boxArray(lev), DistributionMap(lev), 3, 0,
             amrex::MFInfo(), *(m_factory[lev]));
@@ -8830,20 +8848,20 @@ void LBM::fslbm_advance_surface(const int lev)
                             r += f_ro_E[nbx](i, j, k, q);
                         }
                         ca_arrs[nbx](i, j, k, 0) = r;
+                        ca_arrs[nbx](i, j, k, 2) = amrex::Real(1.0);
                     } else if (ct == CELL_INTERFACE) {
                         amrex::Real r = amrex::Real(0.0);
                         for (int q = 0; q < N_MICRO_STATES; ++q) {
                             r += f_ro_E[nbx](i, j, k, q);
                         }
                         ca_arrs[nbx](i, j, k, 1) = r * phi_E[nbx](i, j, k, 0);
-                        ca_arrs[nbx](i, j, k, 2) = amrex::Real(1.0);
                     }
                 });
             // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
         }
         const amrex::Real M_liq_now    = clamp_acc.sum(0);
         const amrex::Real M_ifc_vw_now = clamp_acc.sum(1);
-        const amrex::Real N_ifc_now    = clamp_acc.sum(2);
+        const amrex::Real N_liq_now    = clamp_acc.sum(2);
         const amrex::Real M_current    = M_liq_now + M_ifc_vw_now;
 
         if (m_fslbm_mass_target < amrex::Real(0.0)) {
@@ -8853,15 +8871,15 @@ void LBM::fslbm_advance_surface(const int lev)
                            << "\n";
         }
 
-        if (N_ifc_now > amrex::Real(0.5)) {
+        if (N_liq_now > amrex::Real(0.5)) {
             const amrex::Real deficit  = m_fslbm_mass_target - M_current;
-            const amrex::Real eps_cell = deficit / N_ifc_now;
+            const amrex::Real eps_cell = deficit / N_liq_now;
             auto const& f_w_E = m_f[lev].arrays();
             auto const& ct_E2 = m_cell_type[lev].const_arrays();
             amrex::ParallelFor(
                 m_f[lev],
                 [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
-                    if (ct_E2[nbx](i, j, k, 0) != CELL_INTERFACE) { return; }
+                    if (ct_E2[nbx](i, j, k, 0) != CELL_LIQUID) { return; }
                     f_w_E[nbx](i, j, k, 0) += eps_cell;
                 });
             // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
@@ -8876,7 +8894,7 @@ void LBM::fslbm_advance_surface(const int lev)
                                << " M_current=" << M_current
                                << " deficit=" << deficit
                                << " eps_cell=" << eps_cell
-                               << " N_ifc=" << static_cast<long>(N_ifc_now)
+                               << " N_liq=" << static_cast<long>(N_liq_now)
                                << "\n";
             }
         }

@@ -188,13 +188,15 @@ lbm.fslbm_abb_mass_correction = 0
 # Variant E: global f₀ mass clamp (June 2026, recommended).
 # At end of every fslbm_advance_surface call:
 #   M_current  = Σ_{LIQ} ρ + Σ_{IFC} φ·ρ        (same as [mass_diag] M_tot)
-#   ε_cell     = (M_target − M_current) / N_ifc
-#   f[iv][0]  += ε_cell  for every CELL_INTERFACE cell
+#   ε_cell     = (M_target − M_current) / N_liq
+#   f[iv][0]  += ε_cell  for every CELL_LIQUID cell
 # Since c_0 = 0, this preserves momentum, stress, and all higher moments
 # — only ρ shifts.  M_target is captured at the first call (≈ initial
-# fill mass).  Per-pass restoration is ε_cell · Σ_{IFC} φ ≈ 0.5·deficit,
-# so 99% of any transient gap closes within ~10 steps; the slight
-# under-relaxation is intentionally stabilising.
+# fill mass).  Spreading over LIQUID (≈3 M cells) instead of INTERFACE
+# (~25 k cells) keeps |ε_cell| in the 10^-8–10^-5 range, far below noise,
+# even when the underlying ABB drain transiently spikes during impeller
+# spin-up.  Earlier interface-target draft (commit bdfcbed) destabilised
+# at ~step 27000 of run 14422476 when ε ≈ f_0; LIQUID-target avoids that.
 lbm.fslbm_global_mass_clamp = 1
 # Interval (steps) between clamp passes.  Each pass costs ~150 µs on 180³ H100
 # (one MultiFab::sum reduction + small kernel + FillBoundary on m_f).  At

@@ -617,7 +617,8 @@ private:
     //   comp 1: Δm_full = un-weighted Σ over LIQ/IFC links
     amrex::Vector<amrex::MultiFab> m_pre_fslbm_mass;
 
-    // Variant E: global f₀ mass clamp (June 2026).
+    // Variant E: global f₀ mass clamp (June 2026; LIQUID-target since
+    // June 19 2026).
     //
     // At the end of each fslbm_advance_surface call, compute the current
     // total fluid mass
@@ -625,13 +626,15 @@ private:
     // (same formula the [mass_diag] line prints as M_tot), compare with
     // the target captured at the first call, and inject the per-cell
     // deficit
-    //   ε_cell = (M_target − M_current) / N_ifc
-    // into f[iv][0] at every CELL_INTERFACE cell.  Because c₀ = 0, the
+    //   ε_cell = (M_target − M_current) / N_liq
+    // into f[iv][0] at every CELL_LIQUID cell.  Because c₀ = 0, the
     // injection preserves momentum, stress, heat-flux contribution, and
-    // every other moment of f — only ρ shifts.  Per-pass mass restoration
-    // is ε_cell · Σ_{IFC} φ_iv ≈ 0.5·deficit (under-relaxed by <φ>_ifc),
-    // so 99% of any transient gap closes within ~10 steps; the slight
-    // under-relaxation is intentionally stabilising.
+    // every other moment of f — only ρ shifts.  Spreading the deficit
+    // over the bulk liquid (~3 M cells) instead of just the interface
+    // band (~25 k cells) keeps |ε_cell| in the 10^-8–10^-5 range even
+    // under pathological ABB drain regimes (see run 14422476: original
+    // interface-target Variant E went unstable when ε_cell reached ~0.5
+    // ≈ f_0 itself during impeller spin-up).
     //
     // Default 0.  Set lbm.fslbm_global_mass_clamp = 1 to activate.
     // Mutually compatible with Variant D, though enabling both is
