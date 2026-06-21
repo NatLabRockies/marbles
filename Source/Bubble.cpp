@@ -30,6 +30,36 @@
 namespace lbm {
 
 // ============================================================================
+// Boyle's law / hydrostatic-pressure helper (June 2026).
+//
+// Returns the depth-corrected molar volume V_m for a bubble at vertical
+// coordinate z_LB (in lattice-Boltzmann cell units).  When the Boyle flag
+// is off, this collapses to V_m,ref so all conversions n_O2 ↔ V_b ↔ d
+// reduce to the legacy ideal-gas-at-STP model.
+//
+// When the flag is on:
+//   h_phys = max(0, free_surface_z − z_LB) · dx_phys     [m]
+//   P(h)   = P_atm + ρ_l · g · h_phys                    [Pa]
+//   V_m    = V_m,ref · P_atm / P(h)                      [m³/mol]
+//
+// h is clamped at 0 so a bubble above the surface doesn't get a negative
+// hydrostatic pressure (would have produced V_m > V_m,ref → ρ-expansion).
+//
+// V_m_at_depth is host-and-device callable (used by inject_bubbles on the
+// host and by the per-bubble update kernel on the GPU).
+// ============================================================================
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+amrex::Real V_m_at_depth(
+    amrex::Real z_LB, const BubbleParams& p)
+{
+    if (!p.boyle_law_enable) { return p.O2_molar_volume; }
+    const amrex::Real h_phys = amrex::max(
+        amrex::Real(0.0), (p.free_surface_z - z_LB) * p.dx_phys);
+    const amrex::Real P     = p.P_atm + p.rho_fluid * p.g_grav * h_phys;
+    return p.O2_molar_volume * (p.P_atm / P);
+}
+
+// ============================================================================
 // Drag coefficient for a sphere in a suspension.
 //
 // Implements the Tenneti, Garg & Subramaniam (2011) drag law, which is the
@@ -286,6 +316,9 @@ void BubbleManager::read_params(BubbleParams& p)
         pp.query("force_cap_factor",    p.force_cap_factor);
         pp.query("require_liquid_host", p.require_liquid_host);
 
+        // Boyle's law / hydrostatic-pressure correction (June 2026).
+        pp.query("boyle_law_enable",    p.boyle_law_enable);
+
         amrex::Print() << "[bubble] force_cap_factor    = "
                        << p.force_cap_factor
                        << (p.force_cap_factor > 0.0
@@ -297,6 +330,12 @@ void BubbleManager::read_params(BubbleParams& p)
                        << (p.require_liquid_host
                               ? "  (skip force deposit when host cell != CELL_LIQUID)"
                               : "  (DISABLED — deposit at every host cell)")
+                       << "\n";
+        amrex::Print() << "[bubble] boyle_law_enable    = "
+                       << p.boyle_law_enable
+                       << (p.boyle_law_enable
+                              ? "  (V_m = V_m,ref·P_atm/(P_atm + ρ_l·g·h); V_b, d, C_g all vary with depth)"
+                              : "  (DISABLED — V_m fixed; C_g = 1/V_m identically)")
                        << "\n";
     }
 }
@@ -385,7 +424,21 @@ void BubbleManager::inject_bubbles(amrex::Real dt_phys)
                 p.rdata(BubbleIdx::VY)       = 0.0;
                 p.rdata(BubbleIdx::VZ)       = 0.0;
                 p.rdata(BubbleIdx::DIAMETER) = m_params.d0;
-                p.rdata(BubbleIdx::N_O2)     = m_params.O2_init_conc * V0;
+                // Initial moles (Boyle-aware): legacy n_O2 = O2_init_conc · V0
+                // implicitly assumes V_m = V_m,ref at the injection depth.
+                // When Boyle is on, the bubble at sparger depth is compressed,
+                // so the same geometric volume V0 holds more moles by a factor
+                // of V_m,ref / V_m(h) = P(h) / P_atm.  Multiplying here makes
+                // C_g_inject = n_O2/V0 = O2_init_conc · P(h)/P_atm, i.e. the
+                // bubble starts at the local hydrostatic concentration.
+                {
+                    const amrex::Real Vm_inject =
+                        V_m_at_depth(p.pos(2), m_params);
+                    const amrex::Real depth_factor =
+                        m_params.O2_molar_volume / Vm_inject;  // = P(h)/P_atm
+                    p.rdata(BubbleIdx::N_O2) =
+                        m_params.O2_init_conc * V0 * depth_factor;
+                }
                 p.rdata(BubbleIdx::AX)       = 0.0;
                 p.rdata(BubbleIdx::AY)       = 0.0;
                 p.rdata(BubbleIdx::AZ)       = 0.0;
@@ -860,8 +913,14 @@ void BubbleManager::advance(
                 
                 amrex::Real n_O2_new = amrex::max(n_O2 - dn_i * prms.dt_phys, amrex::Real(0.0));
                 p.rdata(BubbleIdx::N_O2) = n_O2_new;
-                
-                amrex::Real Vb_new = n_O2_new * prms.O2_molar_volume;
+
+                // Recompute V_b from moles using Boyle-aware molar volume.
+                // When prms.boyle_law_enable = 0, this collapses to the legacy
+                //   V_b = n_O2 · O2_molar_volume
+                // (isobaric ideal gas at STP).  When on, V_m shrinks with
+                // depth so a fixed moles → smaller V_b for deeper bubbles.
+                const amrex::Real Vm_now = V_m_at_depth(p.pos(2), prms);
+                amrex::Real Vb_new = n_O2_new * Vm_now;
                 if (Vb_new > 0.0) {
                     amrex::Real d_new_new = std::cbrt(6.0 * Vb_new / amrex::Math::pi<amrex::Real>());
                     if (d_new_new < 1.0e-5) { p.id() = -1; }

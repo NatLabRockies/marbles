@@ -61,6 +61,30 @@ struct BubbleParams
 
     amrex::Real free_surface_z  = 1.0e30;
 
+    // Boyle's law / hydrostatic pressure correction (June 2026).
+    //
+    // When `boyle_law_enable = 1`, each bubble's molar volume V_m is
+    // recomputed from its current depth h = max(0, free_surface_z − z):
+    //
+    //   P(h)   = P_atm + ρ_l · g · h        (Pa)
+    //   V_m(P) = V_m,ref · P_atm / P(h)      (m³/mol; ideal gas, isothermal)
+    //
+    // V_b = n_O2 · V_m(P) then makes the bubble volume (and diameter)
+    // sensitive to hydrostatic compression.  All places that convert
+    // n_O2 ↔ V_b must use the same V_m, otherwise mass-balance breaks
+    // (the molar inventory n_O2 is the invariant; V_b and C_g = n/V_b
+    // both follow from it).
+    //
+    // When `boyle_law_enable = 0` (default), the ideal-gas-at-STP model
+    // is used everywhere: V_m = V_m,ref = O2_molar_volume from the input,
+    // so C_g is identically 1/V_m,ref for every bubble at every step.
+    //
+    // free_surface_z is the depth datum (LB cell coord, same field used
+    // for the bubble-exit Boyle threshold).  The conversion to physical
+    // depth uses dx_phys.  P_atm, rho_fluid, g_grav are read from
+    // existing bubble.* params.
+    int         boyle_law_enable   = 0;
+
     bool        enable_coalescence     = true;
     amrex::Real Re_a_crit             = 40.0;
     amrex::Real coal_start_time       = 2.0;

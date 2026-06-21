@@ -273,6 +273,18 @@ bubble.g_grav             = 9.81    # m/s²
 # Φ < 0.5 criterion (via lbm.free_surface = 1), NOT by this threshold.
 bubble.free_surface_z     = 70.0    # LB cell coordinate (= -90 + 160)
 
+# Boyle's law / hydrostatic-pressure correction (June 2026).
+# When ON, each bubble's molar volume V_m is recomputed from its current
+# depth h = max(0, free_surface_z - z) [LB cells × dx_phys = m]:
+#   P(h)   = P_atm + rho_l · g · h         (Pa)
+#   V_m(P) = V_m_ref · P_atm / P(h)        (m^3/mol; isothermal ideal gas)
+# V_b = n_O2 · V_m(P) → bubble shrinks at depth, expands toward the
+# surface, and C_g = n_O2/V_b varies in the range
+#   [O2_init_conc, O2_init_conc · (1 + rho_l·g·h_max/P_atm)].
+# For this geometry (h_max ≈ 0.16 m) the correction is ~1.5%.
+# Default OFF: V_m fixed at O2_molar_volume, C_g identically 44.6 mol/m^3.
+bubble.boyle_law_enable   = 0
+
 # Coalescence parameters (Boshenyatov Re_a criterion)
 bubble.enable_coalescence      = 1
 bubble.coalescence_Re_crit     = 40.0
