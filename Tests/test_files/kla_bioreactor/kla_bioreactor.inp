@@ -33,9 +33,13 @@
 #     = (400/60)*(0.058)²/(1e-6) ≈ 22 400
 #
 #   Kinematic viscosity     : ν_phys = 1e-6 m²/s (water)
-#   LB viscosity            : ν_LB   = 0.008  (effective, includes Smagorinsky SGS)
-#     Note: ν_LB is tuned for stability — the Smagorinsky SGS closure provides the
-#     remaining effective viscosity; molecular ν_LB would be ~2.4e-6 (too small).
+#   LB viscosity            : ν_LB   = 0.032 (bare BGK relaxation; under-resolved DNS)
+#     Note: ν_LB is tuned for collision stability at the under-resolved
+#     grid (180³ for a Re = 22 400 impeller).  A Smagorinsky SGS term
+#     ν_T = ν_LB + (C_s·Δ)²·|S| is computed in compute_derived() and
+#     written to the EPSILON_IDX diagnostic (consumed by bubble breakup
+#     D_e and the k_L mass-transfer coefficient), but the LBM collision
+#     itself uses bare ν_LB — not a turbulence-coupled relaxation.
 #
 #   O₂ diffusivity          : D_O2_phys = 2e-9 m²/s   (Sc = 500)
 #   LB O₂ diffusivity       : D_O2_LB   = ν_LB / Sc = 0.008 / 500 = 1.6e-5
@@ -96,7 +100,7 @@ lbm.bc_hi = 5 5 5
 lbm.dx_outer = 1.0
 lbm.dt_outer = 1.0
 
-lbm.nu    = 0.032   # effective LBM kinematic viscosity (includes Smagorinsky SGS)
+lbm.nu    = 0.032   # bare BGK relaxation viscosity (LB units); Smagorinsky term feeds only the ε diagnostic, not the collision
 lbm.alpha = 0.032
 
 # One passive scalar: dissolved O₂  (component 0)

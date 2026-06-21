@@ -770,13 +770,13 @@ void BubbleManager::advance(
                 amrex::Real py = p.pos(1);
                 amrex::Real pz = p.pos(2);
                 
-                // 1. Boyle's law depth scaling
-                amrex::Real h = (prms.free_surface_z - pz) * dx_phys;
-                if (h <= 0.0) h = 0.0;
-                amrex::Real d_atm = p.rdata(BubbleIdx::DIAMETER);
-                amrex::Real d_new = d_atm * std::pow(1.0 + prms.rho_fluid * prms.g_grav * h / prms.P_atm, -1.0/3.0);
-                p.rdata(BubbleIdx::DIAMETER) = d_new;
-                
+                // Bubble geometry from the current stored diameter.  Diameter
+                // is updated at the END of this kernel from the post-update
+                // moles n_O2_new via V_b = n_O2 · V_m_at_depth(z, prms), so
+                // Boyle's-law depth scaling enters the next step's d / V_b /
+                // C_g automatically and self-consistently (no separate inline
+                // compression block needed).
+                const amrex::Real d_new = p.rdata(BubbleIdx::DIAMETER);
                 const amrex::Real r = 0.5 * d_new;
                 const amrex::Real Vb = (4.0/3.0) * amrex::Math::pi<amrex::Real>() * r*r*r;
                 const amrex::Real Ab = amrex::Math::pi<amrex::Real>() * r*r;
