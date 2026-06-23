@@ -169,6 +169,16 @@ public:
     void do_coalescence(amrex::Real phys_time);
     void write_stats(int step, amrex::Real phys_time);
 
+    /// Variant of write_stats that records the volume-averaged dissolved-O₂
+    /// concentration and the LIQUID-side volume in addition to the bubble
+    /// statistics.  Caller is responsible for reducing the O₂ component
+    /// lattice over CELL_LIQUID + φ·CELL_INTERFACE and passing the SI
+    /// quantities here.  Used to log a kLa-fittable trajectory directly
+    /// into bubble_stats.csv (single source of truth for kLa benchmarks).
+    void write_stats(int step, amrex::Real phys_time,
+                     amrex::Real C_L_mol_m3,
+                     amrex::Real V_liq_m3);
+
     BubbleContainer&       container()       { return m_container; }
     const BubbleContainer& container() const { return m_container; }
 

@@ -202,6 +202,18 @@ public:
     // residuals) to the species statistics file.
     void write_species_stats();
 
+    // Reduce the dissolved-O₂ component lattice over the liquid phase and
+    // return the volume-averaged concentration in SI units and the liquid
+    // volume in m³.  Uses CELL_LIQUID + φ·CELL_INTERFACE when the free
+    // surface is on; otherwise averages over IS_FLUID==1 cells.  Defined
+    // public so the extended __device__ lambda inside can be hosted
+    // (CUDA nvcc error 20092 disallows them in private methods).
+    void compute_dissolved_o2_average(
+        const int                   lev,
+        const amrex::MultiFab&      rho_o2,
+        amrex::Real&                C_L_mol_m3_out,
+        amrex::Real&                V_liq_m3_out) const;
+
 private:
     // read parameters
     void read_parameters();

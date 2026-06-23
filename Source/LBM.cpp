@@ -1138,7 +1138,18 @@ void LBM::advance(
         // Statistics output
         if (m_bubble_params.stats_int > 0 &&
             m_isteps[lev] % m_bubble_params.stats_int == 0) {
-            m_bubbles.write_stats(m_isteps[lev], phys_time);
+            // Compute liquid-volume-averaged dissolved-O₂ concentration over
+            // CELL_LIQUID + φ·CELL_INTERFACE (matches the [mass_diag] M_tot
+            // convention).  This goes into bubble_stats.csv so the kLa time
+            // series is a first-class output, independent of the [O2_debug]
+            // max-norm diagnostic.  Implementation lives in a public helper
+            // because advance() is private and nvcc forbids extended
+            // __device__ lambdas there (error 20092).
+            amrex::Real C_L_mol_m3 = 0.0;
+            amrex::Real V_liq_m3   = 0.0;
+            compute_dissolved_o2_average(lev, rho_o2, C_L_mol_m3, V_liq_m3);
+            m_bubbles.write_stats(m_isteps[lev], phys_time,
+                                  C_L_mol_m3, V_liq_m3);
         }
     } else {
         // No bubble back-coupling on this level (either bubbles disabled or
@@ -5793,6 +5804,72 @@ void LBM::close_species_stats_file()
     BL_PROFILE("LBM::close_species_stats_file()");
     if (m_species_stats_stream.is_open()) {
         m_species_stats_stream.close();
+    }
+}
+
+// ============================================================================
+// LBM::compute_dissolved_o2_average
+//
+// Reduce the dissolved-O₂ component lattice (already converted to LB-rho per
+// cell by the caller, i.e. the sum over q of m_component_lattices[0]) over
+// the liquid phase, returning the volume-averaged concentration in SI units
+// and the liquid volume in m³.  Uses CELL_LIQUID + φ·CELL_INTERFACE when
+// the free surface is on; otherwise averages over IS_FLUID==1 cells.
+//
+// Public because advance() is private and nvcc disallows extended __device__
+// lambdas in private member functions (error 20092).
+// ============================================================================
+void LBM::compute_dissolved_o2_average(
+    const int                   lev,
+    const amrex::MultiFab&      rho_o2,
+    amrex::Real&                C_L_mol_m3_out,
+    amrex::Real&                V_liq_m3_out) const
+{
+    BL_PROFILE("LBM::compute_dissolved_o2_average()");
+    C_L_mol_m3_out = 0.0;
+    V_liq_m3_out   = 0.0;
+
+    amrex::MultiFab cl_acc(rho_o2.boxArray(), rho_o2.DistributionMap(), 2, 0);
+    cl_acc.setVal(0.0);
+
+    auto const& acc_a = cl_acc.arrays();
+    auto const& rho_a = rho_o2.const_arrays();
+
+    if (m_free_surface) {
+        auto const& ct_a  = m_cell_type[lev].const_arrays();
+        auto const& phi_a = m_phi_fslbm[lev].const_arrays();
+        amrex::ParallelFor(
+            cl_acc,
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                const int ct = ct_a[nbx](i, j, k, 0);
+                if (ct == constants::CELL_LIQUID) {
+                    acc_a[nbx](i, j, k, 0) = rho_a[nbx](i, j, k, 0);
+                    acc_a[nbx](i, j, k, 1) = amrex::Real(1.0);
+                } else if (ct == constants::CELL_INTERFACE) {
+                    const amrex::Real phi = phi_a[nbx](i, j, k, 0);
+                    acc_a[nbx](i, j, k, 0) = rho_a[nbx](i, j, k, 0) * phi;
+                    acc_a[nbx](i, j, k, 1) = phi;
+                }
+            });
+    } else {
+        auto const& if_a = m_is_fluid[lev].const_arrays();
+        amrex::ParallelFor(
+            cl_acc,
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                if (if_a[nbx](i, j, k, constants::IS_FLUID_IDX) == 1) {
+                    acc_a[nbx](i, j, k, 0) = rho_a[nbx](i, j, k, 0);
+                    acc_a[nbx](i, j, k, 1) = amrex::Real(1.0);
+                }
+            });
+    }
+
+    const amrex::Real num_LB   = cl_acc.sum(0);
+    const amrex::Real V_liq_LB = cl_acc.sum(1);
+    if (V_liq_LB > amrex::Real(0.5)) {
+        const amrex::Real C_L_LB = num_LB / V_liq_LB;
+        C_L_mol_m3_out = C_L_LB * m_bubble_o2_C_ref;
+        const amrex::Real dxp = m_bubble_params.dx_phys;
+        V_liq_m3_out = V_liq_LB * dxp * dxp * dxp;
     }
 }
 

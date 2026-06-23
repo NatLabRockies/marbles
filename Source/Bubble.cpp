@@ -23,6 +23,7 @@
 
 #include <cmath>
 #include <algorithm>
+#include <limits>
 #include <random>
 #include <sstream>
 #include <iomanip>
@@ -1036,6 +1037,18 @@ void BubbleManager::advance(
 // ============================================================================
 void BubbleManager::write_stats(int step, amrex::Real phys_time)
 {
+    // Backward-compatible entry point: emit NaN for the C_L / V_liq fields
+    // when the caller hasn't computed them (e.g. early init / shutdown
+    // diagnostics).  Distinguishable from a true zero in the CSV.
+    write_stats(step, phys_time,
+                std::numeric_limits<amrex::Real>::quiet_NaN(),
+                std::numeric_limits<amrex::Real>::quiet_NaN());
+}
+
+void BubbleManager::write_stats(int step, amrex::Real phys_time,
+                                amrex::Real C_L_mol_m3,
+                                amrex::Real V_liq_m3)
+{
     if (!amrex::ParallelDescriptor::IOProcessor()) { return; }
 
     // Gather statistics across all particles
@@ -1075,7 +1088,10 @@ void BubbleManager::write_stats(int step, amrex::Real phys_time)
                    << d_min  * 1000.0 << ","
                    << d_max  * 1000.0 << ","
                    << n_O2_total << ","
-                   << dn_total << "\n";
+                   << dn_total << ","
+                   << std::scientific << std::setprecision(6)
+                   << C_L_mol_m3 << ","          // volume-averaged dissolved O₂ [mol/m³]
+                   << V_liq_m3   << "\n";        // liquid volume LIQ + φ·IFC [m³]
     m_stats_stream.flush();
 }
 
@@ -1086,13 +1102,30 @@ void BubbleManager::open_stats_file(bool append)
 {
     if (!amrex::ParallelDescriptor::IOProcessor()) { return; }
     if (append) {
+        // Detect whether the file already has a header.  When the working
+        // directory was wiped (or the previous CSV moved out) the restart
+        // path still requests append=true so existing per-bubble data is
+        // not clobbered, but the destination file is empty — we must write
+        // the header in that case, otherwise the new run leaves an
+        // un-parseable, header-less CSV.
+        std::ifstream probe(m_params.stats_file, std::ios::binary);
+        bool file_is_empty = true;
+        if (probe.is_open()) {
+            file_is_empty = (probe.peek() == std::ifstream::traits_type::eof());
+        }
         m_stats_stream.open(m_params.stats_file,
                             std::ios::out | std::ios::app);
+        if (file_is_empty) {
+            m_stats_stream << "step,phys_time_s,n_bubbles,d_mean_mm,"
+                              "d_min_mm,d_max_mm,n_O2_total_mol,dn_O2_step_mol_per_s,"
+                              "C_L_mol_m3,V_liq_m3\n";
+        }
     } else {
         m_stats_stream.open(m_params.stats_file,
                             std::ios::out | std::ios::trunc);
         m_stats_stream << "step,phys_time_s,n_bubbles,d_mean_mm,"
-                          "d_min_mm,d_max_mm,n_O2_total_mol,dn_O2_step_mol_per_s\n";
+                          "d_min_mm,d_max_mm,n_O2_total_mol,dn_O2_step_mol_per_s,"
+                          "C_L_mol_m3,V_liq_m3\n";
     }
 }
 
