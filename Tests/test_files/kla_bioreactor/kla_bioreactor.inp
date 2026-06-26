@@ -292,7 +292,7 @@ bubble.boyle_law_enable   = 1
 # Coalescence parameters (Boshenyatov Re_a criterion)
 bubble.enable_coalescence      = 1
 bubble.coalescence_Re_crit     = 40.0
-bubble.coalescence_start_time  = 0.50    # s  (wait for flow to develop)
+bubble.coalescence_start_time  = 0.10    # s  (wait for flow to develop)
 bubble.coalescence_interval    = 33     # steps between neighbour checks (~395 µs physical, matching benchmark)
 # Breakup parameters (Hinze criterion + triangle daughter distribution)
 bubble.enable_breakup = 1
