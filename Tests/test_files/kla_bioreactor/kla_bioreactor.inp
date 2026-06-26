@@ -100,13 +100,13 @@ lbm.bc_hi = 5 5 5
 lbm.dx_outer = 1.0
 lbm.dt_outer = 1.0
 
-lbm.nu    = 0.032   # bare BGK relaxation viscosity (LB units); Smagorinsky term feeds only the ε diagnostic, not the collision
-lbm.alpha = 0.032
+lbm.nu    = 0.016   # bare BGK relaxation viscosity (LB units); Smagorinsky term feeds only the ε diagnostic, not the collision
+lbm.alpha = 0.016
 
 # One passive scalar: dissolved O₂  (component 0)
 # D_O2_LB = nu_LB / Sc = 0.008 / 500 = 1.60e-5
 lbm.n_components = 1
-lbm.diffusivity_component_0 = 6.40e-5
+lbm.diffusivity_component_0 = 3.20e-5
 
 lbm.initial_temperature = 0.03333
 lbm.adiabatic_exponent = 1.66666666667
@@ -287,12 +287,12 @@ bubble.free_surface_z     = 70.0    # LB cell coordinate (= -90 + 160)
 #   [O2_init_conc, O2_init_conc · (1 + rho_l·g·h_max/P_atm)].
 # For this geometry (h_max ≈ 0.16 m) the correction is ~1.5%.
 # Default OFF: V_m fixed at O2_molar_volume, C_g identically 44.6 mol/m^3.
-bubble.boyle_law_enable   = 0
+bubble.boyle_law_enable   = 1
 
 # Coalescence parameters (Boshenyatov Re_a criterion)
 bubble.enable_coalescence      = 1
 bubble.coalescence_Re_crit     = 40.0
-bubble.coalescence_start_time  = 2.0    # s  (wait for flow to develop)
+bubble.coalescence_start_time  = 0.50    # s  (wait for flow to develop)
 bubble.coalescence_interval    = 33     # steps between neighbour checks (~395 µs physical, matching benchmark)
 # Breakup parameters (Hinze criterion + triangle daughter distribution)
 bubble.enable_breakup = 1
@@ -308,7 +308,7 @@ bubble.min_diameter   = 1.0e-4       # m  (0.1 mm)
 bubble.eps_max        = 50.0         # m²/s³
 
 # Statistics output
-bubble.stats_int  = 800             # steps between CSV writes (~0.01 s physical)
+bubble.stats_int  = 200             # steps between CSV writes (~0.01 s physical)
 bubble.stats_file = "bubble_stats.csv"
 
 # Force-deposition safety mechanisms (June 2026).
@@ -353,7 +353,7 @@ body.angular_velocity = 0.0 0.0 0.0005  # rad/step  => 400 RPM physical  (Ma=0.0
 # linearly from 0 at step 0 to the target above at step ramp_steps.
 # 50000 steps = 0.597 s physical (roughly 4 impeller revolutions at target
 # RPM, and ~0.6x the bench-scale spin-up time).  Set 0 for legacy instant-on.
-body.angular_velocity_ramp_steps = 50000
+body.angular_velocity_ramp_steps = 10000
 # Impeller centre: horizontal centre of tank, 50 cells off bottom (z = -90+50=-40)
 body.center = 90.0 90.0 -40.0
 

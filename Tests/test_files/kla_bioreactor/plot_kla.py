@@ -4,50 +4,39 @@ k_La verification for the kLa-bioreactor run against the M-Star benchmark
 https://docs.mstarcfd.com/1b_HowToGuides/predicting-mass-transfer-kLA.html
 target k_La ≈ 4.1 /hr at 400 RPM, 0.4 L/min air, dilute aqueous O₂.
 
-Inputs (all relative to this script's directory):
-  resultsJune21full/marbles_14431463.out   — main run log (steps 0..534400)
-  resultsJune21full/marbles_14516702.out   — restart run log (steps 520000+)
-  resultsJune21full/bubble_stats.csv       — bubble-side mass balance
+Focus: Method C only — direct volume-averaged ⟨C_L⟩(t) reduced from the
+solver's component-0 lattice over CELL_LIQUID + φ·CELL_INTERFACE.  This is
+written every bubble.stats_int steps into bubble_stats.csv as the
+C_L_mol_m3 column (along with V_liq_m3).
 
-Approach
-========
+Three estimators of k_La, in order of physical defensibility:
 
-(A) rho_O2_max trajectory (cheap, qualitative).
-    The .out file logs `[O2_debug step=N] rho_O2_after=X` where X is the
-    max-norm of the dissolved-O2 component lattice (peak cell value).
-    This is NOT a volume average, but its time-constant matches kLa
-    because every cell relaxes toward the same saturation under the
-    same k_L·a → max(C_L) follows the same exponential shape.
-    Fit:  C_max(t) = C_inf × (1 - exp(-kLa × t))   (free C_inf, kLa)
+  (1) Constrained exponential fit with C∞ ≡ C_sat = 1.428 mol/m³.
+      Matches the M-Star "gassing-out" measurement convention exactly:
+          C_L(t) = C_sat · (1 − exp(−k_La · t))
+      Single-parameter fit, robust even when the trajectory is
+      mostly in the linear-rise regime (curvature near saturation
+      not yet visible).
 
-(B) Mean dissolved-O2 from bubble mass balance (quantitative cross-check).
-    Conservation:
-      n_O2_dissolved(t) = n_O2_injected(t) - n_O2_in_bubbles(t)
-                         - n_O2_vented_out(t)
-    With no surface model for venting, treat (n_O2_injected - n_O2_in_bubbles)
-    as an upper bound on dissolved.  Plot that envelope and compare to
-    the theoretical exponential trajectory.
+  (2) Log-linear regression on  ln(C_sat − C_L)  vs  t.
+      Same model, but solved via a linear least squares so the
+      uncertainty is dominated by point scatter rather than the
+      optimiser bracket.  Slope = −k_La directly.
 
-Both convert LB → SI using parameters from kla_bioreactor.inp:
-  dt_phys     = 1.19365e-5 s/step    (omega_LB / omega_phys = 0.0005/41.888)
-  C_ref       = 100.0 mol/m³ per LB-rho unit
-  V_liquid    = 0.16 m × π × (0.09 m)² = 4.07e-3 m³  (tank radius 0.09 m,
-                liquid height 0.16 m)
-  C_sat       = S × C_g = 0.032 × 44.6 = 1.428 mol/m³  (Henry sat at STP)
-  injection   = 0.4 L/min = 6.67e-6 m³/s gas at STP
-                ⇒ n_inj_rate = 6.67e-6 × 44.6 = 2.974e-4 mol/s
-                ⇒ d(n_inj)/dstep = 2.974e-4 × dt_phys = 3.551e-9 mol/step
+  (3) Local slope at the trajectory's tail:
+          k_La,local ≈ (dC_L/dt) / (C_sat − C_L)
+      Most direct — no model assumption beyond C∞ = C_sat — but
+      noisy at short times.  Reported only for sanity.
 
-The M-Star benchmark page gives k_La ≈ 4.1 /hr = 1.139e-3 /s.
-Marbles target the same value; this script reports the fitted k_La with
-ASCII confidence interval and a residual plot.
+When the trajectory is in the very low-C regime (⟨C_L⟩ ≪ C_sat), free
+fits are degenerate: every (C∞, k_La) pair satisfying k_La·C∞ = (slope)
+gives the same residual.  This is why previous unconstrained fits
+returned C∞ ≈ 14 mol/m³ (10× C_sat — unphysical).  Imposing
+C∞ = C_sat picks the right branch.
 """
 
 import csv
 import math
-import os
-import re
-import sys
 from pathlib import Path
 
 import matplotlib
@@ -60,72 +49,22 @@ from scipy.optimize import curve_fit
 # --------------------------------------------------------------------------
 # 1. CONFIG — keep in sync with kla_bioreactor.inp
 # --------------------------------------------------------------------------
-DT_PHYS     = 1.19365e-5     # s / LB step
-C_REF       = 100.0          # mol/m³ per LB-rho unit (lbm.O2_concentration_reference)
-C_SAT_MOL_M3 = 0.032 * 44.6  # = 1.428 mol/m³  Henry-saturated liquid
-V_LIQUID_M3 = math.pi * (0.09 ** 2) * 0.16   # ≈ 4.07e-3 m³  (cylindrical tank,
-                                              # H=0.16 m, R=T/2=0.09 m — neglects
-                                              # impeller-/sparger-occupied volume)
-N_INJ_RATE_MOL_S = 6.67e-6 * 44.6            # 2.974e-4 mol/s O₂ injected
-KLA_BENCHMARK_S  = 4.1 / 3600.0              # 1.139e-3 /s (M-Star reference)
+DT_PHYS          = 1.19365e-5     # s / LB step
+C_REF            = 100.0          # mol/m³ per LB-rho unit (lbm.O2_concentration_reference)
+C_SAT_MOL_M3     = 0.032 * 44.6   # = 1.428 mol/m³  Henry-saturated liquid
+KLA_BENCHMARK_S  = 4.1 / 3600.0   # 1.139e-3 /s (M-Star reference)
 
-RESULTS_DIR = Path(__file__).resolve().parent / "resultsJune21full"
-OUTFILES = [
-    RESULTS_DIR / "marbles_14431463.out",
-    RESULTS_DIR / "marbles_14516702.out",
-]
-BUBBLE_CSV = RESULTS_DIR / "bubble_stats.csv"
+SCRIPT_DIR = Path(__file__).resolve().parent
+WORK_CSV   = SCRIPT_DIR / "bubble_stats.csv"
 
 
 # --------------------------------------------------------------------------
-# 2. Parse [O2_debug step=N] rho_O2_after=X across both log files; stitch.
+# 2. Parse bubble_stats.csv (Method C source)
 # --------------------------------------------------------------------------
-def parse_rho_o2_max():
-    """Return arrays (step, rho_O2_max_LB) from concatenated logs.
-
-    Stitching strategy: keep run-A entries up to its last step, then drop
-    any run-B entries with step <= that boundary (handles the overlap
-    between the original run and the restart cleanly).
-    """
-    pat = re.compile(r"\[O2_debug step=(\d+)\]\s+o2_src\.norm0=\S+\s+rho_O2_before=(\S+)\s*$", re.M)
-    pat_after = re.compile(r"\[O2_debug step=(\d+)\]\s+rho_O2_after=(\S+)\s*$", re.M)
-
-    by_step = {}
-    for path in OUTFILES:
-        if not path.exists():
-            print(f"warn: missing {path}", file=sys.stderr)
-            continue
-        text = path.read_text(errors="replace")
-        for step_s, rho_s in pat_after.findall(text):
-            step = int(step_s)
-            rho = float(rho_s)
-            # If a duplicate step appears (overlap), the later log wins —
-            # but only if its value is finite; restart-init artefacts can
-            # produce zeros, so we trust the original log for shared steps.
-            if step in by_step:
-                continue
-            by_step[step] = rho
-
-    steps = np.array(sorted(by_step.keys()))
-    rhos  = np.array([by_step[s] for s in steps])
-    return steps, rhos
-
-
-# --------------------------------------------------------------------------
-# 3. Parse bubble_stats.csv
-# --------------------------------------------------------------------------
-def parse_bubble_stats():
-    """Return dict-of-arrays from bubble_stats.csv.
-
-    Handles two schemas:
-      legacy 8-column : step, phys_time_s, n_bubbles, d_mean_mm, d_min_mm,
-                        d_max_mm, n_O2_total_mol, dn_O2_step_mol_per_s
-      new   10-column : ... + C_L_mol_m3, V_liq_m3
-    Missing columns are absent from the returned dict so callers can
-    detect-and-branch on them.
-    """
+def parse_bubble_stats(path):
+    """Return dict-of-arrays.  Handles 8-col (legacy) and 10-col schemas."""
     cols = {}
-    with open(BUBBLE_CSV, newline="") as f:
+    with open(path, newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
             for k, v in row.items():
@@ -140,188 +79,185 @@ def parse_bubble_stats():
 
 
 # --------------------------------------------------------------------------
-# 4. k_La model & fit
+# 3. Estimator (1): constrained exponential C∞ = C_sat
 # --------------------------------------------------------------------------
-def C_t(t, C_inf, kLa):
-    """C(t) = C_inf · (1 − exp(−kLa·t))  with C(0) = 0."""
-    return C_inf * (1.0 - np.exp(-kLa * t))
+def C_t_constrained(t, kLa):
+    """C(t) = C_sat · (1 − exp(−kLa·t)) with C∞ fixed at saturation."""
+    return C_SAT_MOL_M3 * (1.0 - np.exp(-kLa * t))
 
 
-def fit_kla(t_s, C_mol_m3, fit_start_s=0.5):
-    """Fit C_t against the post-spin-up portion of the trajectory.
-
-    The first ~0.5 s is the impeller ramp + bubble inventory build-up,
-    not the kLa-controlled mass-transfer phase.
-    """
-    mask = t_s >= fit_start_s
+def fit_constrained(t, C, fit_start_s=0.2):
+    """Single-parameter k_La fit with C∞ ≡ C_sat."""
+    mask = t >= fit_start_s
     if mask.sum() < 5:
         raise RuntimeError("not enough points after fit_start_s")
-    t = t_s[mask]
-    C = C_mol_m3[mask]
-    # Sensible initial guess
-    p0 = (max(C.max(), C_SAT_MOL_M3), KLA_BENCHMARK_S)
-    bounds = ([1e-4, 1e-6], [10 * C_SAT_MOL_M3, 1.0])
-    popt, pcov = curve_fit(C_t, t, C, p0=p0, bounds=bounds, maxfev=20000)
-    perr = np.sqrt(np.diag(pcov))
-    return popt, perr, t, C
+    t_fit, C_fit = t[mask], C[mask]
+    popt, pcov = curve_fit(C_t_constrained, t_fit, C_fit,
+                           p0=[KLA_BENCHMARK_S],
+                           bounds=([1e-6], [1.0]),
+                           maxfev=20000)
+    return popt[0], float(np.sqrt(pcov[0, 0])), t_fit, C_fit
 
 
 # --------------------------------------------------------------------------
-# 5. Main
+# 4. Estimator (2): log-linear regression on ln(C_sat − C_L) vs t
+# --------------------------------------------------------------------------
+def fit_loglinear(t, C, fit_start_s=0.2):
+    """ln(C_sat − C_L) = ln(C_sat) − k_La · t.  Returns (k_La, sigma_kLa)."""
+    mask = (t >= fit_start_s) & (C < C_SAT_MOL_M3) & (C > 0)
+    if mask.sum() < 5:
+        raise RuntimeError("not enough points for log-linear fit")
+    t_fit = t[mask]
+    y     = np.log(C_SAT_MOL_M3 - C[mask])
+    # Linear fit y = a + b·t  ⇒  k_La = −b
+    coeffs, cov = np.polyfit(t_fit, y, 1, cov=True)
+    b, a = coeffs
+    kLa_loglin = -b
+    sigma_kLa  = float(np.sqrt(cov[0, 0]))
+    return kLa_loglin, sigma_kLa, t_fit, y
+
+
+# --------------------------------------------------------------------------
+# 5. Estimator (3): tail-local slope
+# --------------------------------------------------------------------------
+def estimate_local(t, C, tail_frac=0.2):
+    """k_La,local ≈ (dC/dt) / (C_sat − C) averaged over the last `tail_frac`."""
+    n_tail = max(5, int(tail_frac * len(t)))
+    t_tail, C_tail = t[-n_tail:], C[-n_tail:]
+    slope, _ = np.polyfit(t_tail, C_tail, 1)
+    C_bar = float(np.mean(C_tail))
+    if C_bar >= C_SAT_MOL_M3:
+        return float("nan"), C_bar, slope
+    kLa_local = slope / (C_SAT_MOL_M3 - C_bar)
+    return kLa_local, C_bar, slope
+
+
+# --------------------------------------------------------------------------
+# 6. Main
 # --------------------------------------------------------------------------
 def main():
-    print("=== k_La verification: kla_bioreactor vs M-Star benchmark ===")
+    print("=== k_La verification (Method C only) ===")
     print(f"  benchmark target : k_La = 4.1 /hr = {KLA_BENCHMARK_S:.4e} /s")
     print(f"  C_sat (Henry)    : {C_SAT_MOL_M3:.3f} mol/m³")
-    print(f"  V_liquid (est.)  : {V_LIQUID_M3*1000:.2f} L")
-    print(f"  n_inj_rate       : {N_INJ_RATE_MOL_S:.3e} mol/s")
+    print(f"  CSV path         : {WORK_CSV}")
     print()
 
-    # ---- (A) rho_O2_max trajectory ----
-    steps, rho_max_LB = parse_rho_o2_max()
-    if len(steps) == 0:
-        sys.exit("no rho_O2_after entries found in logs")
-    t_s = steps * DT_PHYS
-    C_max = rho_max_LB * C_REF                  # mol/m³
+    b = parse_bubble_stats(WORK_CSV)
+    if "C_L_mol_m3" not in b or not np.isfinite(b["C_L_mol_m3"]).any():
+        raise SystemExit("bubble_stats.csv has no C_L_mol_m3 column — old schema?")
 
-    print(f"[A] rho_O2_max  : {len(steps)} samples, t = [{t_s[0]:.3f}, {t_s[-1]:.3f}] s")
-    print(f"    max(rho_O2_max_LB) = {rho_max_LB.max():.4e} → {C_max.max():.3f} mol/m³")
+    t = b["phys_time_s"]
+    C = b["C_L_mol_m3"]
+    keep = np.isfinite(C) & np.isfinite(t)
+    t, C = t[keep], C[keep]
 
+    print(f"data: {len(t)} samples, t ∈ [{t[0]:.3f}, {t[-1]:.3f}] s")
+    print(f"      ⟨C_L⟩(end) = {C[-1]:.4f} mol/m³  ({100*C[-1]/C_SAT_MOL_M3:.2f}% of C_sat)")
+    print()
+
+    # --- (1) Constrained exponential ---
     try:
-        (C_inf_max, kLa_max), (err_C, err_kLa), tA, CA = fit_kla(t_s, C_max)
-        kLa_max_hr = kLa_max * 3600.0
-        err_hr     = err_kLa * 3600.0
-        ratio_max  = kLa_max_hr / 4.1
-        print(f"    fit: C_inf = {C_inf_max:.3f} ± {err_C:.3f} mol/m³")
-        print(f"         k_La  = {kLa_max:.3e} ± {err_kLa:.1e} /s  =  {kLa_max_hr:.2f} ± {err_hr:.2f} /hr")
-        print(f"         k_La / k_La_benchmark = {ratio_max:.2f}× (benchmark = 4.1 /hr)")
+        kLa_c, err_c, _, _ = fit_constrained(t, C)
+        kLa_c_hr = kLa_c * 3600.0
+        err_c_hr = err_c * 3600.0
+        print(f"[1] Constrained exponential fit (C∞ ≡ C_sat = {C_SAT_MOL_M3:.3f} mol/m³)")
+        print(f"    k_La = {kLa_c:.4e} ± {err_c:.1e} /s")
+        print(f"         = {kLa_c_hr:.2f} ± {err_c_hr:.2f} /hr")
+        print(f"         = {kLa_c_hr/4.1:.2f}× benchmark (4.1 /hr)")
     except Exception as ex:
-        print(f"    fit failed: {ex}")
-        C_inf_max = kLa_max = float("nan")
-        kLa_max_hr = ratio_max = float("nan")
+        print(f"[1] fit failed: {ex}")
+        kLa_c = kLa_c_hr = float("nan")
 
-    # ---- (B) Mean dissolved-O2 envelope from bubble mass balance ----
     print()
-    print("[B] bubble mass balance:")
-    b = parse_bubble_stats()
-    b_t = b["phys_time_s"]
-    b_n_total = b["n_O2_total_mol"]   # moles still inside all bubbles
-    n_inj_cum = N_INJ_RATE_MOL_S * b_t  # cumulative moles injected (linear in t)
-    # Upper bound on dissolved (assumes nothing has vented through the surface):
-    n_dissolved_upper = n_inj_cum - b_n_total
-    n_dissolved_upper = np.maximum(n_dissolved_upper, 0.0)
-    C_mean_upper = n_dissolved_upper / V_LIQUID_M3  # mol/m³
 
-    print(f"    n_inj_cum(end)   = {n_inj_cum[-1]:.4e} mol")
-    print(f"    n_total_bub(end) = {b_n_total[-1]:.4e} mol")
-    print(f"    n_diss_upper(end)= {n_dissolved_upper[-1]:.4e} mol")
-    print(f"    <C_L>_upper(end) = {C_mean_upper[-1]:.4f} mol/m³  ({100*C_mean_upper[-1]/C_SAT_MOL_M3:.1f}% of C_sat)")
-
+    # --- (2) Log-linear regression ---
     try:
-        (C_inf_avg, kLa_avg), (err_C2, err_kLa2), tB, CB = fit_kla(b_t, C_mean_upper)
-        kLa_avg_hr = kLa_avg * 3600.0
-        err_hr_avg = err_kLa2 * 3600.0
-        ratio_avg  = kLa_avg_hr / 4.1
-        print(f"    fit: C_inf = {C_inf_avg:.3f} ± {err_C2:.3f} mol/m³")
-        print(f"         k_La  = {kLa_avg:.3e} ± {err_kLa2:.1e} /s  =  {kLa_avg_hr:.2f} ± {err_hr_avg:.2f} /hr")
-        print(f"         k_La / k_La_benchmark = {ratio_avg:.2f}× (benchmark = 4.1 /hr)")
+        kLa_ll, err_ll, _, _ = fit_loglinear(t, C)
+        kLa_ll_hr = kLa_ll * 3600.0
+        err_ll_hr = err_ll * 3600.0
+        print(f"[2] Log-linear regression on ln(C_sat − C_L) vs t")
+        print(f"    k_La = {kLa_ll:.4e} ± {err_ll:.1e} /s")
+        print(f"         = {kLa_ll_hr:.2f} ± {err_ll_hr:.2f} /hr")
+        print(f"         = {kLa_ll_hr/4.1:.2f}× benchmark (4.1 /hr)")
     except Exception as ex:
-        print(f"    fit failed: {ex}")
-        C_inf_avg = kLa_avg = float("nan")
-        kLa_avg_hr = ratio_avg = float("nan")
+        print(f"[2] fit failed: {ex}")
+        kLa_ll = kLa_ll_hr = float("nan")
 
-    # ---- (C) Direct C_L from bubble_stats.csv (preferred when present) ----
-    # If the CSV has the new schema (commit XXX), it contains the
-    # volume-averaged dissolved-O₂ concentration <C_L>_mol_m3 computed
-    # on-the-fly by the LBM solver over CELL_LIQUID + φ·CELL_INTERFACE.
-    # This is the cleanest source for a kLa fit — no max-norm bias, no
-    # bubble-balance closure assumption.  Only run this branch when the
-    # column exists and contains usable (non-NaN) data.
-    have_direct_CL = ("C_L_mol_m3" in b) and np.isfinite(b["C_L_mol_m3"]).any()
     print()
-    if have_direct_CL:
-        b_CL = b["C_L_mol_m3"]
-        mask = np.isfinite(b_CL) & (b_CL > 0)
-        t_C  = b_t[mask]
-        C_C  = b_CL[mask]
-        print(f"[C] direct <C_L> from bubble_stats.csv: {len(t_C)} samples")
-        print(f"    <C_L>(end) = {C_C[-1]:.4f} mol/m³  ({100*C_C[-1]/C_SAT_MOL_M3:.1f}% of C_sat)")
-        try:
-            (C_inf_dir, kLa_dir), (err_C3, err_kLa3), tC, CC = fit_kla(t_C, C_C)
-            kLa_dir_hr = kLa_dir * 3600.0
-            err_hr_dir = err_kLa3 * 3600.0
-            ratio_dir  = kLa_dir_hr / 4.1
-            print(f"    fit: C_inf = {C_inf_dir:.3f} ± {err_C3:.3f} mol/m³")
-            print(f"         k_La  = {kLa_dir:.3e} ± {err_kLa3:.1e} /s  =  {kLa_dir_hr:.2f} ± {err_hr_dir:.2f} /hr")
-            print(f"         k_La / k_La_benchmark = {ratio_dir:.2f}× (benchmark = 4.1 /hr)")
-        except Exception as ex:
-            print(f"    fit failed: {ex}")
-            C_inf_dir = kLa_dir = float("nan")
-            kLa_dir_hr = ratio_dir = float("nan")
-    else:
-        print("[C] direct <C_L> column not in CSV; skipping (old-schema bubble_stats.csv)")
-        C_inf_dir = kLa_dir = float("nan")
-        kLa_dir_hr = ratio_dir = float("nan")
+
+    # --- (3) Local slope at the tail ---
+    kLa_loc, C_bar, dCdt = estimate_local(t, C)
+    print(f"[3] Local slope at tail (last 20% of data)")
+    print(f"    dC/dt = {dCdt:.4e} mol/m³/s, ⟨C_L⟩ = {C_bar:.4f} mol/m³")
+    if math.isfinite(kLa_loc):
+        print(f"    k_La,local = (dC/dt)/(C_sat − ⟨C_L⟩) = {kLa_loc:.4e} /s")
+        print(f"               = {kLa_loc*3600:.2f} /hr  ({kLa_loc*3600/4.1:.2f}× benchmark)")
+
+    print()
 
     # ---- Plot ----
-    n_panels = 3 if have_direct_CL else 2
-    fig, axes = plt.subplots(n_panels, 1, figsize=(9, 4 * n_panels), sharex=True)
+    fig, axes = plt.subplots(2, 1, figsize=(9, 8))
 
+    # Linear plot of ⟨C_L⟩(t).  Auto-scale to the data range — when ⟨C_L⟩ is
+    # only a few % of C_sat, plotting on the full [0, C_sat] range hides the
+    # rise and the three fits visually collapse onto the x-axis.  Show C_sat
+    # only via the right-side "% of saturation" axis and a corner annotation.
     ax = axes[0]
-    ax.plot(t_s, C_max, ".", ms=2, alpha=0.4, label="max C_L (lattice norm0)")
-    if math.isfinite(kLa_max):
-        t_fit = np.linspace(0, t_s[-1], 400)
-        ax.plot(t_fit, C_t(t_fit, C_inf_max, kLa_max), "-",
-                label=f"fit: k_La = {kLa_max_hr:.2f} /hr (C∞ = {C_inf_max:.2f})")
-    ax.axhline(C_SAT_MOL_M3, ls="--", color="gray", label=f"C_sat = {C_SAT_MOL_M3:.2f} mol/m³")
-    # Reference: theoretical M-Star curve toward C_sat with k_La = 4.1/hr
-    t_ref = np.linspace(0, t_s[-1], 400)
-    ax.plot(t_ref, C_t(t_ref, C_SAT_MOL_M3, KLA_BENCHMARK_S), ":", color="k",
-            label="M-Star: k_La=4.1/hr, C_inf=C_sat")
-    ax.set_ylabel("max C_L  (mol/m³)")
-    ax.set_title("(A) peak dissolved-O₂ trajectory (lattice max-norm)")
-    ax.grid(alpha=0.3)
-    ax.legend(fontsize=8, loc="lower right")
-
-    ax = axes[1]
-    ax.plot(b_t, C_mean_upper, ".-", ms=2, label="<C_L> upper bound from bubble mass balance")
-    if math.isfinite(kLa_avg):
-        t_fit = np.linspace(0, b_t[-1], 400)
-        ax.plot(t_fit, C_t(t_fit, C_inf_avg, kLa_avg), "-",
-                label=f"fit: k_La = {kLa_avg_hr:.2f} /hr (C∞ = {C_inf_avg:.2f})")
-    ax.axhline(C_SAT_MOL_M3, ls="--", color="gray", label=f"C_sat = {C_SAT_MOL_M3:.2f} mol/m³")
-    ax.plot(t_ref, C_t(t_ref, C_SAT_MOL_M3, KLA_BENCHMARK_S), ":", color="k",
-            label="M-Star: k_La=4.1/hr, C_inf=C_sat")
-    ax.set_ylabel("<C_L>  (mol/m³)")
-    ax.set_title("(B) volume-averaged dissolved O₂ from bubble mass balance (upper bound)")
-    ax.grid(alpha=0.3)
-    ax.legend(fontsize=8, loc="lower right")
-
-    if have_direct_CL:
-        ax = axes[2]
-        ax.plot(t_C, C_C, ".-", ms=2, color="C2",
-                label="<C_L> from m_component_lattices[0] (direct)")
-        if math.isfinite(kLa_dir):
-            t_fit = np.linspace(0, t_C[-1], 400)
-            ax.plot(t_fit, C_t(t_fit, C_inf_dir, kLa_dir), "-",
-                    label=f"fit: k_La = {kLa_dir_hr:.2f} /hr (C∞ = {C_inf_dir:.2f})")
-        ax.axhline(C_SAT_MOL_M3, ls="--", color="gray", label=f"C_sat = {C_SAT_MOL_M3:.2f} mol/m³")
-        ax.plot(t_ref, C_t(t_ref, C_SAT_MOL_M3, KLA_BENCHMARK_S), ":", color="k",
-                label="M-Star: k_La=4.1/hr, C_inf=C_sat")
-        ax.set_ylabel("<C_L>  (mol/m³)")
-        ax.set_title("(C) volume-averaged dissolved O₂ from solver field reduction (preferred)")
-        ax.grid(alpha=0.3)
-        ax.legend(fontsize=8, loc="lower right")
-
-    axes[-1].set_xlabel("physical time (s)")
-    fig.suptitle(
-        f"kla_bioreactor: 400 RPM, 0.4 L/min, target k_La ≈ 4.1 /hr  (M-Star benchmark)",
-        fontsize=10,
+    ax.plot(t, C, ".-", ms=3, color="C0", label="⟨C_L⟩ (direct solver reduction)")
+    t_ref = np.linspace(max(1e-3, t[0]), t[-1], 400)
+    if math.isfinite(kLa_c):
+        ax.plot(t_ref, C_t_constrained(t_ref, kLa_c), "-",
+                color="C2",
+                label=f"[1] Constrained fit (C∞=C_sat):  k_La = {kLa_c_hr:.2f} /hr")
+    if math.isfinite(kLa_ll):
+        ax.plot(t_ref, C_t_constrained(t_ref, kLa_ll), "--",
+                color="C3",
+                label=f"[2] Log-linear:                 k_La = {kLa_ll_hr:.2f} /hr")
+    ax.plot(t_ref, C_t_constrained(t_ref, KLA_BENCHMARK_S), ":",
+            color="k", label=f"M-Star benchmark: k_La = 4.1 /hr")
+    # Y-range: pad above the data so the fitted curves (which extrapolate
+    # toward C_sat) and the local slope all stay visible without compressing
+    # everything to a line.  Use 3× the data range as headroom.
+    C_max_data = float(max(C.max(), C_t_constrained(t[-1], kLa_c)
+                            if math.isfinite(kLa_c) else 0.0))
+    ax.set_ylim(0.0, max(C_max_data * 3.0, 1.1 * C[-1]))
+    ax.set_xlabel("physical time (s)")
+    ax.set_ylabel("⟨C_L⟩  (mol/m³)")
+    # Mirror axis on the right: % of C_sat
+    ax2 = ax.twinx()
+    ax2.set_ylim(ax.get_ylim()[0] * 100.0 / C_SAT_MOL_M3,
+                 ax.get_ylim()[1] * 100.0 / C_SAT_MOL_M3)
+    ax2.set_ylabel("⟨C_L⟩ / C_sat  (%)")
+    ax.set_title(
+        f"Method C: liquid-volume-averaged dissolved O₂  (⟨C_L⟩(end) = "
+        f"{C[-1]:.4f} mol/m³ = {100*C[-1]/C_SAT_MOL_M3:.2f}% of C_sat = {C_SAT_MOL_M3:.3f} mol/m³)"
     )
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8, loc="upper left")
+
+    # Log-linear plot of ln(C_sat − C_L) vs t  — slope = −k_La
+    ax = axes[1]
+    valid = (C > 0) & (C < C_SAT_MOL_M3) & (t >= 0.2)
+    if valid.any():
+        y = np.log(C_SAT_MOL_M3 - C[valid])
+        ax.plot(t[valid], y, ".", ms=3, color="C0", label="data (t ≥ 0.2 s)")
+        if math.isfinite(kLa_ll):
+            slope, intercept = np.polyfit(t[valid], y, 1)
+            ax.plot(t_ref, intercept + slope * t_ref, "-", color="C3",
+                    label=f"log-linear fit: −k_La = {slope:.4e} /s ⇒ k_La = {-slope*3600:.2f} /hr")
+        ax.plot(t_ref, np.log(C_SAT_MOL_M3) - KLA_BENCHMARK_S * t_ref, ":",
+                color="k", label="M-Star slope (k_La = 4.1 /hr)")
+        ax.set_xlabel("physical time (s)")
+        ax.set_ylabel("ln(C_sat − ⟨C_L⟩)")
+        ax.set_title("Log-linear view — slope = −k_La directly (steeper = larger k_La)")
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8, loc="lower left")
+
+    fig.suptitle("kla_bioreactor — 400 RPM, 0.4 L/min — Method C analysis",
+                 fontsize=10)
     fig.tight_layout()
-    out = Path(__file__).parent / "kla_verification.png"
+    out = SCRIPT_DIR / "kla_verification.png"
     fig.savefig(out, dpi=140)
-    print()
     print(f"saved → {out}")
 
 
