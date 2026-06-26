@@ -8374,24 +8374,132 @@ void LBM::fslbm_advance_surface(const int lev)
         // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
 
-    // Zero component lattices in cells that just converted to CELL_GAS.
-    // Same rationale as for g above: the component populations of an
-    // INTERFACE cell with phi → 0 are mostly ABB equilibrium fill, not
-    // real dissolved species; spilling them to fluid neighbours injects
-    // mass without volume.  Discarding is bounded by phi.
+    // -----------------------------------------------------------------------
+    // Step 5-component-spill (June 2026): redistribute the component-lattice
+    // (dissolved-species) populations of cells that just converted IFC → GAS
+    // to their fluid neighbours, BEFORE zeroing the source.
+    //
+    // Without this, every IFC→GAS conversion silently destroyed all of the
+    // dissolved O₂ stored in the cell, even though that O₂ was physically
+    // in the small remaining liquid film (φ·V_cell).  Empirically: in the
+    // kLa run at t = 9.5 s only 2.7 % of injected O₂ had dissolved
+    // (η_abs); the other 97 % was venting either through the surface OR
+    // through these spurious IFC→GAS deletions.  ParaView showed a "fat
+    // layer with no O₂" at the top of the interface band — the
+    // characteristic signature of this leak.
+    //
+    // Algorithm mirrors LBM::refill_and_spill (body-motion solid spill):
+    //   1st pass: tally stencil weights over LIQUID neighbours (preferred)
+    //             AND interface neighbours (fallback when no LIQUID).
+    //   2nd pass: distribute each f_comp[q] proportional to weight into a
+    //             scratch MultiFab spill_comp via atomic-add.
+    //   3rd pass: SumBoundary over ghost cells, then MultiFab::Add into
+    //             the main component lattice.
+    //   4th pass: zero the source cell.
+    //
+    // Why LIQUID-preferred (not LIQUID+IFC pooled):
+    //   - Spilling into IFC at low φ compresses dissolved O₂ into a thin
+    //     liquid film, producing an apparent supersaturation spike at the
+    //     volume-averaged reduction.  Spilling into bulk LIQUID (φ ≡ 1)
+    //     keeps the apparent and "true in-liquid" concentrations consistent.
+    //   - The fallback to IFC handles isolated bubble-cap configurations
+    //     where no LIQUID neighbour exists (e.g. a popping bubble at the
+    //     free surface) — better to spill imperfectly than to drop mass.
+    //
+    // Cost: one scratch MultiFab + 2 ParallelFor passes per component, per
+    // step.  At ~2500 IFC→GAS conversions/step out of 5.8M cells, kernel
+    // runtime is dominated by the full-domain ParallelFor sweep (not the
+    // sparse atomic work), so this adds ~0.5 ms per component per step.
+    // -----------------------------------------------------------------------
     if (m_n_components > 0) {
-        auto const& flag_arrs_ro = mass_flux.const_arrays();
+        auto const& flag_arrs_ro_outer = mass_flux.const_arrays();
+        auto const& ct_arrs_outer = m_cell_type[lev].const_arrays();
         for (int c = 0; c < m_n_components; ++c) {
+            amrex::MultiFab spill_comp(
+                boxArray(lev), DistributionMap(lev), N_MICRO_STATES,
+                m_component_lattices[c][lev].nGrow(), amrex::MFInfo(),
+                *(m_factory[lev]));
+            spill_comp.setVal(amrex::Real(0.0));
+
             auto const& f_comp_arrs = m_component_lattices[c][lev].arrays();
+            auto const& spill_arrs  = spill_comp.arrays();
+
             amrex::ParallelFor(
-                m_component_lattices[c][lev],
+                m_component_lattices[c][lev], amrex::IntVect(0),
                 [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
-                    if (flag_arrs_ro[nbx](i, j, k, 0) > amrex::Real(0.5)) {
-                        for (int q = 0; q < N_MICRO_STATES; ++q)
+                    const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
+                    if (flag_arrs_ro_outer[nbx](iv, 0) <= amrex::Real(0.5)) {
+                        return;   // not a fresh IFC→GAS conversion
+                    }
+
+                    const auto& f_arr = f_comp_arrs[nbx];
+                    const auto lb     = amrex::lbound(f_arr);
+                    const auto ub     = amrex::ubound(f_arr);
+
+                    // 1st pass: tally LIQUID and IFC weights separately.
+                    amrex::Real wsum_L = amrex::Real(0.0);
+                    amrex::Real wsum_I = amrex::Real(0.0);
+                    for (int nq = 1; nq < N_MICRO_STATES; ++nq) {
+                        const int ni = i + evs[nq][0];
+                        const int nj = j + evs[nq][1];
+                        const int nk = k + evs[nq][2];
+                        if (ni < lb.x || ni > ub.x || nj < lb.y || nj > ub.y ||
+                            nk < lb.z || nk > ub.z) {
+                            continue;
+                        }
+                        const int ctn = ct_arrs_outer[nbx](ni, nj, nk, 0);
+                        if      (ctn == CELL_LIQUID)    wsum_L += weights[nq];
+                        else if (ctn == CELL_INTERFACE) wsum_I += weights[nq];
+                    }
+
+                    const bool use_liquid = (wsum_L > amrex::Real(0.0));
+                    const amrex::Real wsum = use_liquid ? wsum_L : wsum_I;
+
+                    if (wsum == amrex::Real(0.0)) {
+                        // No fluid neighbours: mass truly lost (e.g. isolated
+                        // gas pocket fully surrounded by GAS / SOLID).
+                        for (int q = 0; q < N_MICRO_STATES; ++q) {
                             f_comp_arrs[nbx](i, j, k, q) = amrex::Real(0.0);
+                        }
+                        return;
+                    }
+
+                    // 2nd pass: distribute f_comp[q] proportionally to the
+                    // chosen target set (LIQUID preferred, else IFC).
+                    const amrex::Real inv_wsum = amrex::Real(1.0) / wsum;
+                    for (int nq = 1; nq < N_MICRO_STATES; ++nq) {
+                        const int ni = i + evs[nq][0];
+                        const int nj = j + evs[nq][1];
+                        const int nk = k + evs[nq][2];
+                        if (ni < lb.x || ni > ub.x || nj < lb.y || nj > ub.y ||
+                            nk < lb.z || nk > ub.z) {
+                            continue;
+                        }
+                        const int ctn = ct_arrs_outer[nbx](ni, nj, nk, 0);
+                        const bool accept = use_liquid
+                            ? (ctn == CELL_LIQUID)
+                            : (ctn == CELL_INTERFACE);
+                        if (!accept) { continue; }
+                        const amrex::Real w = weights[nq] * inv_wsum;
+                        for (int q = 0; q < N_MICRO_STATES; ++q) {
+                            amrex::Gpu::Atomic::AddNoRet(
+                                &spill_arrs[nbx](ni, nj, nk, q),
+                                f_comp_arrs[nbx](i, j, k, q) * w);
+                        }
+                    }
+
+                    // Zero the source after all spills accumulated.
+                    for (int q = 0; q < N_MICRO_STATES; ++q) {
+                        f_comp_arrs[nbx](i, j, k, q) = amrex::Real(0.0);
                     }
                 });
             // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
+
+            spill_comp.SumBoundary(Geom(lev).periodicity());
+            amrex::MultiFab::Add(
+                m_component_lattices[c][lev], spill_comp, 0, 0,
+                N_MICRO_STATES, 0);
+            m_component_lattices[c][lev].FillBoundary(Geom(lev).periodicity());
         }
     }
 
