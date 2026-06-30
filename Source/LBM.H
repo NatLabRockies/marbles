@@ -474,6 +474,33 @@ public:
     /// o2_src_mf: 1-component source rate in mol/(m³·s).
     void apply_bubble_o2_source(int lev, const amrex::MultiFab& o2_src_mf);
 
+    /// Free-surface O2 Henry-equilibrium flux source.
+    ///
+    /// For every CELL_INTERFACE cell, compute a Kawase-style flux between
+    /// the liquid and the gas above the free surface and ADD it to
+    /// o2_src_mf (units mol/(m^3 s), same convention as the bubble source):
+    ///
+    ///   j   = k_L_surf * |grad phi|/dx_phys * (C_eq_surface - C_L_local)
+    ///   k_L = surface_kL_coefficient * (eps_local * nu)^(1/4) * Sc^(-1/2)
+    ///
+    /// where C_L_local is the local dissolved-O2 concentration in mol/m^3
+    /// (rho_O2_LB * C_ref) and C_eq_surface = bubble.surface_C_eq_mol_m3.
+    /// |grad phi| is the canonical phase-field interfacial-area density and
+    /// the gradient is taken from m_phi_fslbm via central differences.
+    /// Local epsilon is read from the m_derived(EPSILON_IDX) field.
+    ///
+    /// When bubble.surface_only_loss = 1 (the default) the flux is gated
+    /// to ZERO whenever (C_eq_surface - C_L_local) >= 0, i.e. the surface
+    /// never INJECTS oxygen and only acts when the liquid is supersaturated
+    /// relative to the headspace equilibrium concentration.  Set it to 0
+    /// for a bidirectional Henry's-law boundary.
+    ///
+    /// total_flux_mol_per_s_out: optional output total mol/s integrated
+    /// over the interface (informational, set to nullptr to skip).
+    void apply_free_surface_o2_flux(int                 lev,
+                                    amrex::MultiFab&    o2_src_mf,
+                                    amrex::Real*        total_flux_mol_per_s_out = nullptr) const;
+
 private:
 
     // file for forces
@@ -749,6 +776,27 @@ private:
     /// Concentration reference: 1 LB_rho unit ≡ m_bubble_o2_C_ref [mol/m³]
     /// Used to convert k_La O2 source from mol/(m³·s) → LB_rho/step.
     amrex::Real      m_bubble_o2_C_ref     = 1.0;
+
+    // ---------------------------------------------------------------
+    // Free-surface O2 Henry-equilibrium flux (apply_free_surface_o2_flux)
+    // ---------------------------------------------------------------
+    /// Master switch for the free-surface O2 boundary condition.
+    /// Set via bubble.enable_surface_flux in the input file (default off).
+    bool             m_surface_o2_flux_enable    = false;
+    /// Kawase pre-factor in k_L_surf = C * (eps * nu)^(1/4) * Sc^(-1/2).
+    /// Defaults to 0.301 (same value as the bubble k_L correlation).
+    /// Set via bubble.surface_kL_coefficient.
+    amrex::Real      m_surface_kL_coefficient    = 0.301;
+    /// Headspace equilibrium liquid concentration C_eq_surface [mol/m^3].
+    /// Drives the flux:  j = k_L_surf * a_surf * (C_eq_surface - C_L_local).
+    /// Defaults to 1.427 (= 0.032 * 44.6 = S * O2_initial_conc, i.e. the
+    /// liquid saturation in equilibrium with the bubble gas at STP).
+    /// Set via bubble.surface_C_eq_mol_m3.
+    amrex::Real      m_surface_C_eq_mol_m3       = 1.427;
+    /// When 1, the flux is gated to zero unless C_L_local > C_eq_surface,
+    /// i.e. the surface only DEGASSES the liquid and never inputs O2.
+    /// Set via bubble.surface_only_loss (default 1 — desorption-only).
+    bool             m_surface_only_loss         = true;
 
     /// Internal step counter for coalescence and stats intervals
     int              m_bubble_step_counter = 0;

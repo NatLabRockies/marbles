@@ -238,6 +238,33 @@ lbm.gravity = 0.0 0.0 -9.81
 bubble.O2_concentration_reference = 100.0   # mol/m³ per LB_rho
 
 # ---------------------------------------------------------------
+# Free-surface Henry-equilibrium O2 BC (June 2026)
+# ---------------------------------------------------------------
+# Adds a Kawase-style mass-transfer flux at every CELL_INTERFACE cell:
+#   j = k_L_surf · |∇φ|/dx_phys · (C_eq_surface − C_L_local)   [mol/(m³·s)]
+#   k_L_surf = surface_kL_coefficient · (ε·ν)^(1/4) · Sc^(-1/2)
+# The |∇φ|/dx_phys factor is the canonical phase-field interfacial-area
+# density: integrating it over IFC cells recovers the geometric A_interface.
+# C_L_local is the local lattice rho_O2 in mol/m³.
+#
+# enable_surface_flux        = master switch (1 = on, 0 = off; default 0).
+# surface_kL_coefficient     = pre-factor in k_L_surf (default 0.301, same
+#                              as bubble.kL_coefficient).
+# surface_C_eq_mol_m3        = headspace equilibrium concentration C_eq.
+#                              Default 1.427 = S * O2_initial_conc =
+#                              0.032*44.6 = liquid sat in equilibrium with
+#                              pure-O2 headspace at STP.  Use 0.275 for
+#                              normal air (S * 8.59 mol/m³ at 21% O2).
+# surface_only_loss          = 1 (default): one-way valve — flux is gated
+#                              to zero unless C_L > C_eq, so the surface
+#                              only DEGASSES the liquid (never inputs O2).
+#                              Set 0 for bidirectional Henry equilibrium.
+bubble.enable_surface_flux      = 1
+bubble.surface_kL_coefficient   = 0.301
+bubble.surface_C_eq_mol_m3      = 1.427    # = S × C_g_bubble (pure O2 headspace)
+bubble.surface_only_loss        = 1        # desorption-only valve
+
+# ---------------------------------------------------------------
 # Sparger (7-hole ring, 15 cells below impeller center)
 # ---------------------------------------------------------------
 # The benchmark states: 7 × 0.8 mm holes "on the bottom of the gas line

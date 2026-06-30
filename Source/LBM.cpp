@@ -543,6 +543,19 @@ void LBM::read_parameters()
         {
             amrex::ParmParse pp("bubble");
             pp.query("O2_concentration_reference", m_bubble_o2_C_ref);
+
+            // Free-surface Henry-equilibrium flux (degassing through the
+            // liquid-air interface).  See LBM::apply_free_surface_o2_flux
+            // for the model description.  Defaults give a desorption-only
+            // boundary at C_eq = S * O2_initial_conc = 1.427 mol/m^3.
+            int enable_surface = 0;
+            int only_loss      = 1;
+            pp.query("enable_surface_flux",      enable_surface);
+            pp.query("surface_kL_coefficient",   m_surface_kL_coefficient);
+            pp.query("surface_C_eq_mol_m3",      m_surface_C_eq_mol_m3);
+            pp.query("surface_only_loss",        only_loss);
+            m_surface_o2_flux_enable = (enable_surface != 0);
+            m_surface_only_loss      = (only_loss      != 0);
         }
         // Propagate C_ref into BubbleParams so deposit_o2_sources can use it
         m_bubble_params.C_ref = m_bubble_o2_C_ref;
@@ -551,6 +564,16 @@ void LBM::read_parameters()
                        << "  dx_phys = " << m_bubble_params.dx_phys << " m\n"
                        << "  dt_phys = " << m_bubble_params.dt_phys << " s\n"
                        << "  O2 C_ref = " << m_bubble_o2_C_ref << " mol/m3 per LB_rho\n";
+        if (m_surface_o2_flux_enable) {
+            amrex::Print() << "[BubbleManager] Free-surface O2 flux ENABLED.\n"
+                           << "  surface_kL_coefficient = " << m_surface_kL_coefficient << "\n"
+                           << "  surface_C_eq_mol_m3    = " << m_surface_C_eq_mol_m3
+                           << " (= S * C_g_headspace)\n"
+                           << "  surface_only_loss      = " << (m_surface_only_loss ? 1 : 0)
+                           << (m_surface_only_loss
+                                   ? "  (desorption only — flux=0 when C_L<=C_eq)\n"
+                                   : "  (bidirectional Henry equilibrium)\n");
+        }
     }
 }
 
@@ -1126,6 +1149,22 @@ void LBM::advance(
                 amrex::Print() << "[O2_debug step=" << m_isteps[lev]
                                << "] o2_src.norm0=" << src_max
                                << "  rho_O2_before=" << rho_o2_before << "\n";
+            }
+            // Free-surface Henry-equilibrium O2 BC.  Adds a per-cell
+            // desorption rate to o2_src for every CELL_INTERFACE cell.
+            // No-op (early return) when bubble.enable_surface_flux = 0.
+            // total_surface_flux is in mol/s integrated over the interface
+            // (negative = net desorption to headspace).
+            amrex::Real total_surface_flux = 0.0;
+            const bool surface_diag =
+                m_surface_o2_flux_enable && m_print_int > 0 &&
+                (m_isteps[lev] % m_print_int == 0);
+            apply_free_surface_o2_flux(
+                lev, o2_src, surface_diag ? &total_surface_flux : nullptr);
+            if (surface_diag) {
+                amrex::Print() << "[surface_o2 step=" << m_isteps[lev]
+                               << "] total_flux=" << total_surface_flux
+                               << " mol/s  (negative = desorption)\n";
             }
             apply_bubble_o2_source(lev, o2_src);
             if (m_print_int > 0 && m_isteps[lev] % m_print_int == 0) {
@@ -6845,8 +6884,147 @@ void LBM::apply_bubble_o2_source(int lev, const amrex::MultiFab& o2_src_mf)
 }
 
 // ============================================================================
-// FSLBM helper: derive IS_FLUID_IDX and all boundary markers directly from
-// m_cell_type, bypassing m_is_fluid_fraction entirely.
+// LBM::apply_free_surface_o2_flux
+//
+// Henry-equilibrium O2 mass-transfer boundary condition at the FSLBM
+// liquid-air interface.  For every CELL_INTERFACE cell, deposit a Kawase-
+// type flux into the shared o2_src MultiFab (same units mol/(m^3 s) as the
+// bubble source), so that the existing apply_bubble_o2_source pipeline
+// converts it to LB_rho/step and adds it to the component lattice.
+//
+//   j = k_L_surf * |grad phi|/dx_phys * (C_eq_surface - C_L_local)
+//
+// where:
+//   * k_L_surf  =  surface_kL_coefficient * (eps_local * nu)^(1/4) * Sc^(-1/2)
+//                 with eps_local read from m_derived(EPSILON_IDX) and
+//                 converted from LB units (dx^2/dt^3) to SI (m^2/s^3).
+//   * |grad phi| is computed by central differences on m_phi_fslbm (which
+//     has m_f_nghost >= 1 ghost cells already filled by fslbm_advance_surface).
+//     For a phase-field interface, |grad phi|/dx is the canonical interface
+//     area density per unit volume [m^-1], so integrating j over all IFC
+//     cells recovers the geometric interface area.
+//   * C_L_local = (sum_q f_O2[q]) * C_ref  [mol/m^3]   from m_component_lattices[0].
+//   * C_eq_surface  =  m_surface_C_eq_mol_m3 (e.g. 0.032 * 44.6 = 1.427 for
+//     liquid in equilibrium with a pure-O2 headspace at STP).
+//
+// One-way valve (m_surface_only_loss = true, the default):
+//   When (C_eq_surface - C_L_local) >= 0 the cell is skipped, so the surface
+//   never INJECTS O2 — it can only desorb supersaturated liquid.
+//
+// total_flux_mol_per_s_out (optional): per-rank partial sum of j*V_cell so
+// the caller can reduce and print a single diagnostic number per step.
+// ============================================================================
+void LBM::apply_free_surface_o2_flux(
+    int                 lev,
+    amrex::MultiFab&    o2_src_mf,
+    amrex::Real*        total_flux_mol_per_s_out) const
+{
+    BL_PROFILE("LBM::apply_free_surface_o2_flux()");
+
+    if (total_flux_mol_per_s_out != nullptr) {
+        *total_flux_mol_per_s_out = amrex::Real(0.0);
+    }
+    if (!m_surface_o2_flux_enable) { return; }
+    if (!m_free_surface)           { return; }
+    if (m_n_components < 1)        { return; }
+
+    using namespace lbm::constants;
+
+    const amrex::Real dx_phys = m_bubble_params.dx_phys;
+    const amrex::Real dt_phys = m_bubble_params.dt_phys;
+    const amrex::Real C_ref   = m_bubble_o2_C_ref;
+    const amrex::Real nu_phys = m_bubble_params.nu_fluid;
+    const amrex::Real D_O2    = m_bubble_params.D_O2;
+    const amrex::Real Sc      = nu_phys / D_O2;
+    const amrex::Real kL_coef = m_surface_kL_coefficient;
+    const amrex::Real C_eq    = m_surface_C_eq_mol_m3;
+    const bool only_loss      = m_surface_only_loss;
+    // eps conversion: LB (dx^2/dt^3) -> SI (m^2/s^3)
+    const amrex::Real eps_conv = dx_phys * dx_phys / (dt_phys * dt_phys * dt_phys);
+    const amrex::Real Sc_pow   = std::pow(Sc, amrex::Real(-0.5));
+
+    auto const& ct_arrs    = m_cell_type[lev].const_arrays();
+    auto const& phi_arrs   = m_phi_fslbm[lev].const_arrays();
+    auto const& fO2_arrs   = m_component_lattices[0][lev].const_arrays();
+    auto const& der_arrs   = m_derived[lev].const_arrays();
+    auto       src_arrs    = o2_src_mf.arrays();
+
+    // Reduce per-cell mol/s = j_mol_m3_s * dx^3
+    amrex::ReduceOps<amrex::ReduceOpSum> reduce_op;
+    amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
+    using ReduceTuple = typename decltype(reduce_data)::Type;
+
+    const amrex::Real V_cell_phys = dx_phys * dx_phys * dx_phys;
+
+    reduce_op.eval(
+        o2_src_mf, amrex::IntVect(0), reduce_data,
+        [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) -> ReduceTuple
+        {
+            if (ct_arrs[nbx](i, j, k, 0) != CELL_INTERFACE) {
+                return {amrex::Real(0.0)};
+            }
+
+            // |grad phi| via central differences (LB units, per cell).
+            // m_phi_fslbm has m_f_nghost >= 1 ghost cells filled.
+            const amrex::Real dphidx = amrex::Real(0.5) *
+                (phi_arrs[nbx](i + 1, j, k, 0) - phi_arrs[nbx](i - 1, j, k, 0));
+            const amrex::Real dphidy = amrex::Real(0.5) *
+                (phi_arrs[nbx](i, j + 1, k, 0) - phi_arrs[nbx](i, j - 1, k, 0));
+            const amrex::Real dphidz = AMREX_D_PICK(
+                amrex::Real(0.0), amrex::Real(0.0),
+                amrex::Real(0.5) *
+                    (phi_arrs[nbx](i, j, k + 1, 0) - phi_arrs[nbx](i, j, k - 1, 0)));
+            const amrex::Real grad_phi_LB =
+                std::sqrt(dphidx * dphidx + dphidy * dphidy + dphidz * dphidz);
+            // Skip if interface gradient is degenerate (numerical noise).
+            if (!(grad_phi_LB > amrex::Real(1.0e-6))) {
+                return {amrex::Real(0.0)};
+            }
+
+            // Local C_L (mol/m^3) from the component-0 lattice sum.
+            amrex::Real rho_O2_LB = amrex::Real(0.0);
+            for (int q = 0; q < N_MICRO_STATES; ++q) {
+                rho_O2_LB += fO2_arrs[nbx](i, j, k, q);
+            }
+            const amrex::Real C_L_local = rho_O2_LB * C_ref;
+            const amrex::Real driving   = C_eq - C_L_local;
+
+            // One-way valve: skip if surface would INJECT O2 (driving >= 0).
+            if (only_loss && driving >= amrex::Real(0.0)) {
+                return {amrex::Real(0.0)};
+            }
+
+            // Local epsilon (SI) from the Smagorinsky-LES diagnostic.
+            const amrex::Real eps_LB = der_arrs[nbx](i, j, k, EPSILON_IDX);
+            const amrex::Real eps_SI =
+                amrex::max(eps_LB * eps_conv, amrex::Real(1.0e-10));
+
+            // Kawase k_L_surf (m/s).  Same correlation as bubbles.
+            const amrex::Real k_L = kL_coef *
+                std::pow(eps_SI * nu_phys, amrex::Real(0.25)) * Sc_pow;
+
+            // Interfacial area density per unit volume [m^-1].
+            // |grad phi|_LB has units 1/cell; divide by dx_phys for 1/m.
+            const amrex::Real a_surf = grad_phi_LB / dx_phys;
+
+            // Flux per unit cell volume [mol/(m^3 s)].  Negative ⇒ desorption.
+            const amrex::Real rate_mol_m3_s = k_L * a_surf * driving;
+
+            // ADD to the existing source MultiFab (atomic not needed: each
+            // cell is touched by exactly one thread in this ParallelFor).
+            src_arrs[nbx](i, j, k, 0) += rate_mol_m3_s;
+
+            // Per-cell mol/s for the diagnostic reduction.
+            return {rate_mol_m3_s * V_cell_phys};
+        });
+
+    if (total_flux_mol_per_s_out != nullptr) {
+        ReduceTuple host_tuple = reduce_data.value(reduce_op);
+        amrex::Real flux_local = amrex::get<0>(host_tuple);
+        amrex::ParallelDescriptor::ReduceRealSum(flux_local);
+        *total_flux_mol_per_s_out = flux_local;
+    }
+}
 //
 // This is the FSLBM replacement for update_is_fluid_from_fraction_and_mark.
 // We do NOT use m_is_fluid_fraction because:
