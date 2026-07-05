@@ -62,19 +62,43 @@ WORK_CSV   = SCRIPT_DIR / "bubble_stats.csv"
 # 2. Parse bubble_stats.csv (Method C source)
 # --------------------------------------------------------------------------
 def parse_bubble_stats(path):
-    """Return dict-of-arrays.  Handles 8-col (legacy) and 10-col schemas."""
-    cols = {}
+    """Return dict-of-arrays keyed by column name.
+
+    Handles the 8-col (legacy) and 10-col schemas.  Also handles restart-
+    induced duplicate rows: the bubble stats writer opens the CSV with
+    ``std::ios::app`` on restart, so when the run resumes from a
+    checkpoint whose step index precedes the previous end-of-file step,
+    the overlapping window appears twice.  We deduplicate by the ``step``
+    column keeping the LAST occurrence for each step (which is the row
+    written by the most recent restart, i.e. the freshest physics).
+    """
+    rows = []
     with open(path, newline="") as f:
         reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames or []
         for row in reader:
+            parsed = {}
             for k, v in row.items():
                 if k is None or v is None or v == "":
                     continue
                 try:
-                    val = float(v)
+                    parsed[k] = float(v)
                 except ValueError:
                     continue
-                cols.setdefault(k, []).append(val)
+            if parsed:
+                rows.append(parsed)
+
+    # Dedupe by step (last-write-wins), then sort ascending.
+    if rows and "step" in rows[0]:
+        by_step = {}
+        for r in rows:
+            by_step[r["step"]] = r
+        rows = [by_step[s] for s in sorted(by_step)]
+
+    cols = {}
+    for r in rows:
+        for k, v in r.items():
+            cols.setdefault(k, []).append(v)
     return {k: np.array(v) for k, v in cols.items()}
 
 

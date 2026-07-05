@@ -69,7 +69,7 @@
 #     baffled_wall.stl      — designed for 128-cell tank; scale to 180/128 ≈ 1.406
 # ============================================================
 
-max_step = 838000  # ≈ 10 s physical time
+max_step = 2514000  # ≈ 10 s physical time
 
 # ---------------------------------------------------------------
 # Geometry
