@@ -474,6 +474,24 @@ public:
     /// o2_src_mf: 1-component source rate in mol/(m³·s).
     void apply_bubble_o2_source(int lev, const amrex::MultiFab& o2_src_mf);
 
+    /// Compute per-cell Smagorinsky SGS eddy viscosity nu_sgs into m_nu_sgs.
+    /// Reads velocity gradients from m_macrodata (ghost cells must be
+    /// filled — the caller is responsible; f_to_macrodata's FillBoundary
+    /// at the end of its kernel satisfies this in the standard step
+    /// ordering).  Populates m_nu_sgs[lev] with nu_sgs = (Cs·Δx)² · |S|
+    /// at every IS_FLUID cell, and 0 elsewhere.  No-op when
+    /// m_use_sgs_in_collision is false.
+    void compute_local_sgs_viscosity(int lev);
+
+    /// Append one CSV row of the dissolved-O2 concentration at every
+    /// probe location.  Called every m_probe_stats_int steps from
+    /// advance().  Public because it hosts an extended __device__ lambda
+    /// via amrex::ReduceOps (nvcc error 20092 forbids such lambdas in
+    /// private methods).  See LBM::compute_dissolved_o2_average for the
+    /// same pattern.  No-op when m_probe_enable is false or the step
+    /// does not fall on the m_probe_stats_int cadence.
+    void write_probe_stats(int step, amrex::Real phys_time_s);
+
     /// Free-surface O2 Henry-equilibrium flux source.
     ///
     /// For every CELL_INTERFACE cell, compute a Kawase-style flux between
@@ -699,6 +717,35 @@ private:
     // if/when needed.
     amrex::Real m_fslbm_mass_target = amrex::Real(-1.0);
 
+    // ---------------------------------------------------------------
+    // Smagorinsky SGS in the collision (Thomas et al. 2021 Eq. 4)
+    // ---------------------------------------------------------------
+    // Master switch: when true, before every relax_f_to_equilibrium call
+    // the local strain rate |S| is computed from macrodata gradients and
+    // the Smagorinsky eddy viscosity
+    //
+    //     nu_sgs = (Cs · Δx)^2 · |S|,   Cs = constants::SMAGORINSKY_CS,
+    //
+    // is stored in m_nu_sgs.  Inside the BGK relaxation the collision uses
+    //
+    //     omega = 1 / (nu_local / (Rg · T · dt) + 1/2),
+    //     nu_local = m_nu + m_nu_sgs[cell],
+    //
+    // i.e. the standard total (molecular + eddy) viscosity form.  The
+    // R·T factor in the denominator is the isothermal LBM sound-speed
+    // squared cs_T² = R·T; adiabatic cs² = γ·R·T is only the physical
+    // sound propagation speed (Mach number) and does NOT enter here.
+    // The existing compute_derived path already stores nu_sgs implicitly
+    // via  ε = ν_T · |S|² ; the same formula is reused here.
+    // Default false (backward-compatible); set lbm.use_sgs_in_collision.
+    bool m_use_sgs_in_collision = false;
+    // Persistent per-cell SGS eddy viscosity nu_sgs (LB units, 1 component,
+    // no ghosts).  Filled by compute_local_sgs_viscosity(lev) right before
+    // relax_f_to_equilibrium.  Only meaningful / read when
+    // m_use_sgs_in_collision is true, but always allocated so the array
+    // layout and MFIter iteration order match m_macrodata unconditionally.
+    amrex::Vector<amrex::MultiFab> m_nu_sgs;
+
     // Moving body parameters
     bool m_body_is_moving = false;
     amrex::GpuArray<amrex::Real, 3> m_body_velocity = {0.0, 0.0, 0.0};
@@ -765,6 +812,38 @@ private:
     // Species statistics output
     std::string   m_species_stats_file{"species_stats.csv"};
     std::fstream  m_species_stats_stream;
+
+    // ---------------------------------------------------------------
+    // Fixed-location probes (analog of M-Star's probe.txt output)
+    // ---------------------------------------------------------------
+    // Sample dissolved-O2 concentration at fixed spatial points at a
+    // configurable interval, write to a CSV file.  Configuration lives
+    // under the "probe." namespace in the input file:
+    //     probe.enable       = 0 (default off)   master switch
+    //     probe.n_points     = 1                 number of probes
+    //     probe.positions    = x0 y0 z0 x1 y1 z1 ...   LB cell coords
+    //     probe.stats_int    = 200               steps between CSV rows
+    //     probe.stats_file   = "probes.csv"      output file name
+    // Sampled quantity per probe: C_L(x,t) via trilinear interpolation of
+    // (sum_q f_O2) * C_ref  [mol/m^3] on m_component_lattices[0].  Each
+    // row is written as:
+    //     step, phys_time_s, C_L_probe0, C_L_probe1, ...
+    // No-op when m_probe_enable == false or m_probe_n_points == 0.
+    bool                     m_probe_enable      = false;
+    int                      m_probe_n_points    = 0;
+    amrex::Vector<amrex::Real> m_probe_x, m_probe_y, m_probe_z;
+    std::string              m_probe_stats_file  = "probes.csv";
+    int                      m_probe_stats_int   = 200;
+    std::fstream             m_probe_stats_stream;
+
+    // Read probe.* parameters (called from read_parameters).
+    void read_probe_parameters();
+    // Open the probe stats CSV file, appending or truncating depending on
+    // whether the file already exists.  Called once during initialization.
+    void open_probe_stats_file(bool append);
+    // NOTE: write_probe_stats is DECLARED PUBLIC above (its extended
+    // __device__ lambda cannot live in a private method — nvcc error
+    // 20092).  Left as a private data-only section here.
 
     // ---------------------------------------------------------------
     // Lagrangian bubble physics (two-phase kLa mass transfer)

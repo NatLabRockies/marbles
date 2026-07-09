@@ -358,5 +358,25 @@ void average_down_with_ghosts(
     const amrex::IntVect ref_ratio);
 
 bool file_exists(const std::string& fname);
+
+// Host-side trilinear interpolation of one component of a MultiFab at a
+// point (px, py, pz) given in the LB-cell coordinate system (i.e. matching
+// geom.ProbLo / geom.CellSize).  Defined in Bubble.cpp.
+//
+// WARNING: this function reads the MultiFab's Array4 from HOST code.  When
+// AMReX is compiled with CUDA and the arena is NOT managed
+// (amrex.the_arena_is_managed = 0), such a host read of device memory
+// segfaults.  For non-managed CUDA runs, use a GPU-side ReduceOps kernel
+// instead (see LBM::write_probe_stats for a worked example).
+//
+// Behaviour on multi-rank runs: iterates MFIter locally and returns 0.0
+// on ranks that don't own the cell containing (px,py,pz).  Callers that
+// need the true probe value across MPI must reduce (typically Sum, since
+// exactly one rank returns non-zero).  Single-rank runs work directly.
+amrex::Real trilinear_interp(
+    const amrex::MultiFab& mf,
+    int                    comp,
+    const amrex::Geometry& geom,
+    amrex::Real px, amrex::Real py, amrex::Real pz);
 } // namespace lbm
 #endif

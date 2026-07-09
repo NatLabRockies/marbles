@@ -129,6 +129,7 @@ LBM::LBM()
     m_cell_type.resize(nlevs_max);
     m_phi_fslbm.resize(nlevs_max);
     m_pre_fslbm_mass.resize(nlevs_max);
+    m_nu_sgs.resize(nlevs_max);
 
     m_factory.resize(nlevs_max);
     // BCs
@@ -333,6 +334,7 @@ void LBM::read_parameters()
                  m_clamp_component_rho_main_floor);
         pp.query("use_entropic_components", m_use_entropic_components);
         pp.query("use_entropic_f", m_use_entropic_f);
+        pp.query("use_sgs_in_collision", m_use_sgs_in_collision);
 
         pp.query("initial_temperature", m_initialTemperature);
 
@@ -575,7 +577,205 @@ void LBM::read_parameters()
                                    : "  (bidirectional Henry equilibrium)\n");
         }
     }
+
+    // Fixed-location probe sampler (M-Star probe.txt analog).
+    read_probe_parameters();
 }
+
+// ============================================================================
+// Probe sampler (M-Star probe.txt analog)
+// ============================================================================
+void LBM::read_probe_parameters()
+{
+    amrex::ParmParse pp("probe");
+    int enable = 0;
+    pp.query("enable", enable);
+    m_probe_enable = (enable != 0);
+    if (!m_probe_enable) { return; }
+
+    pp.query("n_points",  m_probe_n_points);
+    pp.query("stats_int", m_probe_stats_int);
+    pp.query("stats_file", m_probe_stats_file);
+
+    if (m_probe_n_points <= 0) {
+        amrex::Print() << "[Probes] probe.enable = 1 but probe.n_points <= 0; "
+                          "disabling probes.\n";
+        m_probe_enable = false;
+        return;
+    }
+
+    // Positions: flat list x0 y0 z0 x1 y1 z1 ... in LB cell coordinates.
+    amrex::Vector<amrex::Real> pos_flat;
+    if (!pp.queryarr("positions", pos_flat)) {
+        amrex::Print() << "[Probes] probe.n_points = " << m_probe_n_points
+                       << " but probe.positions is missing; disabling probes.\n";
+        m_probe_enable = false;
+        return;
+    }
+    if (static_cast<int>(pos_flat.size()) != 3 * m_probe_n_points) {
+        amrex::Print() << "[Probes] probe.positions has "
+                       << pos_flat.size() << " values but n_points*3 = "
+                       << 3 * m_probe_n_points << "; disabling probes.\n";
+        m_probe_enable = false;
+        return;
+    }
+    m_probe_x.resize(m_probe_n_points);
+    m_probe_y.resize(m_probe_n_points);
+    m_probe_z.resize(m_probe_n_points);
+    for (int i = 0; i < m_probe_n_points; ++i) {
+        m_probe_x[i] = pos_flat[3*i + 0];
+        m_probe_y[i] = pos_flat[3*i + 1];
+        m_probe_z[i] = pos_flat[3*i + 2];
+    }
+
+    amrex::Print() << "[Probes] ENABLED.  n_points = " << m_probe_n_points
+                   << "  stats_int = " << m_probe_stats_int
+                   << "  stats_file = " << m_probe_stats_file << "\n";
+    for (int i = 0; i < m_probe_n_points; ++i) {
+        amrex::Print() << "  probe " << i << ": ("
+                       << m_probe_x[i] << ", " << m_probe_y[i]
+                       << ", " << m_probe_z[i] << ") LB cells\n";
+    }
+
+    // Open the CSV file (append if it already exists).
+    open_probe_stats_file(/*append=*/true);
+}
+
+void LBM::open_probe_stats_file(bool append)
+{
+    if (!m_probe_enable) { return; }
+    if (!amrex::ParallelDescriptor::IOProcessor()) { return; }
+
+    // Detect whether the file already has a header (append-into-empty is
+    // handled by writing the header ourselves).
+    bool file_is_empty = true;
+    {
+        std::ifstream probe(m_probe_stats_file, std::ios::binary);
+        if (probe.is_open()) {
+            file_is_empty =
+                (probe.peek() == std::ifstream::traits_type::eof());
+        }
+    }
+    m_probe_stats_stream.open(
+        m_probe_stats_file,
+        std::ios::out | (append ? std::ios::app : std::ios::trunc));
+
+    if (file_is_empty || !append) {
+        m_probe_stats_stream << "step,phys_time_s";
+        for (int i = 0; i < m_probe_n_points; ++i) {
+            m_probe_stats_stream << ",C_L_probe" << i << "_mol_m3";
+        }
+        m_probe_stats_stream << "\n";
+        // Also record probe positions in a comment header (LB cell coords).
+        m_probe_stats_stream << "# probe positions (LB cells):";
+        for (int i = 0; i < m_probe_n_points; ++i) {
+            m_probe_stats_stream << "  p" << i << "=("
+                                 << m_probe_x[i] << "," << m_probe_y[i]
+                                 << "," << m_probe_z[i] << ")";
+        }
+        m_probe_stats_stream << "\n";
+    }
+    m_probe_stats_stream.flush();
+}
+
+void LBM::write_probe_stats(int step, amrex::Real phys_time_s)
+{
+    if (!m_probe_enable) { return; }
+    if (m_probe_stats_int <= 0) { return; }
+    if (step % m_probe_stats_int != 0) { return; }
+    if (m_n_components < 1) { return; }
+
+    // Build the macroscopic O2 density (sum_q f_O2) on level 0.  Same
+    // reduction used by apply_bubble_o2_source's C_f interpolation.
+    const int lev = 0;
+    amrex::MultiFab rho_o2(
+        m_f[lev].boxArray(), m_f[lev].DistributionMap(), 1, 0);
+    rho_o2.setVal(0.0);
+    for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+        amrex::MultiFab::Add(rho_o2, m_component_lattices[0][lev], q, 0, 1, 0);
+    }
+
+    // Geometry inputs for the interpolation kernel below.
+    const amrex::Real* plo_ptr = Geom(lev).ProbLo();
+    const amrex::Real* dx_ptr  = Geom(lev).CellSize();
+    const amrex::Real plox = plo_ptr[0];
+    const amrex::Real ploy = plo_ptr[1];
+    const amrex::Real ploz = plo_ptr[2];
+    const amrex::Real dxx  = dx_ptr[0];
+    const amrex::Real dxy  = dx_ptr[1];
+    const amrex::Real dxz  = dx_ptr[2];
+
+    // Sample at each probe.  We use a GPU ReduceOps that iterates the
+    // whole valid region and contributes a weighted value only when the
+    // cell (i,j,k) is one of the 8 corners of the trilinear stencil for
+    // this probe.  All other cells contribute 0.  This avoids the host
+    // read of device memory that plain trilinear_interp does (which
+    // segfaults when amrex.the_arena_is_managed = 0).
+    amrex::Vector<amrex::Real> C_L(m_probe_n_points, 0.0);
+    for (int p = 0; p < m_probe_n_points; ++p) {
+        const amrex::Real px = m_probe_x[p];
+        const amrex::Real py = m_probe_y[p];
+        const amrex::Real pz = m_probe_z[p];
+        const amrex::Real fi = (px - plox) / dxx - amrex::Real(0.5);
+        const amrex::Real fj = (py - ploy) / dxy - amrex::Real(0.5);
+        const amrex::Real fk = (pz - ploz) / dxz - amrex::Real(0.5);
+        const int i0 = static_cast<int>(std::floor(fi));
+        const int j0 = static_cast<int>(std::floor(fj));
+        const int k0 = static_cast<int>(std::floor(fk));
+        const amrex::Real ti = fi - amrex::Real(i0);
+        const amrex::Real tj = fj - amrex::Real(j0);
+        const amrex::Real tk = fk - amrex::Real(k0);
+
+        amrex::ReduceOps<amrex::ReduceOpSum> reduce_op;
+        amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
+        using ReduceTuple = typename decltype(reduce_data)::Type;
+
+        const int l_i0 = i0, l_j0 = j0, l_k0 = k0;
+        const amrex::Real l_ti = ti, l_tj = tj, l_tk = tk;
+        // Capture Array4s, NOT the MultiFab itself.  MultiFab has a
+        // deleted copy constructor and would fail to capture-by-value.
+        auto const& rho_arrs = rho_o2.const_arrays();
+
+        reduce_op.eval(
+            rho_o2, amrex::IntVect(0), reduce_data,
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) -> ReduceTuple
+            {
+                // Cell (i,j,k) is one of the 8 corners iff its indices
+                // match (l_i0 or l_i0+1, l_j0 or l_j0+1, l_k0 or l_k0+1).
+                const int di = i - l_i0;
+                const int dj = j - l_j0;
+                const int dk = k - l_k0;
+                if (di < 0 || di > 1 || dj < 0 || dj > 1 || dk < 0 || dk > 1) {
+                    return {amrex::Real(0.0)};
+                }
+                const amrex::Real wi = (di == 0) ? (amrex::Real(1.0) - l_ti) : l_ti;
+                const amrex::Real wj = (dj == 0) ? (amrex::Real(1.0) - l_tj) : l_tj;
+                const amrex::Real wk = (dk == 0) ? (amrex::Real(1.0) - l_tk) : l_tk;
+                return {wi * wj * wk * rho_arrs[nbx](i, j, k, 0)};
+            });
+
+        ReduceTuple host_tuple = reduce_data.value(reduce_op);
+        C_L[p] = amrex::get<0>(host_tuple);  // LB units, to be reduced then scaled
+    }
+    // Cross-rank sum: on multi-rank runs, only the rank owning the
+    // probe's 8-corner cells contributes non-zero.
+    amrex::ParallelDescriptor::ReduceRealSum(C_L.data(), m_probe_n_points);
+    // Convert LB rho → mol/m^3.
+    for (int i = 0; i < m_probe_n_points; ++i) {
+        C_L[i] *= m_bubble_o2_C_ref;
+    }
+
+    if (amrex::ParallelDescriptor::IOProcessor() &&
+        m_probe_stats_stream.is_open()) {
+        m_probe_stats_stream << step << "," << phys_time_s;
+        for (int i = 0; i < m_probe_n_points; ++i) {
+            m_probe_stats_stream << "," << std::scientific << C_L[i];
+        }
+        m_probe_stats_stream << "\n";
+        m_probe_stats_stream.flush();
+    }
+}
+// ============================================================================
 
 void LBM::read_tagging_parameters()
 {
@@ -1190,6 +1390,10 @@ void LBM::advance(
             m_bubbles.write_stats(m_isteps[lev], phys_time,
                                   C_L_mol_m3, V_liq_m3);
         }
+
+        // Fixed-location probe sampler (M-Star probe.txt analog).  No-op
+        // when probe.enable = 0 or step not on the probe.stats_int cadence.
+        write_probe_stats(m_isteps[lev], phys_time);
     } else {
         // No bubble back-coupling on this level (either bubbles disabled or
         // we are above the base level).  Still apply gravity body force to
@@ -1662,12 +1866,23 @@ void LBM::macrodata_to_equilibrium(const int lev)
 void LBM::relax_f_to_equilibrium(const int lev)
 {
     BL_PROFILE("LBM::relax_f_to_equilibrium()");
+
+    // Smagorinsky SGS eddy viscosity — populate m_nu_sgs[lev] with
+    // nu_sgs = (Cs·Δx)² · |S|.  No-op when m_use_sgs_in_collision is
+    // false; then the m_nu_sgs field stays at its initial 0.0 (set at
+    // allocation) and the omega formulas below reduce to the legacy
+    // molecular-only relaxation nu_local = m_nu.
+    compute_local_sgs_viscosity(lev);
+
     auto const& is_fluid_arrs = m_is_fluid[lev].const_arrays();
     auto const& eq_arrs = m_eq[lev].const_arrays();
     auto const& eq_arrs_g = m_eq_g[lev].const_arrays();
     auto const& f_arrs = m_f[lev].arrays();
     auto const& g_arrs = m_g[lev].arrays();
     auto const& md_arrs = m_macrodata[lev].arrays();
+    // SGS eddy viscosity per cell.  Always allocated and captured; only
+    // filled (non-zero) when m_use_sgs_in_collision is enabled.
+    auto const& nu_sgs_arrs = m_nu_sgs[lev].const_arrays();
 
     amrex::Real specific_gas_constant = (m_R_u / m_m_bar);
     amrex::Real nu = m_nu;
@@ -1676,6 +1891,7 @@ void LBM::relax_f_to_equilibrium(const int lev)
     const bool body_is_isothermal = m_bodyIsIsothermal;
     const bool fluid_is_isothermal = m_fluidIsIsothermal;
     const bool use_entropic_f     = m_use_entropic_f;
+    const bool l_use_sgs          = m_use_sgs_in_collision;
 
     // Reference T for the per-cell numerical safety net.  See the
     // comment in macrodata_to_equilibrium.  Used at every site below
@@ -1740,9 +1956,15 @@ void LBM::relax_f_to_equilibrium(const int lev)
                       temperature > amrex::Real(5.0) * l_T_ref))
                         ? l_T_ref
                         : temperature;
+                // Total (molecular + SGS) kinematic viscosity for the
+                // BGK relaxation.  m_nu_sgs is 0 unless m_use_sgs_in_collision
+                // is enabled (see compute_local_sgs_viscosity).
+                const amrex::Real nu_local = l_use_sgs
+                    ? nu + nu_sgs_arrs[nbx](iv, 0)
+                    : nu;
                 amrex::Real omega =
                     1.0 /
-                    (nu / (specific_gas_constant * T_safe * dt) + 0.5);
+                    (nu_local / (specific_gas_constant * T_safe * dt) + 0.5);
 
                 // f and g are updated here only for plain BGK; the entropic
                 // path handles both f and g in a separate cell-loop below.
@@ -1827,8 +2049,15 @@ void LBM::relax_f_to_equilibrium(const int lev)
                       temperature > amrex::Real(5.0) * l_T_ref))
                         ? l_T_ref
                         : temperature;
+                // Total (molecular + SGS) kinematic viscosity for the
+                // entropic-alpha BGK relaxation.  Same convention as the
+                // plain-BGK branch above; nu_sgs is 0 unless
+                // m_use_sgs_in_collision is on.
+                const amrex::Real nu_local = l_use_sgs
+                    ? nu + nu_sgs_arrs[nbx](iv, 0)
+                    : nu;
                 const amrex::Real omega =
-                    1.0 / (nu / (specific_gas_constant * T_safe * dt) + 0.5);
+                    1.0 / (nu_local / (specific_gas_constant * T_safe * dt) + 0.5);
                 const amrex::Real p_by_rho = specific_gas_constant * T_safe;
 
                 // BGK target (q-corrected, already stored in m_eq)
@@ -2553,6 +2782,94 @@ void LBM::f_to_macrodata(const int lev)
     m_macrodata[lev].FillBoundary(Geom(lev).periodicity());
 }
 
+// ============================================================================
+// LBM::compute_local_sgs_viscosity
+//
+// Smagorinsky sub-grid-scale eddy viscosity (Thomas et al. 2021 Eq. 4;
+// classical LES closure).  For every IS_FLUID cell:
+//
+//     nu_sgs = (Cs · Δx)^2 · |S|,     Cs = constants::SMAGORINSKY_CS,
+//     |S|^2  = 2 · S_ij · S_ij,        S_ij = 0.5·(∂u_i/∂x_j + ∂u_j/∂x_i).
+//
+// In LB units Δx = 1 so this collapses to  nu_sgs = Cs^2 · |S|.  The
+// result is written to m_nu_sgs[lev] (single component, no ghosts) and
+// consumed by relax_f_to_equilibrium via  nu_local = m_nu + nu_sgs  in
+// the BGK relaxation formula
+//     omega = 1 / (nu_local / (R·T·dt) + 1/2).
+// The R·T factor is the isothermal LBM sound-speed squared cs_T² = R·T;
+// adiabatic cs² = γ·R·T only sets the physical sound wave speed
+// (Mach number) and does NOT appear in this viscosity relation.
+//
+// Formula and Cs=0.1 match the |S| = √(2 S_ij S_ij) convention used by
+// compute_derived's epsilon (ε = ν_T · |S|² = 2·ν_T·S_ij·S_ij).
+//
+// Reads velocity components from m_macrodata; the standard step ordering
+// (stream → f_to_macrodata → macrodata_to_equilibrium → relax_f_to_equilibrium)
+// guarantees macrodata ghosts are fresh because f_to_macrodata ends with
+// FillBoundary.  No-op when m_use_sgs_in_collision is false.
+// ============================================================================
+void LBM::compute_local_sgs_viscosity(int lev)
+{
+    BL_PROFILE("LBM::compute_local_sgs_viscosity()");
+    if (!m_use_sgs_in_collision) { return; }
+    AMREX_ASSERT(m_macrodata[lev].nGrow() >= 1);
+
+    const auto& idx = geom[lev].InvCellSizeArray();
+    const amrex::Real Cs = constants::SMAGORINSKY_CS;
+
+    auto const& md_arrs = m_macrodata[lev].const_arrays();
+    auto const& if_arrs = m_is_fluid[lev].const_arrays();
+    auto       nu_arrs = m_nu_sgs[lev].arrays();
+    const amrex::Box& dbox = geom[lev].Domain();
+
+    amrex::ParallelFor(
+        m_nu_sgs[lev], amrex::IntVect(0),
+        [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+            const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
+            const auto if_arr = if_arrs[nbx];
+            const auto md_arr = md_arrs[nbx];
+            if (if_arr(iv, constants::IS_FLUID_IDX) != 1) {
+                nu_arrs[nbx](iv, 0) = amrex::Real(0.0);
+                return;
+            }
+            // Off-diagonal velocity gradients (as in compute_derived).
+            const amrex::Real vx = gradient(
+                0, constants::VELY_IDX, iv, idx, dbox, if_arr, md_arr);
+            const amrex::Real wx = gradient(
+                0, constants::VELZ_IDX, iv, idx, dbox, if_arr, md_arr);
+            const amrex::Real uy = gradient(
+                1, constants::VELX_IDX, iv, idx, dbox, if_arr, md_arr);
+            const amrex::Real wy = gradient(
+                1, constants::VELZ_IDX, iv, idx, dbox, if_arr, md_arr);
+            const amrex::Real uz = AMREX_D_PICK(
+                amrex::Real(0.0), amrex::Real(0.0),
+                gradient(2, constants::VELX_IDX, iv, idx, dbox, if_arr, md_arr));
+            const amrex::Real vz = AMREX_D_PICK(
+                amrex::Real(0.0), amrex::Real(0.0),
+                gradient(2, constants::VELY_IDX, iv, idx, dbox, if_arr, md_arr));
+            // Diagonal velocity gradients.
+            const amrex::Real ux = gradient(
+                0, constants::VELX_IDX, iv, idx, dbox, if_arr, md_arr);
+            const amrex::Real vy = gradient(
+                1, constants::VELY_IDX, iv, idx, dbox, if_arr, md_arr);
+            const amrex::Real wz = AMREX_D_PICK(
+                amrex::Real(0.0), amrex::Real(0.0),
+                gradient(2, constants::VELZ_IDX, iv, idx, dbox, if_arr, md_arr));
+            // Symmetric strain-rate tensor magnitude:
+            //   |S|^2 = 2 * S_ij * S_ij
+            // Expanded:  2*(ux^2+vy^2+wz^2) + 4*(Sxy^2+Sxz^2+Syz^2)
+            //          = 2*(ux^2+vy^2+wz^2 + 2*(Sxy^2+Sxz^2+Syz^2)).
+            const amrex::Real Sxy = amrex::Real(0.5) * (uy + vx);
+            const amrex::Real Sxz = amrex::Real(0.5) * (uz + wx);
+            const amrex::Real Syz = amrex::Real(0.5) * (vz + wy);
+            const amrex::Real S_mag2 = amrex::Real(2.0) *
+                (ux*ux + vy*vy + wz*wz +
+                 amrex::Real(2.0) * (Sxy*Sxy + Sxz*Sxz + Syz*Syz));
+            const amrex::Real S_mag = std::sqrt(S_mag2);
+            nu_arrs[nbx](iv, 0) = Cs * Cs * S_mag;
+        });
+}
+
 // Compute derived quantities
 void LBM::compute_derived(const int lev)
 {
@@ -2803,6 +3120,12 @@ void LBM::MakeNewLevelFromCoarse(
     m_derived[lev].define(
         ba, dm, m_derived[lev - 1].nComp(), m_derived[lev - 1].nGrow(),
         amrex::MFInfo(), *(m_factory[lev]));
+    // Smagorinsky SGS eddy viscosity (1 component, no ghosts).  Always
+    // allocated so kernel captures are valid; only filled when
+    // m_use_sgs_in_collision is on (see compute_local_sgs_viscosity).
+    m_nu_sgs[lev].define(
+        ba, dm, 1, 0, amrex::MFInfo(), *(m_factory[lev]));
+    m_nu_sgs[lev].setVal(amrex::Real(0.0));
     m_mask[lev].define(
         ba, dm, m_mask[lev - 1].nComp(), m_mask[lev - 1].nGrow());
     m_cell_type[lev].define(ba, dm, 1, m_f_nghost);
@@ -2890,6 +3213,12 @@ void LBM::MakeNewLevelFromScratch(
     m_derived[lev].define(
         ba, dm, constants::N_DERIVED, m_derived_nghost, amrex::MFInfo(),
         *(m_factory[lev]));
+    // Smagorinsky SGS eddy viscosity (1 component, no ghosts).  Always
+    // allocated so kernel captures are valid; only filled when
+    // m_use_sgs_in_collision is on (see compute_local_sgs_viscosity).
+    m_nu_sgs[lev].define(
+        ba, dm, 1, 0, amrex::MFInfo(), *(m_factory[lev]));
+    m_nu_sgs[lev].setVal(amrex::Real(0.0));
     m_mask[lev].define(ba, dm, 1, 0);
     m_stationary_mask[lev].define(ba, dm, 1, m_is_fluid[lev].nGrow());
     m_cell_type[lev].define(ba, dm, 1, m_f_nghost);
@@ -4650,6 +4979,12 @@ void LBM::RemakeLevel(
     m_derived[lev].define(
         ba, dm, constants::N_DERIVED, m_derived_nghost, amrex::MFInfo(),
         *(m_factory[lev]));
+    // Smagorinsky SGS eddy viscosity (1 component, no ghosts).  Always
+    // allocated so kernel captures are valid; only filled when
+    // m_use_sgs_in_collision is on (see compute_local_sgs_viscosity).
+    m_nu_sgs[lev].define(
+        ba, dm, 1, 0, amrex::MFInfo(), *(m_factory[lev]));
+    m_nu_sgs[lev].setVal(amrex::Real(0.0));
     m_mask[lev].define(ba, dm, 1, 0);
     m_cell_type[lev].define(ba, dm, 1, m_f_nghost);
     m_cell_type[lev].setVal(constants::CELL_LIQUID);
@@ -5400,6 +5735,10 @@ void LBM::read_checkpoint_file()
         m_derived[lev].define(
             ba, dm, constants::N_DERIVED, m_derived_nghost, amrex::MFInfo(),
             *(m_factory[lev]));
+        // Smagorinsky SGS eddy viscosity (1 component, no ghosts).
+        m_nu_sgs[lev].define(
+            ba, dm, 1, 0, amrex::MFInfo(), *(m_factory[lev]));
+        m_nu_sgs[lev].setVal(amrex::Real(0.0));
         m_mask[lev].define(ba, dm, 1, 0);
         // define fractional field storage
         m_is_fluid_fraction[lev].define(ba, dm, 1, m_is_fluid[lev].nGrow());

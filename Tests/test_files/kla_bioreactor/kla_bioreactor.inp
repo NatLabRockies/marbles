@@ -33,13 +33,15 @@
 #     = (400/60)*(0.058)²/(1e-6) ≈ 22 400
 #
 #   Kinematic viscosity     : ν_phys = 1e-6 m²/s (water)
-#   LB viscosity            : ν_LB   = 0.032 (bare BGK relaxation; under-resolved DNS)
-#     Note: ν_LB is tuned for collision stability at the under-resolved
-#     grid (180³ for a Re = 22 400 impeller).  A Smagorinsky SGS term
-#     ν_T = ν_LB + (C_s·Δ)²·|S| is computed in compute_derived() and
-#     written to the EPSILON_IDX diagnostic (consumed by bubble breakup
-#     D_e and the k_L mass-transfer coefficient), but the LBM collision
-#     itself uses bare ν_LB — not a turbulence-coupled relaxation.
+#   LB viscosity            : ν_LB   = 0.016 (bare BGK; molecular part of ν_T)
+#     LES-SGS closure per Thomas et al. (2021) Eq. 4 is active in the collision:
+#       ν_r = (C_s·Δx)² · |S|,     C_s = 0.1  (Yu et al. 2005 DNS calibration)
+#       ν_T = ν_LB + ν_r          → used in omega = 1/(ν_T/(R·T·dt) + 1/2)
+#     The R·T factor is the isothermal LBM sound-speed² cs_T² = R·T; adiabatic
+#     cs² = γ·R·T only sets the physical sound-wave speed (Mach number) and
+#     does NOT appear in the ν → τ relation.  The same ν_T·|S|² is written to
+#     the EPSILON_IDX diagnostic consumed by the bubble breakup D_e and the
+#     k_L mass-transfer coefficient (Kawase Eq. 17).
 #
 #   O₂ diffusivity          : D_O2_phys = 2e-9 m²/s   (Sc = 500)
 #   LB O₂ diffusivity       : D_O2_LB   = ν_LB / Sc = 0.008 / 500 = 1.6e-5
@@ -100,8 +102,16 @@ lbm.bc_hi = 5 5 5
 lbm.dx_outer = 1.0
 lbm.dt_outer = 1.0
 
-lbm.nu    = 0.016   # bare BGK relaxation viscosity (LB units); Smagorinsky term feeds only the ε diagnostic, not the collision
+lbm.nu    = 0.016   # bare BGK molecular viscosity (LB units); LES-SGS adds ν_r = Cs²·|S| via lbm.use_sgs_in_collision below
 lbm.alpha = 0.016
+
+# LES-SGS closure per Thomas et al. (2021) Eq. 4: add the Smagorinsky eddy
+# viscosity  ν_r = (Cs·Δx)² · |S|  to the molecular ν when computing the
+# BGK relaxation rate ω = 1/(ν_T/(R·T·dt) + 1/2).  Cs = 0.1 hardcoded in
+# Constants.H (Yu et al. 2005 DNS calibration).  Default OFF in code for
+# backward compatibility; enable here.  The same ν_T also feeds the
+# existing EPSILON diagnostic consumed by bubble breakup / kL.
+lbm.use_sgs_in_collision = 1
 
 # One passive scalar: dissolved O₂  (component 0)
 # D_O2_LB = nu_LB / Sc = 0.008 / 500 = 1.60e-5
@@ -353,6 +363,32 @@ bubble.stats_file = "bubble_stats.csv"
 #      disable.  Default 1 (enabled).
 bubble.force_cap_factor    = 50.0
 bubble.require_liquid_host = 1
+
+# ---------------------------------------------------------------
+# Fixed-location probes (M-Star probe.txt analog, Fig. 22 style)
+# ---------------------------------------------------------------
+# Sample dissolved-O₂ concentration C_L (mol/m³) at fixed spatial points
+# every probe.stats_int steps and write to a CSV file.  Analog of
+# M-Star's `probe.txt` output that feeds their Fig. 22 gassing-out fit
+# (their kLa = 4.1 /hr benchmark).
+#
+# Positions are in LB cell coordinates (matching geometry.prob_lo/hi).
+# Tank domain: x,y ∈ [0, 180],  z ∈ [-90, 90].  Impeller centre at
+# (90, 90, -40), radius 29 cells, free surface at z = 70.  Suggested
+# locations:
+#   probe0 = (150, 90, -40)  M-Star analog: between impeller tip (r=29)
+#                            and side wall (x=180), at impeller z-height
+#   probe1 = ( 90, 90,  20)  mid-column, tank centerline
+#   probe2 = ( 90, 90, -70)  near sparger (below impeller)
+#   probe3 = ( 90, 90,  60)  just below free surface (z_surface = 70)
+probe.enable       = 1
+probe.n_points     = 4
+probe.positions    = 150.0 90.0 -40.0 \
+                      90.0 90.0  20.0 \
+                      90.0 90.0 -70.0 \
+                      90.0 90.0  60.0
+probe.stats_int    = 200          # steps between rows (~0.0024 s physical)
+probe.stats_file   = "probes.csv"
 
 # ---------------------------------------------------------------
 # Initial conditions
