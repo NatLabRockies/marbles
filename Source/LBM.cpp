@@ -3332,28 +3332,96 @@ void LBM::initialize_moving_body_shape(int lev)
         const int nz = domain.length(2);
         size_t num_cells = static_cast<size_t>(nx) * ny * nz;
         
-        // Gather m_is_fluid[lev]
+        // -----------------------------------------------------------------
+        // Gather the full-domain is_fluid field onto every rank so the
+        // moving-body SDF kernel can look up any voxel index on any rank.
+        //
+        // The previous rank-local pattern
+        //     Vector<int> pmap(1, MyProc());
+        //     DistributionMapping dm_local(pmap);
+        //     iMultiFab local_imf(ba_full, dm_local, 1, 0);
+        //     local_imf.ParallelCopy(m_is_fluid[lev]);
+        // constructs a DIFFERENT DistributionMapping on each rank (rank 0
+        // says "box owned by 0", rank 1 says "box owned by 1", etc.).
+        // ParallelCopy is a collective that requires a globally-consistent
+        // DM on the destination and deadlocks in multi-rank runs on this
+        // pattern.  Replace with:
+        //   1) canonical DM so ParallelCopy succeeds (one rank ends up
+        //      owning the single full-domain box),
+        //   2) the owning rank copies its FAB into a host buffer,
+        //   3) an explicit MPI Bcast delivers the buffer to every rank,
+        //   4) each rank copies the host buffer into its own local
+        //      GPU DeviceVector m_body_voxel_data.
+        // Single-rank behaviour is identical to the old code (root == 0,
+        // Bcast is a no-op, DeviceVector ends up with the same contents).
+        // -----------------------------------------------------------------
         amrex::BoxArray ba_full(domain);
-        amrex::Vector<int> pmap(1, amrex::ParallelDescriptor::MyProc());
-        amrex::DistributionMapping dm_local(pmap);
-        amrex::iMultiFab local_imf(ba_full, dm_local, 1, 0);
-        
-        local_imf.ParallelCopy(m_is_fluid[lev]);
-        
-        m_body_voxel_data.resize(num_cells);
-        auto* voxel_ptr = m_body_voxel_data.data();
-        
-        for (amrex::MFIter mfi(local_imf); mfi.isValid(); ++mfi) {
-            const amrex::Box& box = mfi.validbox();
-            auto const& fab_arr = local_imf.array(mfi);
-            
-            amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
-                size_t idx = k * (nx * ny) + j * nx + i;
-                voxel_ptr[idx] = static_cast<uint16_t>(fab_arr(i, j, k, lbm::constants::IS_FLUID_IDX));
-            });
+        amrex::DistributionMapping dm_full(ba_full);
+        amrex::iMultiFab full_imf(ba_full, dm_full, 1, 0);
+        full_imf.ParallelCopy(m_is_fluid[lev]);
+        const int root = dm_full[0];   // which rank actually owns the single box
+
+        // Host buffer that will hold the assembled voxel field on all ranks.
+        amrex::Vector<uint16_t> host_buf(num_cells, static_cast<uint16_t>(0));
+
+        // Owning rank: pull its single device FAB into a host scratch
+        // vector via explicit D->H memcpy, then convert int -> uint16_t
+        // into host_buf.  Do NOT use LaunchSafeGuard(false) + BaseFab::copy
+        // here — that forces a host-side loop that dereferences the
+        // device pointer (segfault when amrex.the_arena_is_managed=0).
+        if (amrex::ParallelDescriptor::MyProc() == root) {
+            for (amrex::MFIter mfi(full_imf); mfi.isValid(); ++mfi) {
+                const amrex::Box& box = mfi.validbox();
+                const auto& dev_fab = full_imf[mfi];
+                const long npts = box.numPts();
+
+                // D->H copy of the raw contiguous int storage.
+                amrex::Vector<int> tmp(npts, 0);
+                amrex::Gpu::dtoh_memcpy(tmp.data(),
+                                        dev_fab.dataPtr(),
+                                        static_cast<size_t>(npts) * sizeof(int));
+                amrex::Gpu::synchronize();
+
+                // Convert int -> uint16_t.  FAB storage is Fortran-ordered
+                // (i fastest) with box.smallEnd offsets; host_buf indexes
+                // the same domain the same way, so we walk both linearly.
+                // This assumes ba_full is a single box == domain, which is
+                // how we constructed it above.
+                const auto lo = amrex::lbound(box);
+                const auto hi = amrex::ubound(box);
+                const int lx = box.length(0);
+                const int ly = box.length(1);
+                for (int k = lo.z; k <= hi.z; ++k) {
+                for (int j = lo.y; j <= hi.y; ++j) {
+                for (int i = lo.x; i <= hi.x; ++i) {
+                    const size_t src = static_cast<size_t>(i - lo.x)
+                                     + static_cast<size_t>(lx) * (
+                                           static_cast<size_t>(j - lo.y)
+                                         + static_cast<size_t>(ly) * static_cast<size_t>(k - lo.z));
+                    const size_t dst = static_cast<size_t>(k) * (nx * ny)
+                                     + static_cast<size_t>(j) * nx
+                                     + static_cast<size_t>(i);
+                    host_buf[dst] = static_cast<uint16_t>(tmp[src]);
+                }}}
+            }
         }
-        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
-        
+
+        // Broadcast the host buffer to every rank.  Bcast takes a raw
+        // char* pointer; uint16_t = 2 bytes per element.
+        amrex::ParallelDescriptor::Bcast(
+            reinterpret_cast<char*>(host_buf.data()),
+            static_cast<amrex::Long>(num_cells * sizeof(uint16_t)),
+            root);
+
+        // Each rank now copies the host buffer into its own local
+        // DeviceVector.  DeviceVector::resize + Gpu::copy handles the
+        // host→device transfer.
+        m_body_voxel_data.resize(num_cells);
+        amrex::Gpu::copy(amrex::Gpu::hostToDevice,
+                         host_buf.begin(), host_buf.end(),
+                         m_body_voxel_data.begin());
+        amrex::Gpu::synchronize();
+
         m_using_voxel_body = true;
         
         // Set metadata
@@ -7918,8 +7986,14 @@ void LBM::fslbm_advance_surface(const int lev)
         // Use pdiag = (R/m_bar)*T_ref to avoid stale/zero T from macrodata.
         // Consistent with collide's p_by_rho = spec_gas_const * temperature.
         const amrex::Real pdiag_repair = l_fslbm_pdiag_ref;
+        // Iterate VALID cells only.  repair_diag is defined with 0 ghost
+        // cells above, so writing at ghost (i,j,k) via rd_arrs[nbx](i,j,k)
+        // is out-of-bounds and hits unmapped device memory on multi-GPU
+        // runs (CUDA 700).  Ghost cells are refreshed by FillBoundary from
+        // repaired valid data on the next pass, so per-rank ghost repair is
+        // redundant.  Matches strand_diag's IntVect(0) iteration pattern.
         amrex::ParallelFor(
-            m_f[lev], m_f[lev].nGrowVect(),
+            m_f[lev], amrex::IntVect(0),
             [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
                 const int ct = ct_r[nbx](i, j, k, 0);
                 if (ct != CELL_INTERFACE && ct != CELL_LIQUID) { return; }
@@ -8007,8 +8081,11 @@ void LBM::fslbm_advance_surface(const int lev)
         const auto& l_evs_ob     = evs;
         const auto& l_weights_ob = weights;
         const amrex::Real pdiag_ob = l_fslbm_pdiag_ref;
+        // Iterate VALID cells only — same reason as repair_diag above:
+        // clamp_diag has 0 ghost cells, so ghost writes are OOB (CUDA 700
+        // on multi-GPU).  Ghost cells get refreshed by FillBoundary.
         amrex::ParallelFor(
-            m_f[lev], m_f[lev].nGrowVect(),
+            m_f[lev], amrex::IntVect(0),
             [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
                 const int ct = ct_ob[nbx](i, j, k, 0);
                 if (ct != CELL_INTERFACE && ct != CELL_LIQUID) { return; }
