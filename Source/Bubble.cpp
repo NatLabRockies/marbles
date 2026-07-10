@@ -1152,9 +1152,12 @@ void BubbleManager::advance(
                                                 new_py = (nniv[1] + 0.5) *
                                                              dx_arr[1] +
                                                          prob_lo[1];
-                                                new_pz = (nniv[2] + 0.5) *
-                                                             dx_arr[2] +
-                                                         prob_lo[2];
+                                                new_pz = AMREX_D_PICK(
+                                                    amrex::Real(0.0),
+                                                    amrex::Real(0.0),
+                                                    (nniv[2] + 0.5) *
+                                                            dx_arr[2] +
+                                                        prob_lo[2]);
                                                 p.rdata(bubble_idx::VX) = 0;
                                                 p.rdata(bubble_idx::VY) = 0;
                                                 p.rdata(bubble_idx::VZ) = 0;

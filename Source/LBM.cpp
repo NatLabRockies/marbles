@@ -2386,8 +2386,9 @@ void LBM::relax_f_to_equilibrium(const int lev)
                                     "[EQ_UNIT_NaN] cell=(%d,%d,%d) q=%d "
                                     "eq_flow=%e eq_ref=%e T=%e "
                                     "vel=(%e,%e,%e)\n",
-                                    iv[0], iv[1], iv[2], q, eq_flow, eq_ref,
-                                    temperature, vel[0], vel[1], vel[2]);
+                                    iv[0], iv[1], AMREX_D_PICK(0, 0, iv[2]), q,
+                                    eq_flow, eq_ref, temperature, vel[0],
+                                    vel[1], AMREX_D_PICK(0.0, 0.0, vel[2]));
                             }
                         }
                         eq_unit_arr(iv, q) = eq_flow;
@@ -2567,9 +2568,10 @@ void LBM::relax_f_to_equilibrium(const int lev)
                                     "f_old=%e eq=%e rho_comp=%e "
                                     "T=%e omega_comp=%e alpha_use=%e "
                                     "eq_unit_flow=%e eq_unit_ref=%e\n",
-                                    iv[0], iv[1], iv[2], q, f_comp_arr(iv, q),
-                                    eq_all[q], rho_comp, temperature,
-                                    omega_comp, alpha_use, eq_unit_arr(iv, q),
+                                    iv[0], iv[1], AMREX_D_PICK(0, 0, iv[2]), q,
+                                    f_comp_arr(iv, q), eq_all[q], rho_comp,
+                                    temperature, omega_comp, alpha_use,
+                                    eq_unit_arr(iv, q),
                                     eq_unit_arr(iv, q + NQ));
                             }
                         }
@@ -8167,10 +8169,10 @@ void LBM::fslbm_init_cell_type(const int lev)
     BL_PROFILE("LBM::fslbm_init_cell_type()");
 
     const auto& geom_l = Geom(lev);
-    const auto dx = geom_l.CellSizeArray();
+    [[maybe_unused]] const auto dx = geom_l.CellSizeArray();
     const auto plo = geom_l.ProbLoArray();
     const amrex::Real z_surf = m_free_surface_z;
-    const amrex::Real dz = dx[2];
+    const auto dz = AMREX_D_PICK(amrex::Real(0.0), amrex::Real(0.0), dx[2]);
 
     using namespace lbm::constants;
     const amrex::Real l_phi_lo = FSLBM_PHI_LO;
