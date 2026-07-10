@@ -2,7 +2,7 @@ name: MARBLES-CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, moving-body]
   pull_request:
     branches: [main]
   schedule:
