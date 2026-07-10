@@ -114,9 +114,10 @@ public:
 
     // Update integer is_fluid mask from the fractional field and recompute
     // boundary markers (steps 1 and 2 of refill_and_spill preparation).
-    // If threshold is omitted, class default m_is_fluid_fraction_threshold is used.
-    void update_is_fluid_from_fraction_and_mark(const int lev,
-                                               amrex::Real threshold = -1.0);
+    // If threshold is omitted, class default m_is_fluid_fraction_threshold is
+    // used.
+    void update_is_fluid_from_fraction_and_mark(
+        const int lev, amrex::Real threshold = -1.0);
 
     // Refill and spill algorithm (steps 3 and 4). This does the following
     // (per-level):
@@ -154,8 +155,8 @@ public:
     // FSLBM (Körner 2005): initialize cell type + fill level from z_surf.
     void fslbm_init_cell_type(const int lev);
 
-    // FSLBM: one free-surface sweep (streaming with ABB + φ update + conversions).
-    // Replaces both advance_phi(lev) and stream(lev, m_f).
+    // FSLBM: one free-surface sweep (streaming with ABB + φ update +
+    // conversions). Replaces both advance_phi(lev) and stream(lev, m_f).
     void fslbm_advance_surface(const int lev);
 
     // FSLBM: replenish m_g populations in INTERFACE cells facing gas.
@@ -209,10 +210,10 @@ public:
     // public so the extended __device__ lambda inside can be hosted
     // (CUDA nvcc error 20092 disallows them in private methods).
     void compute_dissolved_o2_average(
-        const int                   lev,
-        const amrex::MultiFab&      rho_o2,
-        amrex::Real&                C_L_mol_m3_out,
-        amrex::Real&                V_liq_m3_out) const;
+        const int lev,
+        const amrex::MultiFab& rho_o2,
+        amrex::Real& C_L_mol_m3_out,
+        amrex::Real& V_liq_m3_out) const;
 
 private:
     // read parameters
@@ -279,8 +280,8 @@ public:
 
     // read checkpoint file from disk
     void read_checkpoint_file();
-private:
 
+private:
     // utility to skip to next line in Header
     static void goto_next_line(std::istream& is);
 
@@ -325,8 +326,9 @@ private:
     amrex::Vector<amrex::iMultiFab> m_is_fluid;
     amrex::Vector<amrex::MultiFab> m_plt_mf;
     amrex::Vector<amrex::iMultiFab> m_mask;
-    
-    //non-integer mask to identify fluid cells. Will be moved with advection equation for moving solid body
+
+    // non-integer mask to identify fluid cells. Will be moved with advection
+    // equation for moving solid body
     amrex::Vector<amrex::MultiFab> m_is_fluid_fraction;
 
     // Moving body reference data
@@ -341,14 +343,15 @@ private:
     amrex::Vector<amrex::iMultiFab> m_stationary_mask;
     bool m_has_stationary_body = false;
 
-    // FSLBM cell type per cell: CELL_SOLID(0), CELL_GAS(1), CELL_INTERFACE(2), CELL_LIQUID(3)
+    // FSLBM cell type per cell: CELL_SOLID(0), CELL_GAS(1), CELL_INTERFACE(2),
+    // CELL_LIQUID(3)
     amrex::Vector<amrex::iMultiFab> m_cell_type;
 
     // FSLBM fill level φ ∈ [0,1] — separate from m_is_fluid_fraction which is
     // used by the moving-body SDF / refill_and_spill and must not be modified
     // by FSLBM code.
     amrex::Vector<amrex::MultiFab> m_phi_fslbm;
- 
+
     const int m_macrodata_nghost = 1;
     const int m_f_nghost = 3;
     const int m_eq_nghost = 0;
@@ -382,7 +385,8 @@ private:
 
     int m_plot_int = -1;
 
-    // screen output frequency (steps between step-header prints, default = plot_int)
+    // screen output frequency (steps between step-header prints, default =
+    // plot_int)
     int m_print_int = 1000;
 
     // checkpoint prefix and frequency
@@ -440,7 +444,7 @@ private:
     // physically valid range Y ∈ [0, 1].
     // Set via lbm.component_y_min / lbm.component_y_max.
     amrex::Real m_clamp_component_y_min = -0.1;
-    amrex::Real m_clamp_component_y_max =  1.1;
+    amrex::Real m_clamp_component_y_max = 1.1;
 
     // Carrier-fluid density floor below which the component populations
     // in the cell are zeroed unconditionally — "mass fraction" is
@@ -515,12 +519,12 @@ public:
     ///
     /// total_flux_mol_per_s_out: optional output total mol/s integrated
     /// over the interface (informational, set to nullptr to skip).
-    void apply_free_surface_o2_flux(int                 lev,
-                                    amrex::MultiFab&    o2_src_mf,
-                                    amrex::Real*        total_flux_mol_per_s_out = nullptr) const;
+    void apply_free_surface_o2_flux(
+        int lev,
+        amrex::MultiFab& o2_src_mf,
+        amrex::Real* total_flux_mol_per_s_out = nullptr) const;
 
 private:
-
     // file for forces
     std::string m_forces_file{"forces.txt"};
 
@@ -555,21 +559,24 @@ private:
     //   Phi = 0  gas headspace (LBM is inactive — like a moving solid)
     // The initial flat interface at  z = m_free_surface_z  (LB cells)
     // is smeared over ~1.5 cells with a tanh profile.
-    bool        m_free_surface       = false;
-    amrex::Real m_free_surface_z     = 0.0;   // interface z, in LB cell index units
-    amrex::Real m_free_surface_eps   = 0.0;   // interface half-width  (~1.5*dx, set by init)
-    amrex::Real m_phi_M0             = 0.0;   // initial total Phi mass for mass redistribution
-    amrex::Real m_phi_gamma_coeff    = 1.0;   // multiplier on gamma = gamma_coeff * |u|
+    bool m_free_surface = false;
+    amrex::Real m_free_surface_z = 0.0; // interface z, in LB cell index units
+    amrex::Real m_free_surface_eps =
+        0.0; // interface half-width  (~1.5*dx, set by init)
+    amrex::Real m_phi_M0 =
+        0.0; // initial total Phi mass for mass redistribution
+    amrex::Real m_phi_gamma_coeff =
+        1.0; // multiplier on gamma = gamma_coeff * |u|
     // FSLBM reference density: read from ic_constant.density at startup.
     // Used for ABB ρ₀, repair/spawn seeding (feq target), and repair threshold.
-    // Defaults to 1.0 (the conventional LBM reference) but scales correctly when
-    // the initial bulk density differs from 1.
-    amrex::Real m_fslbm_rho_ref      = 1.0;
+    // Defaults to 1.0 (the conventional LBM reference) but scales correctly
+    // when the initial bulk density differs from 1.
+    amrex::Real m_fslbm_rho_ref = 1.0;
     // Surface tension in LB units for the ABB gas-pressure BC.
     // p_G = p_atm - 2*sigma*kappa;  rho_G = p_G / (Rg*T_interface).
     // Default 0 = flat interface (no Laplace pressure).
     // Set via lbm.fslbm_sigma in the input file.
-    amrex::Real m_fslbm_sigma        = 0.0;
+    amrex::Real m_fslbm_sigma = 0.0;
     // Static contact angle for all solid walls [degrees].
     // 90 = neutral wetting (default, same as original Körner model).
     // < 90 = hydrophilic  ;  > 90 = hydrophobic.
@@ -636,8 +643,9 @@ private:
     // Closes the FSLBM compressible-regime mass leak by routing only
     // the GAS-link ABB-induced f-mass change at INTERFACE cells back
     // into the phi field.  Per-cell algorithm at each FSLBM step:
-    //   m_pre[iv]   = Σ_q f[iv][q]                       (Step 0c snapshot, comp 0)
-    //   Δm_full[iv] = Σ_{q : nbr(q) ∈ LIQ/IFC}            (Step 0c, comp 1)
+    //   m_pre[iv]   = Σ_q f[iv][q]                       (Step 0c snapshot,
+    //   comp 0) Δm_full[iv] = Σ_{q : nbr(q) ∈ LIQ/IFC}            (Step 0c,
+    //   comp 1)
     //                    ( f_pre[nbr(q)][bq] − f_pre[iv][q] )
     //   ... step 1a / 1b / 2 / 3 / 4 run ...
     //   m_post[iv]  = Σ_q f[iv][q]                       (after Step 3)
@@ -761,10 +769,11 @@ private:
     // full Ma=0.067 jet at startup, which produced CELL_LIQUID rho
     // excursions to ~300 at the baffle wall in run 14310435 (from-zero).
     amrex::GpuArray<amrex::Real, 3> m_body_angular_velocity = {0.0, 0.0, 0.0};
-    amrex::GpuArray<amrex::Real, 3> m_body_angular_velocity_target = {0.0, 0.0, 0.0};
+    amrex::GpuArray<amrex::Real, 3> m_body_angular_velocity_target = {
+        0.0, 0.0, 0.0};
     int m_body_angular_velocity_ramp_steps = 0;
     amrex::GpuArray<amrex::Real, 3> m_body_center = {0.0, 0.0, 0.0};
-    amrex::Real m_body_rotation_angle = 0.0;  // accumulated rotation
+    amrex::Real m_body_rotation_angle = 0.0; // accumulated rotation
     std::string m_body_geom_type = "";
 
     // Body is isothermal.
@@ -797,21 +806,21 @@ private:
     //   component 2 = I  (intermediate)
     //   component 3 = P  (product)
     // ---------------------------------------------------------------
-    bool        m_enable_reactions    = false;
-    amrex::Real m_rxn_k_forward       = 0.0;  // bimolecular  [LB_rho^-1 step^-1]
-    amrex::Real m_rxn_k_reverse       = 0.0;  // unimolecular [step^-1]
-    amrex::Real m_rxn_k_product       = 0.0;  // unimolecular [step^-1]
+    bool m_enable_reactions = false;
+    amrex::Real m_rxn_k_forward = 0.0; // bimolecular  [LB_rho^-1 step^-1]
+    amrex::Real m_rxn_k_reverse = 0.0; // unimolecular [step^-1]
+    amrex::Real m_rxn_k_product = 0.0; // unimolecular [step^-1]
 
     // Timed catalyst injection
-    bool        m_cat_inject_done     = false;
-    int         m_cat_inject_step     = -1;   // LB step for catalyst release
-    amrex::Real m_cat_inject_density  = 0.0;  // LB rho assigned in box
+    bool m_cat_inject_done = false;
+    int m_cat_inject_step = -1;             // LB step for catalyst release
+    amrex::Real m_cat_inject_density = 0.0; // LB rho assigned in box
     amrex::RealVect m_cat_inject_box_lo{AMREX_D_DECL(0.0, 0.0, 0.0)};
     amrex::RealVect m_cat_inject_box_hi{AMREX_D_DECL(0.0, 0.0, 0.0)};
 
     // Species statistics output
-    std::string   m_species_stats_file{"species_stats.csv"};
-    std::fstream  m_species_stats_stream;
+    std::string m_species_stats_file{"species_stats.csv"};
+    std::fstream m_species_stats_stream;
 
     // ---------------------------------------------------------------
     // Fixed-location probes (analog of M-Star's probe.txt output)
@@ -829,12 +838,12 @@ private:
     // row is written as:
     //     step, phys_time_s, C_L_probe0, C_L_probe1, ...
     // No-op when m_probe_enable == false or m_probe_n_points == 0.
-    bool                     m_probe_enable      = false;
-    int                      m_probe_n_points    = 0;
+    bool m_probe_enable = false;
+    int m_probe_n_points = 0;
     amrex::Vector<amrex::Real> m_probe_x, m_probe_y, m_probe_z;
-    std::string              m_probe_stats_file  = "probes.csv";
-    int                      m_probe_stats_int   = 200;
-    std::fstream             m_probe_stats_stream;
+    std::string m_probe_stats_file = "probes.csv";
+    int m_probe_stats_int = 200;
+    std::fstream m_probe_stats_stream;
 
     // Read probe.* parameters (called from read_parameters).
     void read_probe_parameters();
@@ -848,37 +857,37 @@ private:
     // ---------------------------------------------------------------
     // Lagrangian bubble physics (two-phase kLa mass transfer)
     // ---------------------------------------------------------------
-    bool             m_enable_bubbles      = false;
-    BubbleManager    m_bubbles;
-    BubbleParams     m_bubble_params;
+    bool m_enable_bubbles = false;
+    BubbleManager m_bubbles;
+    BubbleParams m_bubble_params;
 
     /// Concentration reference: 1 LB_rho unit ≡ m_bubble_o2_C_ref [mol/m³]
     /// Used to convert k_La O2 source from mol/(m³·s) → LB_rho/step.
-    amrex::Real      m_bubble_o2_C_ref     = 1.0;
+    amrex::Real m_bubble_o2_C_ref = 1.0;
 
     // ---------------------------------------------------------------
     // Free-surface O2 Henry-equilibrium flux (apply_free_surface_o2_flux)
     // ---------------------------------------------------------------
     /// Master switch for the free-surface O2 boundary condition.
     /// Set via bubble.enable_surface_flux in the input file (default off).
-    bool             m_surface_o2_flux_enable    = false;
+    bool m_surface_o2_flux_enable = false;
     /// Kawase pre-factor in k_L_surf = C * (eps * nu)^(1/4) * Sc^(-1/2).
     /// Defaults to 0.301 (same value as the bubble k_L correlation).
     /// Set via bubble.surface_kL_coefficient.
-    amrex::Real      m_surface_kL_coefficient    = 0.301;
+    amrex::Real m_surface_kL_coefficient = 0.301;
     /// Headspace equilibrium liquid concentration C_eq_surface [mol/m^3].
     /// Drives the flux:  j = k_L_surf * a_surf * (C_eq_surface - C_L_local).
     /// Defaults to 1.427 (= 0.032 * 44.6 = S * O2_initial_conc, i.e. the
     /// liquid saturation in equilibrium with the bubble gas at STP).
     /// Set via bubble.surface_C_eq_mol_m3.
-    amrex::Real      m_surface_C_eq_mol_m3       = 1.427;
+    amrex::Real m_surface_C_eq_mol_m3 = 1.427;
     /// When 1, the flux is gated to zero unless C_L_local > C_eq_surface,
     /// i.e. the surface only DEGASSES the liquid and never inputs O2.
     /// Set via bubble.surface_only_loss (default 1 — desorption-only).
-    bool             m_surface_only_loss         = true;
+    bool m_surface_only_loss = true;
 
     /// Internal step counter for coalescence and stats intervals
-    int              m_bubble_step_counter = 0;
+    int m_bubble_step_counter = 0;
 };
 } // namespace lbm
 #endif

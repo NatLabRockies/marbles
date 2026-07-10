@@ -375,8 +375,10 @@ bool file_exists(const std::string& fname);
 // exactly one rank returns non-zero).  Single-rank runs work directly.
 amrex::Real trilinear_interp(
     const amrex::MultiFab& mf,
-    int                    comp,
+    int comp,
     const amrex::Geometry& geom,
-    amrex::Real px, amrex::Real py, amrex::Real pz);
+    amrex::Real px,
+    amrex::Real py,
+    amrex::Real pz);
 } // namespace lbm
 #endif

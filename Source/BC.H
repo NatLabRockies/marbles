@@ -462,8 +462,8 @@ struct BCFill
                             }
                         } else {
                             // to avoid spurious NaNs fill with a dummy value
-                            // Use 0.0 instead of -1.0 to avoid negative densities
-                            // in component lattices (passive scalars)
+                            // Use 0.0 instead of -1.0 to avoid negative
+                            // densities in component lattices (passive scalars)
                             data(iv, q) = 0.0;
                         }
                     }

@@ -54,10 +54,10 @@ struct Constant
 
             bool is_inside = true;
             if (region_type == 1) { // sphere
-                const amrex::Real r2 =
-                    AMREX_D_TERM((x - region_center[0]) * (x - region_center[0]),
-                                 + (y - region_center[1]) * (y - region_center[1]),
-                                 + (z - region_center[2]) * (z - region_center[2]));
+                const amrex::Real r2 = AMREX_D_TERM(
+                    (x - region_center[0]) * (x - region_center[0]),
+                    +(y - region_center[1]) * (y - region_center[1]),
+                    +(z - region_center[2]) * (z - region_center[2]));
                 if (r2 > region_radius * region_radius) {
                     is_inside = false;
                 }
@@ -65,14 +65,14 @@ struct Constant
                 amrex::Real r2 = 0.0;
                 amrex::Real h = 0.0;
                 if (cylinder_dir == 0) {
-                    r2 = AMREX_D_TERM(0.0,
-                                      + (y - region_center[1]) * (y - region_center[1]),
-                                      + (z - region_center[2]) * (z - region_center[2]));
+                    r2 = AMREX_D_TERM(
+                        0.0, +(y - region_center[1]) * (y - region_center[1]),
+                        +(z - region_center[2]) * (z - region_center[2]));
                     h = std::abs(x - region_center[0]);
                 } else if (cylinder_dir == 1) {
-                    r2 = AMREX_D_TERM((x - region_center[0]) * (x - region_center[0]),
-                                      + 0.0,
-                                      + (z - region_center[2]) * (z - region_center[2]));
+                    r2 = AMREX_D_TERM(
+                        (x - region_center[0]) * (x - region_center[0]), +0.0,
+                        +(z - region_center[2]) * (z - region_center[2]));
                     h = std::abs(y - region_center[1]);
                 } else {
                     r2 = (x - region_center[0]) * (x - region_center[0]) +
@@ -84,9 +84,10 @@ struct Constant
                     is_inside = false;
                 }
             } else if (region_type == 3) { // box
-                if (AMREX_D_TERM(x < region_lo[0] || x > region_hi[0],
-                                 || y < region_lo[1] || y > region_hi[1],
-                                 || z < region_lo[2] || z > region_hi[2])) {
+                if (AMREX_D_TERM(
+                        x < region_lo[0] || x > region_hi[0],
+                        || y < region_lo[1] || y > region_hi[1],
+                        || z < region_lo[2] || z > region_hi[2])) {
                     is_inside = false;
                 }
             }
@@ -117,10 +118,10 @@ struct Constant
 
             bool is_inside = true;
             if (region_type == 1) { // sphere
-                const amrex::Real r2 =
-                    AMREX_D_TERM((x - region_center[0]) * (x - region_center[0]),
-                                 + (y - region_center[1]) * (y - region_center[1]),
-                                 + (z - region_center[2]) * (z - region_center[2]));
+                const amrex::Real r2 = AMREX_D_TERM(
+                    (x - region_center[0]) * (x - region_center[0]),
+                    +(y - region_center[1]) * (y - region_center[1]),
+                    +(z - region_center[2]) * (z - region_center[2]));
                 if (r2 > region_radius * region_radius) {
                     is_inside = false;
                 }
@@ -128,14 +129,14 @@ struct Constant
                 amrex::Real r2 = 0.0;
                 amrex::Real h = 0.0;
                 if (cylinder_dir == 0) {
-                    r2 = AMREX_D_TERM(0.0,
-                                      + (y - region_center[1]) * (y - region_center[1]),
-                                      + (z - region_center[2]) * (z - region_center[2]));
+                    r2 = AMREX_D_TERM(
+                        0.0, +(y - region_center[1]) * (y - region_center[1]),
+                        +(z - region_center[2]) * (z - region_center[2]));
                     h = std::abs(x - region_center[0]);
                 } else if (cylinder_dir == 1) {
-                    r2 = AMREX_D_TERM((x - region_center[0]) * (x - region_center[0]),
-                                      + 0.0,
-                                      + (z - region_center[2]) * (z - region_center[2]));
+                    r2 = AMREX_D_TERM(
+                        (x - region_center[0]) * (x - region_center[0]), +0.0,
+                        +(z - region_center[2]) * (z - region_center[2]));
                     h = std::abs(y - region_center[1]);
                 } else {
                     r2 = (x - region_center[0]) * (x - region_center[0]) +
@@ -147,9 +148,10 @@ struct Constant
                     is_inside = false;
                 }
             } else if (region_type == 3) { // box
-                if (AMREX_D_TERM(x < region_lo[0] || x > region_hi[0],
-                                 || y < region_lo[1] || y > region_hi[1],
-                                 || z < region_lo[2] || z > region_hi[2])) {
+                if (AMREX_D_TERM(
+                        x < region_lo[0] || x > region_hi[0],
+                        || y < region_lo[1] || y > region_hi[1],
+                        || z < region_lo[2] || z > region_hi[2])) {
                     is_inside = false;
                 }
             }
@@ -542,7 +544,10 @@ public:
     virtual ~InitializerBase() = default;
 
     virtual void initialize(const int lev, amrex::GeometryData const& geom) = 0;
-    virtual void initialize_lattice(const int lev, amrex::GeometryData const& geom, amrex::MultiFab& mf) = 0;
+    virtual void initialize_lattice(
+        const int lev,
+        amrex::GeometryData const& geom,
+        amrex::MultiFab& mf) = 0;
 };
 
 template <typename ICOp>
@@ -636,7 +641,10 @@ public:
         amrex::Gpu::synchronize();
     }
 
-    void initialize_lattice(const int lev, amrex::GeometryData const& geom, amrex::MultiFab& mf) override
+    void initialize_lattice(
+        const int lev,
+        amrex::GeometryData const& geom,
+        amrex::MultiFab& mf) override
     {
         const stencil::Stencil stencil;
         const auto& evs = stencil.evs;
