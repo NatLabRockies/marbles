@@ -4662,8 +4662,12 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
         auto const& md_arrs = m_macrodata[lev].arrays();
         auto const& d_arrs = m_derived[lev].arrays();
         auto const& ct_arrs = m_cell_type[lev].const_arrays();
-        
-        amrex::ParallelFor(m_f[lev], m_f[lev].nGrowVect(),
+
+        // Iterate VALID cells only.  Ghost cells are refreshed by the batched
+        // FillBoundary at Step 9 below, so iterating m_f[lev].nGrowVect() is
+        // pure waste (~20% of the kernel body on a 90^3-per-rank grid) and
+        // makes the .contains() guards on md_arrs / d_arrs unnecessary.
+        amrex::ParallelFor(m_f[lev], amrex::IntVect(0),
             [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
                 // Zero out populations in solid cells — but NOT FSLBM interface cells,
                 // which are active free-surface cells with valid f distributions.
@@ -4697,9 +4701,11 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
         auto const& fluid_arrs = m_is_fluid[lev].const_arrays();
         auto const& f_comp_arrs = m_component_lattices[c][lev].arrays();
 
+        // Iterate VALID cells only (same rationale as Step 8 above: ghost
+        // cells are refreshed by the batched FillBoundary at Step 9 below).
         amrex::ParallelFor(
             m_component_lattices[c][lev],
-            m_component_lattices[c][lev].nGrowVect(),
+            amrex::IntVect(0),
             [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
                 // Zero out populations in all solid cells
                 if (fluid_arrs[nbx](i, j, k, lbm::constants::IS_FLUID_IDX) ==
