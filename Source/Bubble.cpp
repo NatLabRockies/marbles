@@ -52,7 +52,7 @@ namespace lbm {
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
 V_m_at_depth(amrex::Real z_LB, const BubbleParams& p)
 {
-    if (!p.boyle_law_enable) {
+    if (p.boyle_law_enable == 0) {
         return p.O2_molar_volume;
     }
     const amrex::Real h_phys =
@@ -278,7 +278,7 @@ void BubbleManager::read_params(BubbleParams& p)
 
         // Sparger positions — expected as flat list x0 y0 z0 x1 y1 z1 ...
         amrex::Vector<amrex::Real> pos_flat;
-        if (pp.queryarr("positions", pos_flat)) {
+        if (pp.queryarr("positions", pos_flat) != 0) {
             p.sparger_x.resize(p.n_sparger_points);
             p.sparger_y.resize(p.n_sparger_points);
             p.sparger_z.resize(p.n_sparger_points);
@@ -313,7 +313,7 @@ void BubbleManager::read_params(BubbleParams& p)
         // Coalescence
         int ienb = p.enable_coalescence ? 1 : 0;
         pp.query("enable_coalescence", ienb);
-        p.enable_coalescence = ienb;
+        p.enable_coalescence = (ienb != 0);
         pp.query("coalescence_Re_crit", p.Re_a_crit);
         pp.query("coalescence_start_time", p.coal_start_time);
         pp.query("coalescence_interval", p.coal_interval);
@@ -321,7 +321,7 @@ void BubbleManager::read_params(BubbleParams& p)
         // Breakup
         int ienbk = p.enable_breakup ? 1 : 0;
         pp.query("enable_breakup", ienbk);
-        p.enable_breakup = ienbk;
+        p.enable_breakup = (ienbk != 0);
         std::string bmodel = "triangle";
         pp.query("breakup_model", bmodel);
         if (bmodel == "equal") {
@@ -352,13 +352,13 @@ void BubbleManager::read_params(BubbleParams& p)
                        << "\n";
         amrex::Print()
             << "[bubble] require_liquid_host = " << p.require_liquid_host
-            << (p.require_liquid_host
+            << ((p.require_liquid_host != 0)
                     ? "  (skip force deposit when host cell != CELL_LIQUID)"
                     : "  (DISABLED — deposit at every host cell)")
             << "\n";
         amrex::Print()
             << "[bubble] boyle_law_enable    = " << p.boyle_law_enable
-            << (p.boyle_law_enable
+            << ((p.boyle_law_enable != 0)
                     ? "  (V_m = V_m,ref·P_atm/(P_atm + ρ_l·g·h); V_b, d, C_g "
                       "all vary with depth)"
                     : "  (DISABLED — V_m fixed; C_g = 1/V_m identically)")
@@ -417,7 +417,9 @@ void BubbleManager::inject_bubbles(amrex::Real dt_phys)
     bool any_inject = false;
     for (int ih = 0; ih < m_params.n_sparger_points; ++ih) {
         m_injection_residuals[ih] += rate_per_hole * dt_phys;
-        if (static_cast<int>(m_injection_residuals[ih]) > 0) any_inject = true;
+        if (static_cast<int>(m_injection_residuals[ih]) > 0) {
+            any_inject = true;
+        }
     }
 
     if (!any_inject) {
@@ -841,7 +843,9 @@ void BubbleManager::advance(
             auto& aos = pti.GetArrayOfStructs();
             auto* pData = aos().data();
             int num_part = pti.numParticles();
-            if (num_part == 0) continue;
+            if (num_part == 0) {
+                continue;
+            }
 
             auto md_arr = macrodata.const_array(pti);
             auto der_arr = derived.const_array(pti);
@@ -860,7 +864,9 @@ void BubbleManager::advance(
 
             amrex::ParallelFor(num_part, [=] AMREX_GPU_DEVICE(int i) {
                 auto& p = pData[i];
-                if (!p.id().is_valid()) return;
+                if (!p.id().is_valid()) {
+                    return;
+                }
 
                 amrex::Real px = p.pos(0);
                 amrex::Real py = p.pos(1);
@@ -962,9 +968,15 @@ void BubbleManager::advance(
                     }
                     // Also catch NaN/Inf — replace with zero so the deposit
                     // is harmless rather than poisoning the fluid grid.
-                    if (!std::isfinite(F_couple_x)) F_couple_x = 0.0;
-                    if (!std::isfinite(F_couple_y)) F_couple_y = 0.0;
-                    if (!std::isfinite(F_couple_z)) F_couple_z = 0.0;
+                    if (!std::isfinite(F_couple_x)) {
+                        F_couple_x = 0.0;
+                    }
+                    if (!std::isfinite(F_couple_y)) {
+                        F_couple_y = 0.0;
+                    }
+                    if (!std::isfinite(F_couple_z)) {
+                        F_couple_z = 0.0;
+                    }
                 }
 
                 amrex::Real Ffx = -F_couple_x * conv;
@@ -989,7 +1001,7 @@ void BubbleManager::advance(
                     // u_fluid values.  Skip the deposit in those cases; the
                     // bubble's own kinematic state still updates.
                     bool deposit = true;
-                    if (prms.require_liquid_host && has_isf) {
+                    if ((prms.require_liquid_host != 0) && has_isf) {
                         const int ct_host = isf_arr(ci, cj, ck, 0);
                         if (ct_host != lbm::constants::CELL_LIQUID) {
                             deposit = false;
@@ -1158,7 +1170,9 @@ void BubbleManager::advance(
                                         }
                                     }
                                 }
-                                if (!found) p.id() = -1;
+                                if (!found) {
+                                    p.id() = -1;
+                                }
                             }
                         }
                     }
