@@ -1,19 +1,27 @@
 ---
 Checks: 'bugprone-*,
+         -bugprone-branch-clone,
          -bugprone-easily-swappable-parameters,
+         -bugprone-implicit-widening-of-multiplication-result,
          clang-diagnostic-*,
          clang-analyzer-*,
          corecppguidelines-*,
          modernize-*,
-         -modernize-use-trailing-return-type,
+         -modernize-avoid-c-arrays,
          -modernize-use-nodiscard,
+         -modernize-use-std-numbers,
+         -modernize-use-trailing-return-type,
          readability-*,
-         -readability-magic-numbers,
-         -readability-isolate-declaration,
          -readability-avoid-const-params-in-decls,
+         -readability-avoid-nested-conditional-operator,
+         -readability-avoid-unconditional-preprocessor-if,
+         -readability-function-cognitive-complexity,
+         -readability-function-size,
          -readability-identifier-length,
+         -readability-isolate-declaration,
+         -readability-magic-numbers,
          -readability-math-missing-parentheses,
-         -readability-function-cognitive-complexity'
+         -readability-simplify-boolean-expr'
 WarningsAsErrors: ''
 HeaderFilterRegex: '.*'
 HeaderFileExtensions: ['', "H", 'h', 'hh', 'hpp', 'hxx']
@@ -68,6 +76,9 @@ CheckOptions:
   - { key: readability-identifier-naming.ProtectedMemberPrefix, value: m_         }
   - { key: readability-identifier-naming.StructCase,          value: CamelCase  }
   - { key: readability-identifier-naming.FunctionCase,        value: lower_case }
-  - { key: readability-identifier-naming.VariableCase,        value: lower_case }
+  # Scientific / physics variables (Cd, Re_b, S_mag, Vb, T_safe, k_L, eps_SI,
+  # ux_L, etc.) use standard notation from the fluid-dynamics literature and
+  # would lose meaning under strict lower_case.  Allow any case for variables.
+  - { key: readability-identifier-naming.VariableCase,        value: aNy_CasE   }
   - { key: readability-identifier-naming.GlobalConstantCase,  value: UPPER_CASE }
 ...

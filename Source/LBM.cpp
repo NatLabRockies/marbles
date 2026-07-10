@@ -5986,13 +5986,13 @@ void LBM::write_plot_file()
                         continue;
                     }
                     const amrex::Real d =
-                        p.rdata(lbm::BubbleIdx::DIAMETER);        // SI [m]
+                        p.rdata(lbm::bubble_idx::DIAMETER);       // SI [m]
                     const amrex::Real Vb = pi_over_6 * d * d * d; // m³
                     // n_o2 → C_g [mol/m³]
-                    p.rdata(lbm::BubbleIdx::N_O2) =
-                        (Vb > 0.0) ? p.rdata(lbm::BubbleIdx::N_O2) / Vb : 0.0;
+                    p.rdata(lbm::bubble_idx::N_O2) =
+                        (Vb > 0.0) ? p.rdata(lbm::bubble_idx::N_O2) / Vb : 0.0;
                     // diameter → LB cells
-                    p.rdata(lbm::BubbleIdx::DIAMETER) *= inv_dx;
+                    p.rdata(lbm::bubble_idx::DIAMETER) *= inv_dx;
                 }
             }
         }
@@ -6021,11 +6021,11 @@ void LBM::write_plot_file()
                         continue;
                     }
                     // diameter: LB cells → SI [m]
-                    p.rdata(lbm::BubbleIdx::DIAMETER) *= dx;
-                    const amrex::Real d = p.rdata(lbm::BubbleIdx::DIAMETER);
+                    p.rdata(lbm::bubble_idx::DIAMETER) *= dx;
+                    const amrex::Real d = p.rdata(lbm::bubble_idx::DIAMETER);
                     const amrex::Real Vb = pi_over_6 * d * d * d;
                     // C_g → n_o2 [mol]
-                    p.rdata(lbm::BubbleIdx::N_O2) *= Vb;
+                    p.rdata(lbm::bubble_idx::N_O2) *= Vb;
                 }
             }
         }
@@ -6171,7 +6171,7 @@ void LBM::write_checkpoint_file() const
     }
 
     if (m_enable_bubbles) {
-        m_bubbles.Checkpoint(checkpointname, "bubbles");
+        m_bubbles.checkpoint(checkpointname, "bubbles");
     }
 }
 
@@ -6374,7 +6374,7 @@ void LBM::read_checkpoint_file()
         // intact.
         m_bubbles.initialize(
             Geom(0), grids[0], dmap[0], m_bubble_params, /*append_stats=*/true);
-        m_bubbles.Restart(m_restart_chkfile, "bubbles");
+        m_bubbles.restart(m_restart_chkfile, "bubbles");
     }
 
     // Restore the accumulated impeller rotation angle so that

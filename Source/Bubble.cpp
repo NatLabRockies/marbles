@@ -46,11 +46,11 @@ namespace lbm {
 // h is clamped at 0 so a bubble above the surface doesn't get a negative
 // hydrostatic pressure (would have produced V_m > V_m,ref → ρ-expansion).
 //
-// V_m_at_depth is host-and-device callable (used by inject_bubbles on the
+// v_m_at_depth is host-and-device callable (used by inject_bubbles on the
 // host and by the per-bubble update kernel on the GPU).
 // ============================================================================
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
-V_m_at_depth(amrex::Real z_LB, const BubbleParams& p)
+v_m_at_depth(amrex::Real z_LB, const BubbleParams& p)
 {
     if (p.boyle_law_enable == 0) {
         return p.O2_molar_volume;
@@ -456,10 +456,10 @@ void BubbleManager::inject_bubbles(amrex::Real dt_phys)
                     p.pos(d) = std::max(
                         plo[d] + 0.5, std::min(phi[d] - 0.5, p.pos(d)));
                 }
-                p.rdata(BubbleIdx::VX) = 0.0;
-                p.rdata(BubbleIdx::VY) = 0.0;
-                p.rdata(BubbleIdx::VZ) = 0.0;
-                p.rdata(BubbleIdx::DIAMETER) = m_params.d0;
+                p.rdata(bubble_idx::VX) = 0.0;
+                p.rdata(bubble_idx::VY) = 0.0;
+                p.rdata(bubble_idx::VZ) = 0.0;
+                p.rdata(bubble_idx::DIAMETER) = m_params.d0;
                 // Initial moles (Boyle-aware): legacy n_O2 = O2_init_conc · V0
                 // implicitly assumes V_m = V_m,ref at the injection depth.
                 // When Boyle is on, the bubble at sparger depth is compressed,
@@ -469,16 +469,16 @@ void BubbleManager::inject_bubbles(amrex::Real dt_phys)
                 // bubble starts at the local hydrostatic concentration.
                 {
                     const amrex::Real Vm_inject =
-                        V_m_at_depth(p.pos(2), m_params);
+                        v_m_at_depth(p.pos(2), m_params);
                     const amrex::Real depth_factor =
                         m_params.O2_molar_volume / Vm_inject; // = P(h)/P_atm
-                    p.rdata(BubbleIdx::N_O2) =
+                    p.rdata(bubble_idx::N_O2) =
                         m_params.O2_init_conc * V0 * depth_factor;
                 }
-                p.rdata(BubbleIdx::AX) = 0.0;
-                p.rdata(BubbleIdx::AY) = 0.0;
-                p.rdata(BubbleIdx::AZ) = 0.0;
-                p.rdata(BubbleIdx::BREAKUP_COOLDOWN) = 0.0;
+                p.rdata(bubble_idx::AX) = 0.0;
+                p.rdata(bubble_idx::AY) = 0.0;
+                p.rdata(bubble_idx::AZ) = 0.0;
+                p.rdata(bubble_idx::BREAKUP_COOLDOWN) = 0.0;
                 ptile.push_back(p);
             }
         }
@@ -525,18 +525,18 @@ void BubbleManager::do_breakup(
 
                 // Skip if bubble is still in breakup cooldown (Kolmogorov
                 // timescale)
-                if (p.rdata(BubbleIdx::BREAKUP_COOLDOWN) > 0.0) {
+                if (p.rdata(bubble_idx::BREAKUP_COOLDOWN) > 0.0) {
                     continue;
                 }
 
                 // Read cached turbulent dissipation rate interpolated during
                 // advance()
                 const amrex::Real eps_SI = std::min(
-                    amrex::Real(p.rdata(BubbleIdx::EPS_CACHED)),
+                    amrex::Real(p.rdata(bubble_idx::EPS_CACHED)),
                     m_params.eps_max); // cap: prevent boundary-layer
                                        // over-fragmentation
 
-                const amrex::Real d = p.rdata(BubbleIdx::DIAMETER);
+                const amrex::Real d = p.rdata(bubble_idx::DIAMETER);
 
                 // Skip if bubble is already at or below minimum allowed size
                 if (d <= m_params.min_diameter) {
@@ -581,8 +581,8 @@ void BubbleManager::do_breakup(
                     std::cbrt(6.0 * V1 / amrex::Math::pi<amrex::Real>());
                 const amrex::Real d2 =
                     std::cbrt(6.0 * V2 / amrex::Math::pi<amrex::Real>());
-                const amrex::Real n1 = p.rdata(BubbleIdx::N_O2) * fv;
-                const amrex::Real n2 = p.rdata(BubbleIdx::N_O2) * (1.0 - fv);
+                const amrex::Real n1 = p.rdata(bubble_idx::N_O2) * fv;
+                const amrex::Real n2 = p.rdata(bubble_idx::N_O2) * (1.0 - fv);
 
                 // Skip breakup if either daughter would fall below
                 // min_diameter. Prevents runaway fragmentation from near-wall
@@ -608,15 +608,15 @@ void BubbleManager::do_breakup(
                     daughter.pos(0) = p.pos(0);
                     daughter.pos(1) = p.pos(1);
                     daughter.pos(2) = p.pos(2);
-                    daughter.rdata(BubbleIdx::VX) = p.rdata(BubbleIdx::VX);
-                    daughter.rdata(BubbleIdx::VY) = p.rdata(BubbleIdx::VY);
-                    daughter.rdata(BubbleIdx::VZ) = p.rdata(BubbleIdx::VZ);
-                    daughter.rdata(BubbleIdx::AX) = p.rdata(BubbleIdx::AX);
-                    daughter.rdata(BubbleIdx::AY) = p.rdata(BubbleIdx::AY);
-                    daughter.rdata(BubbleIdx::AZ) = p.rdata(BubbleIdx::AZ);
-                    daughter.rdata(BubbleIdx::DIAMETER) = (id == 0) ? d1 : d2;
-                    daughter.rdata(BubbleIdx::N_O2) = (id == 0) ? n1 : n2;
-                    daughter.rdata(BubbleIdx::BREAKUP_COOLDOWN) =
+                    daughter.rdata(bubble_idx::VX) = p.rdata(bubble_idx::VX);
+                    daughter.rdata(bubble_idx::VY) = p.rdata(bubble_idx::VY);
+                    daughter.rdata(bubble_idx::VZ) = p.rdata(bubble_idx::VZ);
+                    daughter.rdata(bubble_idx::AX) = p.rdata(bubble_idx::AX);
+                    daughter.rdata(bubble_idx::AY) = p.rdata(bubble_idx::AY);
+                    daughter.rdata(bubble_idx::AZ) = p.rdata(bubble_idx::AZ);
+                    daughter.rdata(bubble_idx::DIAMETER) = (id == 0) ? d1 : d2;
+                    daughter.rdata(bubble_idx::N_O2) = (id == 0) ? n1 : n2;
+                    daughter.rdata(bubble_idx::BREAKUP_COOLDOWN) =
                         cooldown_steps;
                     new_bubbles.push_back(daughter);
                 }
@@ -690,11 +690,11 @@ void BubbleManager::do_coalescence(amrex::Real phys_time)
                 bd.x = p.pos(0) * dx; // convert to metres
                 bd.y = p.pos(1) * dx;
                 bd.z = p.pos(2) * dx;
-                bd.vx = p.rdata(BubbleIdx::VX);
-                bd.vy = p.rdata(BubbleIdx::VY);
-                bd.vz = p.rdata(BubbleIdx::VZ);
-                bd.d = p.rdata(BubbleIdx::DIAMETER);
-                bd.n_O2 = p.rdata(BubbleIdx::N_O2);
+                bd.vx = p.rdata(bubble_idx::VX);
+                bd.vy = p.rdata(bubble_idx::VY);
+                bd.vz = p.rdata(bubble_idx::VZ);
+                bd.d = p.rdata(bubble_idx::DIAMETER);
+                bd.n_O2 = p.rdata(bubble_idx::N_O2);
                 bd.valid = true;
                 bvec.push_back(bd);
                 BRef br{lev, grid, tile, li};
@@ -767,11 +767,11 @@ void BubbleManager::do_coalescence(amrex::Real phys_time)
                 pi.pos(0) = x_new / dx;
                 pi.pos(1) = y_new / dx;
                 pi.pos(2) = z_new / dx;
-                pi.rdata(BubbleIdx::VX) = vx_new;
-                pi.rdata(BubbleIdx::VY) = vy_new;
-                pi.rdata(BubbleIdx::VZ) = vz_new;
-                pi.rdata(BubbleIdx::DIAMETER) = d_new;
-                pi.rdata(BubbleIdx::N_O2) = n_new;
+                pi.rdata(bubble_idx::VX) = vx_new;
+                pi.rdata(bubble_idx::VY) = vy_new;
+                pi.rdata(bubble_idx::VZ) = vz_new;
+                pi.rdata(bubble_idx::DIAMETER) = d_new;
+                pi.rdata(bubble_idx::N_O2) = n_new;
 
                 // Invalidate particle j
                 auto& br_j = brefs[j];
@@ -874,11 +874,11 @@ void BubbleManager::advance(
 
                 // Bubble geometry from the current stored diameter.  Diameter
                 // is updated at the END of this kernel from the post-update
-                // moles n_O2_new via V_b = n_O2 · V_m_at_depth(z, prms), so
+                // moles n_O2_new via V_b = n_O2 · v_m_at_depth(z, prms), so
                 // Boyle's-law depth scaling enters the next step's d / V_b /
                 // C_g automatically and self-consistently (no separate inline
                 // compression block needed).
-                const amrex::Real d_new = p.rdata(BubbleIdx::DIAMETER);
+                const amrex::Real d_new = p.rdata(bubble_idx::DIAMETER);
                 const amrex::Real r = 0.5 * d_new;
                 const amrex::Real Vb =
                     (4.0 / 3.0) * amrex::Math::pi<amrex::Real>() * r * r * r;
@@ -899,9 +899,9 @@ void BubbleManager::advance(
                 const amrex::Real ufy = ufy_lb * dx_phys / prms.dt_phys;
                 const amrex::Real ufz = ufz_lb * dx_phys / prms.dt_phys;
 
-                amrex::Real vbx = p.rdata(BubbleIdx::VX);
-                amrex::Real vby = p.rdata(BubbleIdx::VY);
-                amrex::Real vbz = p.rdata(BubbleIdx::VZ);
+                amrex::Real vbx = p.rdata(bubble_idx::VX);
+                amrex::Real vby = p.rdata(bubble_idx::VY);
+                amrex::Real vbz = p.rdata(bubble_idx::VZ);
 
                 amrex::Real urx = vbx - ufx;
                 amrex::Real ury = vby - ufy;
@@ -934,9 +934,9 @@ void BubbleManager::advance(
                 amrex::Real FAy = m_eff * ay_new;
                 amrex::Real FAz = m_eff * az_new;
 
-                p.rdata(BubbleIdx::AX) = ax_new;
-                p.rdata(BubbleIdx::AY) = ay_new;
-                p.rdata(BubbleIdx::AZ) = az_new;
+                p.rdata(bubble_idx::AX) = ax_new;
+                p.rdata(bubble_idx::AY) = ay_new;
+                p.rdata(bubble_idx::AZ) = az_new;
 
                 // 3. Deposit drag+added mass coupling force back to fluid
                 // LB force = SI Force / (rho * dx^4 / dt^2)
@@ -1018,7 +1018,7 @@ void BubbleManager::advance(
                 }
 
                 // 4. O2 Volumetric Source
-                amrex::Real n_O2 = p.rdata(BubbleIdx::N_O2);
+                amrex::Real n_O2 = p.rdata(bubble_idx::N_O2);
                 amrex::Real C_g_i = (Vb > 0.0) ? (n_O2 / Vb) : 0.0;
 
                 amrex::Real C_f_lb_raw = trilinear_interp_device(
@@ -1034,7 +1034,7 @@ void BubbleManager::advance(
                     (prms.dt_phys * prms.dt_phys * prms.dt_phys);
                 amrex::Real eps_SI =
                     amrex::max(eps_lb * eps_conv, amrex::Real(1.0e-10));
-                p.rdata(BubbleIdx::EPS_CACHED) = eps_SI;
+                p.rdata(bubble_idx::EPS_CACHED) = eps_SI;
 
                 amrex::Real Sc = prms.nu_fluid / prms.D_O2;
                 amrex::Real k_L = prms.kL_coeff *
@@ -1046,18 +1046,18 @@ void BubbleManager::advance(
                     k_L * (amrex::Math::pi<amrex::Real>() * d_new * d_new) *
                     (S_i * C_g_i - C_f_i);
 
-                p.rdata(BubbleIdx::DN_I) = dn_i; // Cache for stats
+                p.rdata(bubble_idx::DN_I) = dn_i; // Cache for stats
 
                 amrex::Real n_O2_new =
                     amrex::max(n_O2 - dn_i * prms.dt_phys, amrex::Real(0.0));
-                p.rdata(BubbleIdx::N_O2) = n_O2_new;
+                p.rdata(bubble_idx::N_O2) = n_O2_new;
 
                 // Recompute V_b from moles using Boyle-aware molar volume.
                 // When prms.boyle_law_enable = 0, this collapses to the legacy
                 //   V_b = n_O2 · O2_molar_volume
                 // (isobaric ideal gas at STP).  When on, V_m shrinks with
                 // depth so a fixed moles → smaller V_b for deeper bubbles.
-                const amrex::Real Vm_now = V_m_at_depth(p.pos(2), prms);
+                const amrex::Real Vm_now = v_m_at_depth(p.pos(2), prms);
                 amrex::Real Vb_new = n_O2_new * Vm_now;
                 if (Vb_new > 0.0) {
                     amrex::Real d_new_new = std::cbrt(
@@ -1065,7 +1065,7 @@ void BubbleManager::advance(
                     if (d_new_new < 1.0e-5) {
                         p.id() = -1;
                     } else {
-                        p.rdata(BubbleIdx::DIAMETER) = d_new_new;
+                        p.rdata(bubble_idx::DIAMETER) = d_new_new;
                     }
                 } else {
                     p.id() = -1;
@@ -1099,9 +1099,9 @@ void BubbleManager::advance(
                               0.5 * az_new * prms.dt_phys * prms.dt_phys) /
                                  dx_phys;
 
-                    p.rdata(BubbleIdx::VX) = vbx + ax_new * prms.dt_phys;
-                    p.rdata(BubbleIdx::VY) = vby + ay_new * prms.dt_phys;
-                    p.rdata(BubbleIdx::VZ) = vbz + az_new * prms.dt_phys;
+                    p.rdata(bubble_idx::VX) = vbx + ax_new * prms.dt_phys;
+                    p.rdata(bubble_idx::VY) = vby + ay_new * prms.dt_phys;
+                    p.rdata(bubble_idx::VZ) = vbz + az_new * prms.dt_phys;
 
                     if (has_isf) {
                         int nci = static_cast<int>(amrex::Math::floor(
@@ -1131,12 +1131,12 @@ void BubbleManager::advance(
                                 new_px = old_x;
                                 new_py = old_y;
                                 new_pz = old_z;
-                                p.rdata(BubbleIdx::VX) = 0;
-                                p.rdata(BubbleIdx::VY) = 0;
-                                p.rdata(BubbleIdx::VZ) = 0;
-                                p.rdata(BubbleIdx::AX) = 0;
-                                p.rdata(BubbleIdx::AY) = 0;
-                                p.rdata(BubbleIdx::AZ) = 0;
+                                p.rdata(bubble_idx::VX) = 0;
+                                p.rdata(bubble_idx::VY) = 0;
+                                p.rdata(bubble_idx::VZ) = 0;
+                                p.rdata(bubble_idx::AX) = 0;
+                                p.rdata(bubble_idx::AY) = 0;
+                                p.rdata(bubble_idx::AZ) = 0;
                             } else {
                                 bool found = false;
                                 for (int d_i = -1; d_i <= 1 && !found; ++d_i) {
@@ -1159,12 +1159,12 @@ void BubbleManager::advance(
                                                 new_pz = (nniv[2] + 0.5) *
                                                              dx_arr[2] +
                                                          prob_lo[2];
-                                                p.rdata(BubbleIdx::VX) = 0;
-                                                p.rdata(BubbleIdx::VY) = 0;
-                                                p.rdata(BubbleIdx::VZ) = 0;
-                                                p.rdata(BubbleIdx::AX) = 0;
-                                                p.rdata(BubbleIdx::AY) = 0;
-                                                p.rdata(BubbleIdx::AZ) = 0;
+                                                p.rdata(bubble_idx::VX) = 0;
+                                                p.rdata(bubble_idx::VY) = 0;
+                                                p.rdata(bubble_idx::VZ) = 0;
+                                                p.rdata(bubble_idx::AX) = 0;
+                                                p.rdata(bubble_idx::AY) = 0;
+                                                p.rdata(bubble_idx::AZ) = 0;
                                                 found = true;
                                             }
                                         }
@@ -1216,7 +1216,7 @@ void BubbleManager::advance(
                 if (!p.id().is_valid()) {
                     continue;
                 }
-                amrex::ParticleReal& cd = p.rdata(BubbleIdx::BREAKUP_COOLDOWN);
+                amrex::ParticleReal& cd = p.rdata(bubble_idx::BREAKUP_COOLDOWN);
                 if (cd > 0.0) {
                     cd -= 1.0;
                 }
@@ -1266,12 +1266,12 @@ void BubbleManager::write_stats(
                     continue;
                 }
                 ++n_bub;
-                const amrex::Real d = p.rdata(BubbleIdx::DIAMETER);
+                const amrex::Real d = p.rdata(bubble_idx::DIAMETER);
                 d_sum += d;
                 d_min = std::min(d_min, d);
                 d_max = std::max(d_max, d);
-                n_O2_total += p.rdata(BubbleIdx::N_O2);
-                dn_total += p.rdata(BubbleIdx::DN_I);
+                n_O2_total += p.rdata(bubble_idx::N_O2);
+                dn_total += p.rdata(bubble_idx::DN_I);
                 ++fi;
             }
         }
@@ -1340,7 +1340,7 @@ void BubbleManager::close_stats_file()
 // ============================================================================
 // Checkpoint / Restart
 // ============================================================================
-void BubbleManager::Checkpoint(
+void BubbleManager::checkpoint(
     const std::string& dir, const std::string& name) const
 {
     if (m_initialized && m_particles_ever_injected) {
@@ -1348,7 +1348,7 @@ void BubbleManager::Checkpoint(
     }
 }
 
-void BubbleManager::Restart(const std::string& dir, const std::string& name)
+void BubbleManager::restart(const std::string& dir, const std::string& name)
 {
     if (m_initialized) {
         m_container.Restart(dir, name);

@@ -14,7 +14,7 @@
 
 namespace lbm {
 
-namespace BubbleIdx {
+namespace bubble_idx {
 enum Real {
     VX = 0,
     VY = 1,
@@ -32,7 +32,7 @@ enum Real {
 }
 
 using BubbleContainer = amrex::
-    ParticleContainer<BubbleIdx::NReal, 0, 0, 0, amrex::ManagedArenaAllocator>;
+    ParticleContainer<bubble_idx::NReal, 0, 0, 0, amrex::ManagedArenaAllocator>;
 using BubbleParticle = typename BubbleContainer::ParticleType;
 
 struct BubbleParams
@@ -187,8 +187,8 @@ public:
 
     bool is_initialized() const { return m_initialized; }
 
-    void Checkpoint(const std::string& dir, const std::string& name) const;
-    void Restart(const std::string& dir, const std::string& name);
+    void checkpoint(const std::string& dir, const std::string& name) const;
+    void restart(const std::string& dir, const std::string& name);
 
 private:
     void
