@@ -49,7 +49,7 @@ struct Constant
             const amrex::Real* dx = geom.CellSize();
             const amrex::Real x = prob_lo[0] + (iv[0] + 0.5) * dx[0];
             const amrex::Real y = prob_lo[1] + (iv[1] + 0.5) * dx[1];
-            const amrex::Real z =
+            [[maybe_unused]] const amrex::Real z =
                 AMREX_D_PICK(, 0.0, prob_lo[2] + (iv[2] + 0.5) * dx[2]);
 
             bool is_inside = true;
@@ -113,7 +113,7 @@ struct Constant
             const amrex::Real* dx = geom.CellSize();
             const amrex::Real x = prob_lo[0] + (iv[0] + 0.5) * dx[0];
             const amrex::Real y = prob_lo[1] + (iv[1] + 0.5) * dx[1];
-            const amrex::Real z =
+            [[maybe_unused]] const amrex::Real z =
                 AMREX_D_PICK(, 0.0, prob_lo[2] + (iv[2] + 0.5) * dx[2]);
 
             bool is_inside = true;
@@ -210,7 +210,7 @@ struct TaylorGreen
             const amrex::Real* dx = geom.CellSize();
             const amrex::Real x = prob_lo[0] + (iv[0] + 0.5) * dx[0];
             const amrex::Real y = prob_lo[1] + (iv[1] + 0.5) * dx[1];
-            const amrex::Real z =
+            [[maybe_unused]] const amrex::Real z =
                 AMREX_D_PICK(, 0.0, prob_lo[2] + (iv[2] + 0.5) * dx[2]);
             const amrex::Real omega0 = omega[0];
             const amrex::Real omega1 = omega[1];
@@ -242,7 +242,7 @@ struct TaylorGreen
             const amrex::Real* dx = geom.CellSize();
             const amrex::Real x = prob_lo[0] + (iv[0] + 0.5) * dx[0];
             const amrex::Real y = prob_lo[1] + (iv[1] + 0.5) * dx[1];
-            const amrex::Real z =
+            [[maybe_unused]] const amrex::Real z =
                 AMREX_D_PICK(, 0.0, prob_lo[2] + (iv[2] + 0.5) * dx[2]);
             const amrex::Real omega0 = omega[0];
             const amrex::Real omega1 = omega[1];

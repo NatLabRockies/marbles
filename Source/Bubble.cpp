@@ -239,7 +239,7 @@ amrex::Real trilinear_interp(
     amrex::Real val = 0.0;
     for (amrex::MFIter mfi(mf, false); mfi.isValid(); ++mfi) {
         const amrex::Box& bx = mfi.validbox();
-        if (!bx.contains(amrex::IntVect(i0, j0, k0))) {
+        if (!bx.contains(amrex::IntVect(AMREX_D_DECL(i0, j0, k0)))) {
             continue;
         }
         const auto& arr = mf.const_array(mfi);
@@ -1103,8 +1103,9 @@ void BubbleManager::advance(
                             (new_px - prob_lo[0]) / dx_arr[0]));
                         int ncj = static_cast<int>(amrex::Math::floor(
                             (new_py - prob_lo[1]) / dx_arr[1]));
-                        int nck = static_cast<int>(amrex::Math::floor(
-                            (new_pz - prob_lo[2]) / dx_arr[2]));
+                        [[maybe_unused]] int nck =
+                            static_cast<int>(amrex::Math::floor(
+                                (new_pz - prob_lo[2]) / dx_arr[2]));
                         amrex::IntVect niv(AMREX_D_DECL(nci, ncj, nck));
 
                         // Block bubbles entering MOVING-IMPELLER or
@@ -1181,8 +1182,9 @@ void BubbleManager::advance(
                             (new_px - prob_lo[0]) / dx_arr[0]));
                         int fsj = static_cast<int>(amrex::Math::floor(
                             (new_py - prob_lo[1]) / dx_arr[1]));
-                        int fsk = static_cast<int>(amrex::Math::floor(
-                            (new_pz - prob_lo[2]) / dx_arr[2]));
+                        [[maybe_unused]] int fsk =
+                            static_cast<int>(amrex::Math::floor(
+                                (new_pz - prob_lo[2]) / dx_arr[2]));
                         amrex::IntVect fsiv(AMREX_D_DECL(fsi, fsj, fsk));
                         if (domain.contains(fsiv) && phi_arr(fsiv, 0) < 0.5) {
                             p.id() = -1;
