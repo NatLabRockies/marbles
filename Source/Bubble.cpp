@@ -237,7 +237,6 @@ amrex::Real trilinear_interp(
     k1 = clamp(k1, domain.smallEnd(2), domain.bigEnd(2));
 
     amrex::Real val = 0.0;
-    bool found = false;
     for (amrex::MFIter mfi(mf, false); mfi.isValid(); ++mfi) {
         const amrex::Box& bx = mfi.validbox();
         if (!bx.contains(amrex::IntVect(i0, j0, k0))) {
@@ -258,7 +257,6 @@ amrex::Real trilinear_interp(
               ti * (1 - tj) * tk * get(i1, j0, k1) +
               (1 - ti) * tj * tk * get(i0, j1, k1) +
               ti * tj * tk * get(i1, j1, k1);
-        found = true;
         break;
     }
     return val;
@@ -495,7 +493,8 @@ void BubbleManager::inject_bubbles(amrex::Real dt_phys)
 //   LB units → SI: eps_SI = eps_LB * dx²/dt³.
 // ============================================================================
 void BubbleManager::do_breakup(
-    const amrex::MultiFab& derived, const amrex::Geometry& geom)
+    [[maybe_unused]] const amrex::MultiFab& derived,
+    [[maybe_unused]] const amrex::Geometry& geom)
 {
     if (!m_params.enable_breakup) {
         return;
@@ -506,11 +505,8 @@ void BubbleManager::do_breakup(
 
     const amrex::Real sigma = m_params.surf_tension;
     const amrex::Real rho_f = m_params.rho_fluid;
-    const amrex::Real dx = m_params.dx_phys;
     const amrex::Real dt = m_params.dt_phys;
     const amrex::Real nu_f = m_params.nu_fluid;
-    // Conversion factor: eps_LB → eps_SI [m²/s³]
-    const amrex::Real eps_conv = dx * dx / (dt * dt * dt);
 
     amrex::Vector<BubbleParticle> new_bubbles;
 
@@ -800,14 +796,14 @@ void BubbleManager::do_coalescence(amrex::Real phys_time)
 // advance  — fused GPU per-step driver
 // ============================================================================
 void BubbleManager::advance(
-    amrex::Real dt,
+    [[maybe_unused]] amrex::Real dt,
     const amrex::MultiFab& macrodata,
     const amrex::MultiFab& derived,
     const amrex::MultiFab& o2_conc_mf,
     const amrex::Geometry& geom,
     amrex::MultiFab& fluid_force_mf,
     amrex::MultiFab& o2_src_mf,
-    amrex::Real phys_time,
+    [[maybe_unused]] amrex::Real phys_time,
     const amrex::MultiFab* phi_mf,
     const amrex::iMultiFab* cell_type_mf)
 {
@@ -825,7 +821,6 @@ void BubbleManager::advance(
     fluid_force_mf.setVal(0.0);
     o2_src_mf.setVal(0.0);
 
-    const amrex::Real dt_phys = m_params.dt_phys;
     const amrex::Real dx_phys = m_params.dx_phys;
 
     // Set up iteration

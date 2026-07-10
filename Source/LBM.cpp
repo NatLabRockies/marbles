@@ -300,12 +300,12 @@ void LBM::read_parameters()
                 has_vel_bc = true;
             }
         }
-        if (!(pp.contains(vel_bc_key.c_str())) && has_vel_bc) {
+        if (!(pp.contains(vel_bc_key)) && has_vel_bc) {
             amrex::Abort(
                 "LBM::read_paramaters: velocity BC is used without specifying "
                 "the type to be used");
         }
-        pp.query(vel_bc_key.c_str(), m_velocity_bc_type);
+        pp.query(vel_bc_key, m_velocity_bc_type);
 
         pp.get("ic_type", m_ic_type);
 
@@ -320,7 +320,7 @@ void LBM::read_parameters()
         for (int i = 0; i < m_n_components; ++i) {
             std::string diff_key = "diffusivity_component_" + std::to_string(i);
             m_component_diffusivities[i] = m_nu;
-            pp.query(diff_key.c_str(), m_component_diffusivities[i]);
+            pp.query(diff_key, m_component_diffusivities[i]);
         }
 
         pp.query("save_streaming", m_save_streaming);
@@ -2614,7 +2614,6 @@ void LBM::relax_f_to_equilibrium(const int lev)
     // off; activate via lbm.fslbm_interface_isothermal = 1.
     // -------------------------------------------------------------------
     if (interface_isothermal) {
-        constexpr int NQ = constants::N_MICRO_STATES;
         const amrex::Real two_rho_e_unit_fac =
             amrex::Real(2.0) * l_cv * l_T_ref;
         amrex::ParallelFor(
@@ -3482,8 +3481,8 @@ void LBM::initialize_moving_body_shape(int lev)
             << "Initializing moving body reference from current fluid field..."
             << std::endl;
 
-        const amrex::Geometry& geom = Geom(lev);
-        const amrex::Box& domain = geom.Domain();
+        const amrex::Geometry& geom_lev = Geom(lev);
+        const amrex::Box& domain = geom_lev.Domain();
         const int nx = domain.length(0);
         const int ny = domain.length(1);
         const int nz = domain.length(2);
@@ -3587,8 +3586,8 @@ void LBM::initialize_moving_body_shape(int lev)
 
         // Set metadata
         m_body_voxel_dims = domain.length();
-        m_body_voxel_origin = geom.ProbLoArray();
-        m_body_voxel_dx = geom.CellSizeArray();
+        m_body_voxel_origin = geom_lev.ProbLoArray();
+        m_body_voxel_dx = geom_lev.CellSizeArray();
 
         amrex::Vector<amrex::Real> center(3, 0.0);
         pp.queryarr("stl_center", center);
@@ -3662,8 +3661,8 @@ void LBM::init_stationary_body(int lev)
 
     if (has_crack) {
         m_has_stationary_body = true;
-        const auto& geom = Geom(lev);
-        const amrex::Box& domain = geom.Domain();
+        const auto& geom_lev = Geom(lev);
+        const amrex::Box& domain = geom_lev.Domain();
         const int nx = domain.length(0);
         const int ny = domain.length(1);
         const int nz = domain.length(2);
@@ -3745,15 +3744,15 @@ void LBM::initialize_is_fluid(const int lev)
     if (m_has_stationary_body) {
         auto const& stationary_mask_arrs =
             m_stationary_mask[lev].const_arrays();
-        auto const& is_fluid_arrs = m_is_fluid[lev].arrays();
+        auto const& is_fluid_arrs_stat = m_is_fluid[lev].arrays();
         amrex::ParallelFor(
             m_is_fluid[lev], m_is_fluid[lev].nGrowVect(),
             [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
                 // Merge stationary mask: if stationary mask is 0 (solid),
                 // is_fluid becomes 0 is_fluid = min(is_fluid, stationary_mask)
-                is_fluid_arrs[nbx](i, j, k, lbm::constants::IS_FLUID_IDX) =
+                is_fluid_arrs_stat[nbx](i, j, k, lbm::constants::IS_FLUID_IDX) =
                     amrex::min(
-                        is_fluid_arrs[nbx](
+                        is_fluid_arrs_stat[nbx](
                             i, j, k, lbm::constants::IS_FLUID_IDX),
                         stationary_mask_arrs[nbx](i, j, k));
             });
@@ -4442,177 +4441,189 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
     auto const& donor_count_arrs_outer = donor_recipient_count.arrays();
 
     {
-        auto const& newly_fluid_arrs = newly_fluid_arrs_outer;
-        auto const& f_arrs = f_arrs_outer;
-        auto const& g_arrs = g_arrs_outer;
-        auto const& old_fluid_arrs = old_fluid_arrs_outer;
-        auto const& curr_fluid_arrs = curr_fluid_arrs_outer;
-        auto const& donor_count_arrs = donor_recipient_count.arrays();
-        auto const& ct_arrs_ref = ct_arrs_refill;
-        const bool is_free_surface = is_free_surface_refill;
+        // Step 5 sub-block: declarations here stay local so they don't
+        // shadow the identical names inside the Step 6 / Step 7 / component
+        // sub-blocks below.
+        {
+            auto const& newly_fluid_arrs = newly_fluid_arrs_outer;
+            auto const& f_arrs = f_arrs_outer;
+            auto const& g_arrs = g_arrs_outer;
+            auto const& old_fluid_arrs = old_fluid_arrs_outer;
+            auto const& curr_fluid_arrs = curr_fluid_arrs_outer;
+            auto const& donor_count_arrs = donor_recipient_count.arrays();
+            auto const& ct_arrs_ref = ct_arrs_refill;
+            const bool is_free_surface = is_free_surface_refill;
 
-        const stencil::Stencil stencil;
-        const auto& evs = stencil.evs;
+            const stencil::Stencil stencil;
+            const auto& evs = stencil.evs;
 
-        amrex::ParallelFor(
-            m_f[lev], amrex::IntVect(0),
-            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
-                // Only process newly fluid cells
-                if (newly_fluid_arrs[nbx](i, j, k, 0) != 1) {
-                    return;
-                }
-
-                // Skip cells managed exclusively by FSLBM:
-                //   CELL_GAS       — f=0 by definition; no liquid neighbors to
-                //   donate from. CELL_INTERFACE — managed by FSLBM
-                //   ABB/mass-flux. CELL_SOLID     — body just vacated; Case B
-                //   always assigns CELL_LIQUID,
-                //                    so always proceed with refill.
-                // CELL_LIQUID cells (bulk liquid adjacent to impeller) always
-                // refilled.
-                if (is_free_surface) {
-                    const int ct_val = ct_arrs_ref[nbx](i, j, k, 0);
-                    if (ct_val == lbm::constants::CELL_GAS ||
-                        ct_val == lbm::constants::CELL_INTERFACE) {
+            amrex::ParallelFor(
+                m_f[lev], amrex::IntVect(0),
+                [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                    // Only process newly fluid cells
+                    if (newly_fluid_arrs[nbx](i, j, k, 0) != 1) {
                         return;
                     }
-                    // CELL_SOLID and CELL_LIQUID: proceed with refill
-                }
 
-                // Get bounds for safety
-                const auto& farr = f_arrs[nbx];
-                const auto lo = amrex::lbound(farr);
-                const auto hi = amrex::ubound(farr);
-
-                // Step 1 & 2: Sum evs vectors for neighbors that were fluid AND
-                // still are fluid
-                amrex::Real normal_x = 0.0;
-                amrex::Real normal_y = 0.0;
-                amrex::Real normal_z = 0.0;
-                int num_persistent = 0;
-
-                for (int nq = 1; nq < constants::N_MICRO_STATES; ++nq) {
-                    int ni = i + evs[nq][0];
-                    int nj = j + evs[nq][1];
-                    int nk = k + evs[nq][2];
-
-                    // Check bounds
-                    if (ni < lo.x || ni > hi.x || nj < lo.y || nj > hi.y ||
-                        nk < lo.z || nk > hi.z) {
-                        continue;
+                    // Skip cells managed exclusively by FSLBM:
+                    //   CELL_GAS       — f=0 by definition; no liquid neighbors
+                    //   to donate from. CELL_INTERFACE — managed by FSLBM
+                    //   ABB/mass-flux. CELL_SOLID     — body just vacated; Case
+                    //   B always assigns CELL_LIQUID,
+                    //                    so always proceed with refill.
+                    // CELL_LIQUID cells (bulk liquid adjacent to impeller)
+                    // always refilled.
+                    if (is_free_surface) {
+                        const int ct_val = ct_arrs_ref[nbx](i, j, k, 0);
+                        if (ct_val == lbm::constants::CELL_GAS ||
+                            ct_val == lbm::constants::CELL_INTERFACE) {
+                            return;
+                        }
+                        // CELL_SOLID and CELL_LIQUID: proceed with refill
                     }
 
-                    // Check if neighbor was fluid BEFORE and is still fluid NOW
-                    if (old_fluid_arrs[nbx](ni, nj, nk, 0) == 1 &&
-                        curr_fluid_arrs[nbx](
-                            ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1) {
-                        normal_x += evs[nq][0];
-                        normal_y += evs[nq][1];
-                        normal_z += evs[nq][2];
-                        num_persistent++;
-                    }
-                }
+                    // Get bounds for safety
+                    const auto& farr = f_arrs[nbx];
+                    const auto lo = amrex::lbound(farr);
+                    const auto hi = amrex::ubound(farr);
 
-                // If no persistent neighbors, zero out and exit.
-                // This is the validated behaviour from the single-phase case.
-                // A copy-from-any-neighbor fallback without a corresponding
-                // donor deduction (Step 7 only covers the normal donor path)
-                // creates mass every step for blade cells that are
-                // simultaneously uncovered.
-                if (num_persistent == 0) {
-                    for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
-                        f_arrs[nbx](i, j, k, q) = 0.0;
-                        g_arrs[nbx](i, j, k, q) = 0.0;
-                    }
-                    return;
-                }
+                    // Step 1 & 2: Sum evs vectors for neighbors that were fluid
+                    // AND still are fluid
+                    amrex::Real normal_x = 0.0;
+                    amrex::Real normal_y = 0.0;
+                    amrex::Real normal_z = 0.0;
+                    int num_persistent = 0;
 
-                // Step 3: Normalize the normal vector
-                amrex::Real norm = std::sqrt(
-                    normal_x * normal_x + normal_y * normal_y +
-                    normal_z * normal_z);
-                if (norm == 0.0) {
-                    // Normal is zero - fall back to first persistent neighbor
                     for (int nq = 1; nq < constants::N_MICRO_STATES; ++nq) {
                         int ni = i + evs[nq][0];
                         int nj = j + evs[nq][1];
                         int nk = k + evs[nq][2];
 
+                        // Check bounds
                         if (ni < lo.x || ni > hi.x || nj < lo.y || nj > hi.y ||
                             nk < lo.z || nk > hi.z) {
                             continue;
                         }
 
+                        // Check if neighbor was fluid BEFORE and is still fluid
+                        // NOW
                         if (old_fluid_arrs[nbx](ni, nj, nk, 0) == 1 &&
                             curr_fluid_arrs[nbx](
                                 ni, nj, nk, lbm::constants::IS_FLUID_IDX) ==
                                 1) {
-                            for (int q = 0; q < constants::N_MICRO_STATES;
-                                 ++q) {
-                                f_arrs[nbx](i, j, k, q) =
-                                    f_arrs[nbx](ni, nj, nk, q);
-                                g_arrs[nbx](i, j, k, q) =
-                                    g_arrs[nbx](ni, nj, nk, q);
+                            normal_x += evs[nq][0];
+                            normal_y += evs[nq][1];
+                            normal_z += evs[nq][2];
+                            num_persistent++;
+                        }
+                    }
+
+                    // If no persistent neighbors, zero out and exit.
+                    // This is the validated behaviour from the single-phase
+                    // case. A copy-from-any-neighbor fallback without a
+                    // corresponding donor deduction (Step 7 only covers the
+                    // normal donor path) creates mass every step for blade
+                    // cells that are simultaneously uncovered.
+                    if (num_persistent == 0) {
+                        for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+                            f_arrs[nbx](i, j, k, q) = 0.0;
+                            g_arrs[nbx](i, j, k, q) = 0.0;
+                        }
+                        return;
+                    }
+
+                    // Step 3: Normalize the normal vector
+                    amrex::Real norm = std::sqrt(
+                        normal_x * normal_x + normal_y * normal_y +
+                        normal_z * normal_z);
+                    if (norm == 0.0) {
+                        // Normal is zero - fall back to first persistent
+                        // neighbor
+                        for (int nq = 1; nq < constants::N_MICRO_STATES; ++nq) {
+                            int ni = i + evs[nq][0];
+                            int nj = j + evs[nq][1];
+                            int nk = k + evs[nq][2];
+
+                            if (ni < lo.x || ni > hi.x || nj < lo.y ||
+                                nj > hi.y || nk < lo.z || nk > hi.z) {
+                                continue;
                             }
-                            return;
+
+                            if (old_fluid_arrs[nbx](ni, nj, nk, 0) == 1 &&
+                                curr_fluid_arrs[nbx](
+                                    ni, nj, nk, lbm::constants::IS_FLUID_IDX) ==
+                                    1) {
+                                for (int q = 0; q < constants::N_MICRO_STATES;
+                                     ++q) {
+                                    f_arrs[nbx](i, j, k, q) =
+                                        f_arrs[nbx](ni, nj, nk, q);
+                                    g_arrs[nbx](i, j, k, q) =
+                                        g_arrs[nbx](ni, nj, nk, q);
+                                }
+                                return;
+                            }
                         }
                     }
-                }
 
-                normal_x /= norm;
-                normal_y /= norm;
-                normal_z /= norm;
+                    normal_x /= norm;
+                    normal_y /= norm;
+                    normal_z /= norm;
 
-                // Step 4: Find neighbor with maximum dot product with normal
-                amrex::Real max_dot = -1e10;
-                int donor_i = -1;
-                int donor_j = -1;
-                int donor_k = -1;
+                    // Step 4: Find neighbor with maximum dot product with
+                    // normal
+                    amrex::Real max_dot = -1e10;
+                    int donor_i = -1;
+                    int donor_j = -1;
+                    int donor_k = -1;
 
-                for (int nq = 1; nq < constants::N_MICRO_STATES; ++nq) {
-                    int ni = i + evs[nq][0];
-                    int nj = j + evs[nq][1];
-                    int nk = k + evs[nq][2];
+                    for (int nq = 1; nq < constants::N_MICRO_STATES; ++nq) {
+                        int ni = i + evs[nq][0];
+                        int nj = j + evs[nq][1];
+                        int nk = k + evs[nq][2];
 
-                    // Check bounds
-                    if (ni < lo.x || ni > hi.x || nj < lo.y || nj > hi.y ||
-                        nk < lo.z || nk > hi.z) {
-                        continue;
-                    }
+                        // Check bounds
+                        if (ni < lo.x || ni > hi.x || nj < lo.y || nj > hi.y ||
+                            nk < lo.z || nk > hi.z) {
+                            continue;
+                        }
 
-                    // Check if neighbor was fluid BEFORE and is still fluid NOW
-                    if (old_fluid_arrs[nbx](ni, nj, nk, 0) == 1 &&
-                        curr_fluid_arrs[nbx](
-                            ni, nj, nk, lbm::constants::IS_FLUID_IDX) == 1) {
+                        // Check if neighbor was fluid BEFORE and is still fluid
+                        // NOW
+                        if (old_fluid_arrs[nbx](ni, nj, nk, 0) == 1 &&
+                            curr_fluid_arrs[nbx](
+                                ni, nj, nk, lbm::constants::IS_FLUID_IDX) ==
+                                1) {
 
-                        // Compute dot product
-                        amrex::Real dot = evs[nq][0] * normal_x +
-                                          evs[nq][1] * normal_y +
-                                          evs[nq][2] * normal_z;
+                            // Compute dot product
+                            amrex::Real dot = evs[nq][0] * normal_x +
+                                              evs[nq][1] * normal_y +
+                                              evs[nq][2] * normal_z;
 
-                        if (dot > max_dot) {
-                            max_dot = dot;
-                            donor_i = ni;
-                            donor_j = nj;
-                            donor_k = nk;
+                            if (dot > max_dot) {
+                                max_dot = dot;
+                                donor_i = ni;
+                                donor_j = nj;
+                                donor_k = nk;
+                            }
                         }
                     }
-                }
 
-                // Step 5: Increment donor recipient count
-                if (donor_i >= 0) {
-                    // Atomically increment the count for this donor
-                    amrex::Gpu::Atomic::Add(
-                        &donor_count_arrs[nbx](donor_i, donor_j, donor_k, 0),
-                        1);
-                }
-            });
-        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host
-        // barrier
+                    // Step 5: Increment donor recipient count
+                    if (donor_i >= 0) {
+                        // Atomically increment the count for this donor
+                        amrex::Gpu::Atomic::Add(
+                            &donor_count_arrs[nbx](
+                                donor_i, donor_j, donor_k, 0),
+                            1);
+                    }
+                });
+            // amrex::Gpu::synchronize(); // Optimization: Removed implicit host
+            // barrier
 
-        // Synchronize donor counts across ghost cells
-        donor_recipient_count.SumBoundary(Geom(lev).periodicity());
-        donor_recipient_count.FillBoundary(Geom(lev).periodicity());
+            // Synchronize donor counts across ghost cells
+            donor_recipient_count.SumBoundary(Geom(lev).periodicity());
+            donor_recipient_count.FillBoundary(Geom(lev).periodicity());
+        }
 
         // Step 6: Second pass - Transfer ONLY q=0 component from donors to
         // newly-fluid cells Recipients get mass/energy at rest (no
@@ -5143,9 +5154,9 @@ void LBM::reconstruct_body_sdf(const int lev, amrex::Real time)
         return;
     }
 
-    const auto& geom = Geom(lev);
-    const auto dx = geom.CellSizeArray();
-    const auto prob_lo = geom.ProbLoArray();
+    const auto& geom_lev = Geom(lev);
+    const auto dx = geom_lev.CellSizeArray();
+    const auto prob_lo = geom_lev.ProbLoArray();
 
     // Update body position and orientation
     amrex::Real dt = time - m_ts_old[lev];
@@ -9172,10 +9183,9 @@ void LBM::fslbm_advance_surface(const int lev)
                     constexpr int faces[6][3] = {{1, 0, 0}, {-1, 0, 0},
                                                  {0, 1, 0}, {0, -1, 0},
                                                  {0, 0, 1}, {0, 0, -1}};
-                    for (int f = 0; f < 6; ++f) {
+                    for (const auto& face : faces) {
                         const amrex::IntVect ivn(AMREX_D_DECL(
-                            iv[0] + faces[f][0], iv[1] + faces[f][1],
-                            iv[2] + faces[f][2]));
+                            iv[0] + face[0], iv[1] + face[1], iv[2] + face[2]));
                         if (!fbox.contains(ivn)) {
                             continue;
                         }
@@ -10260,7 +10270,6 @@ void LBM::fslbm_advance_surface(const int lev)
     // Step 5c: Component Lattice Spawning (Step B)
     // -----------------------------------------------------------------------
     if (m_n_components > 0) {
-        auto const& ct_arrs_ro = m_cell_type[lev].const_arrays();
         auto const& flag_ro = mass_flux.const_arrays(); // comp 2: spawn flag
         for (int c = 0; c < m_n_components; ++c) {
             auto const& c_arrs = m_component_lattices[c][lev].arrays();

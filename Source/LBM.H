@@ -774,7 +774,7 @@ private:
     int m_body_angular_velocity_ramp_steps = 0;
     amrex::GpuArray<amrex::Real, 3> m_body_center = {0.0, 0.0, 0.0};
     amrex::Real m_body_rotation_angle = 0.0; // accumulated rotation
-    std::string m_body_geom_type = "";
+    std::string m_body_geom_type;
 
     // Body is isothermal.
     bool m_bodyIsIsothermal = false;

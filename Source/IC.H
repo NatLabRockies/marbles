@@ -642,7 +642,7 @@ public:
     }
 
     void initialize_lattice(
-        const int lev,
+        [[maybe_unused]] const int lev,
         amrex::GeometryData const& geom,
         amrex::MultiFab& mf) override
     {
