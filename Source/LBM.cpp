@@ -783,7 +783,7 @@ void LBM::write_probe_stats(int step, amrex::Real phys_time_s)
         reduce_op.eval(
             rho_o2, amrex::IntVect(0), reduce_data,
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k) -> ReduceTuple {
+                int nbx, int i, int j, int k [[maybe_unused]]) -> ReduceTuple {
                 // Cell (i,j,k) is one of the 8 corners iff its indices
                 // match (l_i0 or l_i0+1, l_j0 or l_j0+1, l_k0 or l_k0+1).
                 const int di = i - l_i0;
@@ -1654,7 +1654,7 @@ void LBM::clamp_negative_component_densities(const int lev)
             m_component_lattices[c][lev],
             m_component_lattices[c][lev].nGrowVect(),
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 auto rho_comp = amrex::Real(0.0);
                 auto rho_main = amrex::Real(0.0);
                 for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
@@ -2097,7 +2097,7 @@ void LBM::relax_f_to_equilibrium(const int lev)
         amrex::ParallelFor(
             m_f[lev], m_eq[lev].nGrowVect(),
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k)) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
                 if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_IDX) != 1) {
                     return;
@@ -2334,7 +2334,7 @@ void LBM::relax_f_to_equilibrium(const int lev)
         amrex::ParallelFor(
             eq_unit, eq_unit.nGrowVect(),
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k)) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
                 if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_IDX) == 1) {
                     const auto md_arr = md_arrs[nbx];
@@ -2413,7 +2413,7 @@ void LBM::relax_f_to_equilibrium(const int lev)
         amrex::ParallelFor(
             m_component_lattices[c][lev], m_eq[lev].nGrowVect(),
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k)) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
                 if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_IDX) == 1) {
                     const auto f_comp_arr = f_comp_arrs[nbx];
@@ -2623,7 +2623,7 @@ void LBM::relax_f_to_equilibrium(const int lev)
         amrex::ParallelFor(
             m_f[lev], m_eq[lev].nGrowVect(),
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k)) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
                 if (ct_arrs_relax[nbx](iv, 0) !=
                     lbm::constants::CELL_INTERFACE) {
@@ -2715,7 +2715,7 @@ void LBM::f_to_macrodata(const int lev)
     amrex::ParallelFor(
         m_macrodata[lev], m_macrodata[lev].nGrowVect(),
         [=] AMREX_GPU_DEVICE(
-            int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k)) noexcept {
+            int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
             const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
             const auto md_arr = md_arrs[nbx];
 
@@ -2969,7 +2969,7 @@ void LBM::compute_local_sgs_viscosity(int lev)
     amrex::ParallelFor(
         m_nu_sgs[lev], amrex::IntVect(0),
         [=] AMREX_GPU_DEVICE(
-            int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+            int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
             const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
             const auto if_arr = if_arrs[nbx];
             const auto md_arr = md_arrs[nbx];
@@ -3037,7 +3037,7 @@ void LBM::compute_derived(const int lev)
     amrex::ParallelFor(
         m_derived[lev], m_derived[lev].nGrowVect(),
         [=] AMREX_GPU_DEVICE(
-            int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k)) noexcept {
+            int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
             const auto md_arr = md_arrs[nbx];
             const auto if_arr = is_fluid_arrs[nbx];
             const auto d_arr = d_arrs[nbx];
@@ -3117,7 +3117,7 @@ void LBM::compute_q_corrections(const int lev)
     amrex::ParallelFor(
         m_derived[lev], m_derived[lev].nGrowVect(),
         [=] AMREX_GPU_DEVICE(
-            int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k)) noexcept {
+            int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
             const auto md_arr = md_arrs[nbx];
             const auto if_arr = is_fluid_arrs[nbx];
             const auto d_arr = d_arrs[nbx];
@@ -3160,7 +3160,7 @@ void LBM::compute_eb_forces()
                 amrex::Real, amrex::Real, amrex::Real)>{},
             m_f[lev], amrex::IntVect(0),
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k)) noexcept
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept
                 -> amrex::GpuTuple<AMREX_D_DECL(
                     amrex::Real, amrex::Real, amrex::Real)> {
                 const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
@@ -3299,7 +3299,7 @@ void LBM::MakeNewLevelFromCoarse(
         amrex::ParallelFor(
             m_is_fluid[lev], m_is_fluid[lev].nGrowVect(),
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 frac_arrs[nbx](i, j, k, 0) =
                     static_cast<amrex::Real>(if_arrs[nbx](i, j, k, 0));
             });
@@ -3396,7 +3396,7 @@ void LBM::MakeNewLevelFromScratch(
         amrex::ParallelFor(
             m_is_fluid[lev], m_is_fluid[lev].nGrowVect(),
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 frac_arrs[nbx](i, j, k, 0) =
                     static_cast<amrex::Real>(if_arrs[nbx](i, j, k, 0));
             });
@@ -3446,7 +3446,7 @@ void LBM::initialize_f(const int lev)
             m_component_lattices[c][lev],
             m_component_lattices[c][lev].nGrowVect(), constants::N_MICRO_STATES,
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k, int q) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]], int q) noexcept {
                 if (is_fluid_arrs[nbx](i, j, k, lbm::constants::IS_FLUID_IDX) ==
                     0) {
                     f_arrs[nbx](i, j, k, q) = 0.0;
@@ -3657,7 +3657,7 @@ void LBM::init_stationary_body(int lev)
         amrex::ParallelFor(
             m_stationary_mask[lev], m_stationary_mask[lev].nGrowVect(),
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 // Combine with existing mask (intersection of fluids -> min)
                 // 0=Solid, 1=Fluid. min(1, 0) = 0 (Solid).
                 int val = static_cast<int>(marker_arrs[nbx](i, j, k, 0));
@@ -3697,7 +3697,7 @@ void LBM::init_stationary_body(int lev)
 
             amrex::ParallelFor(
                 box, [=] AMREX_GPU_DEVICE(
-                         int i, int j, [[maybe_unused]] int k) noexcept {
+                         int i, int j, int k [[maybe_unused]]) noexcept {
                     int file_index = k * (nx * ny) + j * nx + i;
                     // File: 0=Fluid, 1=Solid
                     // Mask: 1=Fluid, 0=Solid
@@ -3730,7 +3730,7 @@ void LBM::initialize_is_fluid(const int lev)
     amrex::ParallelFor(
         m_is_fluid[lev], m_is_fluid[lev].nGrowVect(),
         [=] AMREX_GPU_DEVICE(
-            int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+            int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
             is_fluid_arrs[nbx](i, j, k, lbm::constants::IS_FLUID_IDX) =
                 !(flag_arrs[nbx](i, j, k).isRegular() ||
                   flag_arrs[nbx](i, j, k).isSingleValued())
@@ -3759,7 +3759,7 @@ void LBM::initialize_is_fluid(const int lev)
         amrex::ParallelFor(
             m_is_fluid[lev], m_is_fluid[lev].nGrowVect(),
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 // Merge stationary mask: if stationary mask is 0 (solid),
                 // is_fluid becomes 0 is_fluid = min(is_fluid, stationary_mask)
                 is_fluid_arrs_stat[nbx](i, j, k, lbm::constants::IS_FLUID_IDX) =
@@ -3778,7 +3778,7 @@ void LBM::initialize_is_fluid(const int lev)
     amrex::ParallelFor(
         m_is_fluid[lev], m_is_fluid[lev].nGrowVect() - 1,
         [=] AMREX_GPU_DEVICE(
-            int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k)) noexcept {
+            int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
             const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
             const auto if_arr = is_fluid_arrs[nbx];
 
@@ -3810,7 +3810,7 @@ void LBM::initialize_is_fluid(const int lev)
     amrex::ParallelFor(
         m_is_fluid[lev], m_is_fluid[lev].nGrowVect() - 1,
         [=] AMREX_GPU_DEVICE(
-            int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k)) noexcept {
+            int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
             const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
             const auto if_arr = is_fluid_arrs[nbx];
 
@@ -3833,7 +3833,7 @@ void LBM::initialize_is_fluid(const int lev)
     amrex::ParallelFor(
         m_is_fluid[lev], m_is_fluid[lev].nGrowVect() - 1,
         [=] AMREX_GPU_DEVICE(
-            int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k)) noexcept {
+            int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
             const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
             const auto if_arr = is_fluid_arrs[nbx];
 
@@ -3880,7 +3880,7 @@ void LBM::update_is_fluid_from_fraction_and_mark(
         amrex::ParallelFor(
             m_is_fluid[lev], m_is_fluid[lev].nGrowVect(),
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 const amrex::Real val = frac_arrs[nbx](i, j, k, 0);
                 isf_arrs[nbx](i, j, k, lbm::constants::IS_FLUID_IDX) =
                     (val >= threshold) ? 1 : 0;
@@ -3898,7 +3898,7 @@ void LBM::update_is_fluid_from_fraction_and_mark(
         amrex::ParallelFor(
             m_is_fluid[lev], m_is_fluid[lev].nGrowVect() - 1,
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k)) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
                 const auto if_arr = is_fluid_arrs[nbx];
 
@@ -3937,7 +3937,7 @@ void LBM::update_is_fluid_from_fraction_and_mark(
         amrex::ParallelFor(
             m_is_fluid[lev], m_is_fluid[lev].nGrowVect() - 1,
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k)) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
                 const auto if_arr = is_fluid_arrs[nbx];
 
@@ -3968,7 +3968,7 @@ void LBM::update_is_fluid_from_fraction_and_mark(
         amrex::ParallelFor(
             m_is_fluid[lev], m_is_fluid[lev].nGrowVect() - 1,
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k)) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
                 const auto if_arr = is_fluid_arrs[nbx];
 
@@ -4071,7 +4071,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
         amrex::ParallelFor(
             newly_fluid,
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 int old_val = old_arrs[nbx](i, j, k, 0);
                 int new_val =
                     new_arrs[nbx](i, j, k, lbm::constants::IS_FLUID_IDX);
@@ -4122,7 +4122,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
         amrex::ParallelFor(
             m_f[lev], amrex::IntVect(0),
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 // Only process cells that became solid AND are covered by EB
                 if (newly_solid_arrs[nbx](i, j, k, 0) != 1) {
                     return;
@@ -4299,7 +4299,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
         amrex::ParallelFor(
             m_component_lattices[c][lev], amrex::IntVect(0),
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 // Only process cells that became solid AND are covered by EB
                 if (newly_solid_arrs[nbx](i, j, k, 0) != 1) {
                     return;
@@ -4476,7 +4476,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
             amrex::ParallelFor(
                 m_f[lev], amrex::IntVect(0),
                 [=] AMREX_GPU_DEVICE(
-                    int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                    int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                     // Only process newly fluid cells
                     if (newly_fluid_arrs[nbx](i, j, k, 0) != 1) {
                         return;
@@ -4660,7 +4660,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
             amrex::ParallelFor(
                 m_f[lev], amrex::IntVect(0),
                 [=] AMREX_GPU_DEVICE(
-                    int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                    int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                     // Only process newly fluid cells
                     if (newly_fluid_arrs[nbx](i, j, k, 0) != 1) {
                         return;
@@ -4845,7 +4845,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
             amrex::ParallelFor(
                 m_f[lev], amrex::IntVect(0),
                 [=] AMREX_GPU_DEVICE(
-                    int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                    int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                     // Check if this cell is a donor (has recipients)
                     int n_recipients = donor_count_arrs[nbx](i, j, k, 0);
                     if (n_recipients == 0) {
@@ -4889,7 +4889,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
             amrex::ParallelFor(
                 m_component_lattices[c][lev], amrex::IntVect(0),
                 [=] AMREX_GPU_DEVICE(
-                    int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                    int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                     if (newly_fluid_arrs[nbx](i, j, k, 0) != 1) {
                         return;
                     }
@@ -5019,7 +5019,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
             amrex::ParallelFor(
                 m_component_lattices[c][lev], amrex::IntVect(0),
                 [=] AMREX_GPU_DEVICE(
-                    int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                    int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                     int n_recipients = donor_count_arrs[nbx](i, j, k, 0);
                     if (n_recipients == 0) {
                         return;
@@ -5058,7 +5058,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
         amrex::ParallelFor(
             m_f[lev], amrex::IntVect(0),
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 // Zero out populations in solid cells — but NOT FSLBM interface
                 // cells, which are active free-surface cells with valid f
                 // distributions.
@@ -5100,7 +5100,7 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
         amrex::ParallelFor(
             m_component_lattices[c][lev], amrex::IntVect(0),
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 // Zero out populations in all solid cells
                 if (fluid_arrs[nbx](i, j, k, lbm::constants::IS_FLUID_IDX) ==
                     0) {
@@ -5294,7 +5294,7 @@ void LBM::reconstruct_body_sdf(const int lev, amrex::Real time)
     amrex::ParallelFor(
         m_is_fluid_fraction[lev], m_is_fluid_fraction[lev].nGrowVect(),
         [=] AMREX_GPU_DEVICE(
-            int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+            int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
             // World coordinates of cell center
             const amrex::Real x = prob_lo[0] + (i + 0.5) * dx[0];
             const amrex::Real y = prob_lo[1] + (j + 0.5) * dx[1];
@@ -5444,7 +5444,7 @@ void LBM::fill_f_inside_eb(const int lev)
     amrex::ParallelFor(
         m_f[lev], m_f[lev].nGrowVect(), constants::N_MICRO_STATES,
         [=] AMREX_GPU_DEVICE(
-            int nbx, int i, int j, [[maybe_unused]] int k, int q) noexcept {
+            int nbx, int i, int j, int k [[maybe_unused]], int q) noexcept {
             if (is_fluid_arrs[nbx](i, j, k, lbm::constants::IS_FLUID_IDX) ==
                 0) {
 
@@ -5961,7 +5961,7 @@ amrex::Vector<const amrex::MultiFab*> LBM::plot_file_mf()
             amrex::ParallelFor(
                 m_plt_mf[lev], m_plt_mf[lev].nGrowVect(),
                 [=] AMREX_GPU_DEVICE(
-                    int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                    int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                     // Only report Y_k in fluid cells; gas and solid cells
                     // may hold stale populations that never contribute to
                     // transport and should appear as zero in the plotfile.
@@ -6196,7 +6196,7 @@ void LBM::write_checkpoint_file() const
             amrex::ParallelFor(
                 tmp_mf, tmp_mf.nGrowVect(),
                 [=] AMREX_GPU_DEVICE(
-                    int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                    int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                     tmp_arrs[nbx](i, j, k) =
                         static_cast<amrex::Real>(ct_arrs[nbx](i, j, k));
                 });
@@ -6390,7 +6390,7 @@ void LBM::read_checkpoint_file()
             amrex::ParallelFor(
                 tmp_mf, tmp_mf.nGrowVect(),
                 [=] AMREX_GPU_DEVICE(
-                    int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                    int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                     ct_arrs[nbx](i, j, k) =
                         static_cast<int>(std::round(tmp_arrs[nbx](i, j, k)));
                 });
@@ -6598,7 +6598,7 @@ void LBM::apply_reaction_source_terms(const int lev)
         m_component_lattices[0][lev],
         amrex::IntVect(0), // no ghost cells — source terms only on interior
         [=] AMREX_GPU_DEVICE(
-            int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k)) noexcept {
+            int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
             const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
             if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_IDX) != 1) {
                 return;
@@ -6707,7 +6707,7 @@ void LBM::apply_timed_catalyst_injection(const int lev)
     amrex::ParallelFor(
         m_component_lattices[1][lev], amrex::IntVect(0),
         [=] AMREX_GPU_DEVICE(
-            int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+            int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
             const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
             if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_IDX) != 1) {
                 return;
@@ -6814,7 +6814,7 @@ void LBM::compute_dissolved_o2_average(
         amrex::ParallelFor(
             cl_acc,
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 const int ct = ct_a[nbx](i, j, k, 0);
                 if (ct == constants::CELL_LIQUID) {
                     acc_a[nbx](i, j, k, 0) = rho_a[nbx](i, j, k, 0);
@@ -6830,7 +6830,7 @@ void LBM::compute_dissolved_o2_average(
         amrex::ParallelFor(
             cl_acc,
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 if (if_a[nbx](i, j, k, constants::IS_FLUID_IDX) == 1) {
                     acc_a[nbx](i, j, k, 0) = rho_a[nbx](i, j, k, 0);
                     acc_a[nbx](i, j, k, 1) = amrex::Real(1.0);
@@ -6873,7 +6873,7 @@ void LBM::write_species_stats()
         reduce_op.eval(
             m_component_lattices[c][0], amrex::IntVect(0), reduce_data,
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k) -> ReduceTuple {
+                int nbx, int i, int j, int k [[maybe_unused]]) -> ReduceTuple {
                 const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
                 if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_IDX) != 1) {
                     return {0.0};
@@ -6899,7 +6899,7 @@ void LBM::write_species_stats()
         reduce_op.eval(
             m_component_lattices[0][0], amrex::IntVect(0), reduce_data,
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k) -> ReduceTuple {
+                int nbx, int i, int j, int k [[maybe_unused]]) -> ReduceTuple {
                 const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
                 return {amrex::Real(
                     is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_IDX) == 1
@@ -6991,7 +6991,7 @@ void LBM::advance_phi(const int lev)
         const int ncomp = mf.nComp();
         auto const& arrs = mf.arrays();
         amrex::ParallelFor(mf, mf.nGrowVect(),
-            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 const int ii = amrex::max(domain.smallEnd(0), amrex::min(domain.bigEnd(0), i));
                 const int jj = amrex::max(domain.smallEnd(1), amrex::min(domain.bigEnd(1), j));
                 const int kk = amrex::max(domain.smallEnd(2), amrex::min(domain.bigEnd(2), k));
@@ -7045,7 +7045,7 @@ void LBM::advance_phi(const int lev)
         auto const& stat_c = m_stationary_mask[lev].const_arrays();
         amrex::ParallelFor(
             phi_comp, amrex::IntVect(1),
-            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 // Solid cells: compression vector = 0 (no interface here)
                 if (stat_c[nbx](i, j, k) == 0) {
                     c_arrs[nbx](i, j, k, 0) = 0.0;
@@ -7121,7 +7121,7 @@ void LBM::advance_phi(const int lev)
 
         amrex::ParallelFor(
             phi_new,
-            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 // Solid cells (wall, baffles, impeller) must not be updated by the
                 // phase-field PDE — their Phi is permanently 0 (solid) and the
                 // large gradient at their fluid-facing faces is NOT a free surface.
@@ -7242,7 +7242,7 @@ void LBM::advance_phi(const int lev)
     {
         auto const& pn = phi_new.arrays();
         amrex::ParallelFor(phi_new,
-            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 pn[nbx](i,j,k,0) = amrex::max(amrex::Real(0.0), amrex::min(amrex::Real(1.0), pn[nbx](i,j,k,0)));
             });
         // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
@@ -7274,7 +7274,7 @@ void LBM::advance_phi(const int lev)
             (M0 - M_cur) / static_cast<amrex::Real>(N_G);
         auto const& pn = phi_new.arrays();
         amrex::ParallelFor(phi_new,
-            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 const amrex::Real p = pn[nbx](i,j,k,0);
                 if (p > phi_lo && p < phi_hi) {
                     pn[nbx](i,j,k,0) =
@@ -7295,7 +7295,7 @@ void LBM::advance_phi(const int lev)
         auto const& frac = m_is_fluid_fraction[lev].arrays();
         auto const& stat = m_stationary_mask[lev].const_arrays();
         amrex::ParallelFor(m_is_fluid_fraction[lev],
-            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 if (stat[nbx](i, j, k) == 0) {
                     frac[nbx](i, j, k, 0) = 0.0;
                 }
@@ -7352,7 +7352,7 @@ void LBM::advance_phi(const int lev)
         const amrex::Real adiabaticExp  = m_adiabaticExponent;
 
         amrex::ParallelFor(m_f[lev], amrex::IntVect(0),
-            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 const int old_if = old_arrs[nbx](i, j, k, 0);
                 const int new_if = new_arrs[nbx](i, j, k, lbm::constants::IS_FLUID_IDX);
 
@@ -7449,7 +7449,7 @@ void LBM::advance_phi(const int lev)
         auto const& old_arrs_c  = old_is_fluid_fs.const_arrays();
         auto const& new_arrs_c  = m_is_fluid[lev].const_arrays();
         amrex::ParallelFor(m_component_lattices[ci][lev], amrex::IntVect(0),
-            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+            [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 const int old_if = old_arrs_c[nbx](i, j, k, 0);
                 const int new_if = new_arrs_c[nbx](i, j, k, lbm::constants::IS_FLUID_IDX);
                 if (old_if != new_if) {
@@ -7579,7 +7579,7 @@ void LBM::apply_macroscopic_forcing(int lev, const amrex::MultiFab* force_mf)
     amrex::ParallelFor(
         m_f[lev], amrex::IntVect(0),
         [=] AMREX_GPU_DEVICE(
-            int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+            int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
             const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
             if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_IDX) != 1) {
                 return;
@@ -7804,7 +7804,7 @@ void LBM::apply_bubble_o2_source(int lev, const amrex::MultiFab& o2_src_mf)
     amrex::ParallelFor(
         m_component_lattices[0][lev], amrex::IntVect(0),
         [=] AMREX_GPU_DEVICE(
-            int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+            int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
             const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
             if (is_fluid_arrs[nbx](iv, lbm::constants::IS_FLUID_IDX) != 1) {
                 return;
@@ -7939,7 +7939,7 @@ void LBM::apply_free_surface_o2_flux(
     reduce_op.eval(
         o2_src_mf, amrex::IntVect(0), reduce_data,
         [=] AMREX_GPU_DEVICE(
-            int nbx, int i, int j, [[maybe_unused]] int k) -> ReduceTuple {
+            int nbx, int i, int j, int k [[maybe_unused]]) -> ReduceTuple {
             if (ct_arrs[nbx](i, j, k, 0) != CELL_INTERFACE) {
                 return {amrex::Real(0.0)};
             }
@@ -8030,7 +8030,7 @@ void LBM::fslbm_sync_isfluid_markers(const int lev)
         amrex::ParallelFor(
             m_is_fluid[lev], m_is_fluid[lev].nGrowVect(),
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 const int ct = ct_arrs[nbx](i, j, k, 0);
                 isf_arrs[nbx](i, j, k, IS_FLUID_IDX) =
                     (ct == CELL_LIQUID || ct == CELL_INTERFACE) ? 1 : 0;
@@ -8048,7 +8048,7 @@ void LBM::fslbm_sync_isfluid_markers(const int lev)
         amrex::ParallelFor(
             m_is_fluid[lev], m_is_fluid[lev].nGrowVect() - 1,
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k)) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
                 const auto if_arr = is_fluid_arrs[nbx];
                 bool all_covered = true;
@@ -8093,7 +8093,7 @@ void LBM::fslbm_sync_isfluid_markers(const int lev)
         amrex::ParallelFor(
             m_is_fluid[lev], m_is_fluid[lev].nGrowVect() - 1,
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k)) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
                 const auto if_arr = is_fluid_arrs2[nbx];
                 const auto ct_arr = ct_arrs2[nbx];
@@ -8127,7 +8127,7 @@ void LBM::fslbm_sync_isfluid_markers(const int lev)
         amrex::ParallelFor(
             m_is_fluid[lev], m_is_fluid[lev].nGrowVect() - 1,
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k)) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
                 const auto if_arr = is_fluid_arrs[nbx];
                 bool sees_side = false;
@@ -8185,7 +8185,7 @@ void LBM::fslbm_init_cell_type(const int lev)
     amrex::ParallelFor(
         m_cell_type[lev], m_cell_type[lev].nGrowVect(),
         [=] AMREX_GPU_DEVICE(
-            int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+            int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
             // EB / moving-body cell — no PDFs
             if (if_arrs[nbx](i, j, k, IS_FLUID_IDX) == 0) {
                 ct_arrs[nbx](i, j, k, 0) = CELL_SOLID;
@@ -8271,7 +8271,7 @@ void LBM::fslbm_replenish_components(const int lev)
         amrex::ParallelFor(
             m_component_lattices[c][lev],
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
                 if (ct_arrs[nbx](iv, 0) == CELL_INTERFACE) {
                     for (int q = 0; q < N_MICRO_STATES; ++q) {
@@ -8305,7 +8305,7 @@ void LBM::fslbm_replenish_g(const int lev)
     const stencil::Stencil st;
     amrex::ParallelFor(
         m_g[lev], [=] AMREX_GPU_DEVICE(
-                      int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                      int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
             const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
             if (ct_arrs[nbx](iv, 0) == CELL_INTERFACE) {
                 for (int q = 0; q < N_MICRO_STATES; ++q) {
@@ -8428,7 +8428,7 @@ void LBM::fslbm_advance_surface(const int lev)
         amrex::ParallelFor(
             m_cell_type[lev], m_cell_type[lev].nGrowVect(),
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 const int ct = ct_s[nbx](i, j, k, 0);
                 const int isf = isf_s[nbx](i, j, k, IS_FLUID_IDX);
 
@@ -8453,7 +8453,7 @@ void LBM::fslbm_advance_surface(const int lev)
         amrex::ParallelFor(
             m_cell_type[lev], m_cell_type[lev].nGrowVect(),
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 const int ct = ct_pre_arrs[nbx](i, j, k, 0);
                 const int isf = isf_s[nbx](i, j, k, IS_FLUID_IDX);
 
@@ -8523,7 +8523,7 @@ void LBM::fslbm_advance_surface(const int lev)
         amrex::ParallelFor(
             m_cell_type[lev], amrex::IntVect(0),
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 if (ct_str[nbx](i, j, k, 0) != CELL_INTERFACE) {
                     return;
                 }
@@ -8615,7 +8615,7 @@ void LBM::fslbm_advance_surface(const int lev)
         amrex::ParallelFor(
             m_f[lev], amrex::IntVect(0),
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 const int ct = ct_r[nbx](i, j, k, 0);
                 if (ct != CELL_INTERFACE && ct != CELL_LIQUID) {
                     return;
@@ -8717,7 +8717,7 @@ void LBM::fslbm_advance_surface(const int lev)
         amrex::ParallelFor(
             m_f[lev], amrex::IntVect(0),
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 const int ct = ct_ob[nbx](i, j, k, 0);
                 if (ct != CELL_INTERFACE && ct != CELL_LIQUID) {
                     return;
@@ -8820,7 +8820,7 @@ void LBM::fslbm_advance_surface(const int lev)
         amrex::ParallelFor(
             m_pre_fslbm_mass[lev],
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
                 if (ct_pre[nbx](iv, 0) != CELL_INTERFACE) {
                     mp_pre[nbx](iv, 0) = amrex::Real(0.0);
@@ -8895,7 +8895,8 @@ void LBM::fslbm_advance_surface(const int lev)
         amrex::ParallelFor(
             m_f[lev], m_f[lev].nGrowVect(), N_MICRO_STATES,
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k, int q) noexcept {
+                int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k),
+                int q) noexcept {
                 const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
                 const int ct_iv = ct_arrs[nbx](iv, 0);
                 if (ct_iv != CELL_LIQUID && ct_iv != CELL_INTERFACE) {
@@ -8961,7 +8962,7 @@ void LBM::fslbm_advance_surface(const int lev)
         amrex::ParallelFor(
             nhat_mf,
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 if (ct_nh[nbx](i, j, k, 0) == CELL_SOLID) {
                     return;
                 }
@@ -9030,7 +9031,7 @@ void LBM::fslbm_advance_surface(const int lev)
         amrex::ParallelFor(
             kappa_mf,
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 if (ct_k[nbx](i, j, k, 0) != CELL_INTERFACE) {
                     return;
                 }
@@ -9087,7 +9088,8 @@ void LBM::fslbm_advance_surface(const int lev)
         amrex::ParallelFor(
             m_f[lev], m_f[lev].nGrowVect(), N_MICRO_STATES,
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k, int q) noexcept {
+                int nbx, int i, int j, int AMREX_D_PICK(, /*k*/, k),
+                int q) noexcept {
                 const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
                 // Only interface cells need ABB
                 if (ct_arrs[nbx](iv, 0) != CELL_INTERFACE) {
@@ -9323,7 +9325,7 @@ void LBM::fslbm_advance_surface(const int lev)
             amrex::ParallelFor(
                 rho_diag,
                 [=] AMREX_GPU_DEVICE(
-                    int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                    int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                     const int ctype = ct[nbx](i, j, k, 0);
                     if (ctype == CELL_LIQUID) {
                         auto rho = amrex::Real(0.0);
@@ -9397,7 +9399,7 @@ void LBM::fslbm_advance_surface(const int lev)
         amrex::ParallelFor(
             surf_diag,
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 if (k < k_lo || k > k_hi) {
                     return;
                 }
@@ -9434,7 +9436,7 @@ void LBM::fslbm_advance_surface(const int lev)
         amrex::ParallelFor(
             mass_flux, mass_flux.nGrowVect(),
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
                 if (ct_arrs[nbx](iv, 0) != CELL_INTERFACE) {
                     return;
@@ -9501,7 +9503,7 @@ void LBM::fslbm_advance_surface(const int lev)
         amrex::ParallelFor(
             m_phi_fslbm[lev],
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
                 if (ct_arrs[nbx](iv, 0) != CELL_INTERFACE) {
                     return;
@@ -9565,7 +9567,7 @@ void LBM::fslbm_advance_surface(const int lev)
         amrex::ParallelFor(
             m_phi_fslbm[lev],
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
                 if (ct_arrs[nbx](iv, 0) != CELL_INTERFACE) {
                     return;
@@ -9599,7 +9601,7 @@ void LBM::fslbm_advance_surface(const int lev)
             amrex::ParallelFor(
                 abb_diag,
                 [=] AMREX_GPU_DEVICE(
-                    int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                    int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                     const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
                     if (ct_arrs_d[nbx](iv, 0) != CELL_INTERFACE) {
                         return;
@@ -9656,7 +9658,7 @@ void LBM::fslbm_advance_surface(const int lev)
         amrex::ParallelFor(
             m_cell_type[lev],
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
                 if (ct_arrs[nbx](iv, 0) != CELL_INTERFACE) {
                     return;
@@ -9772,7 +9774,7 @@ void LBM::fslbm_advance_surface(const int lev)
             amrex::ParallelFor(
                 m_component_lattices[c][lev], amrex::IntVect(0),
                 [=] AMREX_GPU_DEVICE(
-                    int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                    int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                     const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
                     if (flag_arrs_ro_outer[nbx](iv, 0) <= amrex::Real(0.5)) {
                         return; // not a fresh IFC→GAS conversion
@@ -9878,7 +9880,7 @@ void LBM::fslbm_advance_surface(const int lev)
         amrex::ParallelFor(
             m_phi_fslbm[lev],
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
                 // Only INTERFACE cells receive excess mass from converted
                 // neighbors
@@ -9972,7 +9974,7 @@ void LBM::fslbm_advance_surface(const int lev)
             amrex::ParallelFor(
                 leak_diag,
                 [=] AMREX_GPU_DEVICE(
-                    int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                    int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                     const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
                     const amrex::Real fl = flag_arrs[nbx](iv, 0);
                     if (!(fl > amrex::Real(0.5) || fl < amrex::Real(-0.5))) {
@@ -10057,7 +10059,7 @@ void LBM::fslbm_advance_surface(const int lev)
         amrex::ParallelFor(
             m_cell_type[lev],
             [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
                 const int ct = ct_arrs[nbx](iv, 0);
                 if (ct != CELL_LIQUID && ct != CELL_GAS) {
@@ -10336,7 +10338,7 @@ void LBM::fslbm_advance_surface(const int lev)
             amrex::ParallelFor(
                 m_cell_type[lev],
                 [=] AMREX_GPU_DEVICE(
-                    int nbx, int i, int j, [[maybe_unused]] int k) noexcept {
+                    int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                     const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
                     if (flag_ro[nbx](iv, 2) > amrex::Real(0.5)) {
                         // IMPORTANT FIX: Step B fallback previously cloned
@@ -10432,7 +10434,7 @@ void LBM::fslbm_advance_surface(const int lev)
                 amrex::ParallelFor(
                     clamp_acc, [=] AMREX_GPU_DEVICE(
                                    int nbx, int i, int j,
-                                   [[maybe_unused]] int k) noexcept {
+                                   int k [[maybe_unused]]) noexcept {
                         const int ct = ct_E[nbx](i, j, k, 0);
                         if (ct == CELL_LIQUID) {
                             auto r = amrex::Real(0.0);
@@ -10473,7 +10475,7 @@ void LBM::fslbm_advance_surface(const int lev)
                 amrex::ParallelFor(
                     m_f[lev], [=] AMREX_GPU_DEVICE(
                                   int nbx, int i, int j,
-                                  [[maybe_unused]] int k) noexcept {
+                                  int k [[maybe_unused]]) noexcept {
                         if (ct_E2[nbx](i, j, k, 0) != CELL_LIQUID) {
                             return;
                         }

@@ -28,6 +28,21 @@
 #include <sstream>
 #include <iomanip>
 
+// -----------------------------------------------------------------------------
+// SYCL is stricter than CUDA/HIP about which types can be captured by value
+// into a device kernel: it statically checks sycl::is_device_copyable.
+// BubbleParams contains amrex::Vector<Real> (sparger_x/y/z) and std::string
+// (stats_file) which are not trivially copyable, so the check fails even
+// though the device code path only touches the scalar POD members of the
+// struct.  Opt in explicitly so the SYCL build accepts capture; CUDA / HIP
+// are unaffected because they never see this specialization.
+// -----------------------------------------------------------------------------
+#ifdef AMREX_USE_SYCL
+template <>
+struct sycl::is_device_copyable<lbm::BubbleParams> : std::true_type
+{};
+#endif
+
 namespace lbm {
 
 // ============================================================================
