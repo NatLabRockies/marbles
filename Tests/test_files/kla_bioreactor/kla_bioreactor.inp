@@ -113,8 +113,15 @@ lbm.bc_hi = 5 5 5
 lbm.dx_outer = 1.0
 lbm.dt_outer = 1.0
 
-lbm.nu    = 0.008   # bare BGK molecular viscosity (LB units); LES-SGS adds ν_r = Cs²·|S| via lbm.use_sgs_in_collision below
-lbm.alpha = 0.008
+# Bare BGK molecular viscosity (LB units).  LES-SGS adds nu_r = Cs^2 * |S|
+# via lbm.use_sgs_in_collision below.  DO NOT drop this below 0.016 for
+# this geometry: run 15051573 tried nu=0.008 (halved) and blew up at
+# step ~305k when the FSLBM interface eroded past a critical threshold
+# and the mass clamp amplified 2000 remaining LIQUID cells to rho=1e+30
+# within a few thousand steps.  nu=0.016 is the value that produced the
+# validated kLa = 3.95 /hr against M-Star Fig 25.
+lbm.nu    = 0.016
+lbm.alpha = 0.016
 
 # LES-SGS closure per Thomas et al. (2021) Eq. 4: add the Smagorinsky eddy
 # viscosity  ν_r = (Cs·Δx)² · |S|  to the molecular ν when computing the
@@ -125,9 +132,9 @@ lbm.alpha = 0.008
 lbm.use_sgs_in_collision = 1
 
 # One passive scalar: dissolved O₂  (component 0)
-# D_O2_LB = nu_LB / Sc = 0.008 / 500 = 1.60e-5
+# D_O2_LB = nu_LB / Sc = 0.016 / 500 = 3.20e-5
 lbm.n_components = 1
-lbm.diffusivity_component_0 = 1.60e-5
+lbm.diffusivity_component_0 = 3.20e-5
 
 lbm.initial_temperature = 0.03333
 lbm.adiabatic_exponent = 1.66666666667
