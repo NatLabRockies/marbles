@@ -110,7 +110,7 @@ AMREX_GPU_DEVICE AMREX_FORCE_INLINE static amrex::Real bubble_drag_cd(amrex::Rea
     if (Re < 1.0e-10) { return 0.0; }
 
     // Guard: clamp eps_p to physically meaningful range
-    eps_p = std::max(0.0, std::min(eps_p, 0.99));
+    eps_p = std::max(amrex::Real(0.0), std::min(eps_p, amrex::Real(0.99)));
     const amrex::Real eps_f = 1.0 - eps_p;
     const amrex::Real eps_f3 = eps_f * eps_f * eps_f;
 
@@ -138,7 +138,7 @@ AMREX_GPU_DEVICE AMREX_FORCE_INLINE static amrex::Real bubble_drag_cd(amrex::Rea
     const amrex::Real Cd = 24.0 * eps_f * F / Re;
 
     // High-Re cap (Tenneti correlation is validated for Re < ~300)
-    return (Re < 1000.0) ? Cd : std::min(Cd, 0.44);
+    return (Re < 1000.0) ? Cd : std::min(Cd, amrex::Real(0.44));
 }
 
 // ============================================================================
@@ -490,7 +490,7 @@ void BubbleManager::do_breakup(
 
                 // Read cached turbulent dissipation rate interpolated during advance()
                 const amrex::Real eps_SI = std::min(
-                    p.rdata(BubbleIdx::EPS_CACHED),
+                    amrex::Real(p.rdata(BubbleIdx::EPS_CACHED)),
                     m_params.eps_max);  // cap: prevent boundary-layer over-fragmentation
 
                 const amrex::Real d  = p.rdata(BubbleIdx::DIAMETER);
@@ -802,7 +802,7 @@ void BubbleManager::advance(
                 
                 amrex::Real Re_b = (ur_mag > 0.0) ? (ur_mag * d_new / prms.nu_fluid) : 0.0;
                 amrex::Real V_cell = dx_phys * dx_phys * dx_phys;
-                amrex::Real eps_p = amrex::min(Vb / V_cell, 0.99);
+                amrex::Real eps_p = amrex::min(Vb / V_cell, amrex::Real(0.99));
                 amrex::Real Cd = bubble_drag_cd(Re_b, eps_p);
                 
                 amrex::Real fd_factor = -0.5 * Cd * prms.rho_fluid * Ab * ur_mag;
@@ -901,7 +901,7 @@ void BubbleManager::advance(
                 
                 amrex::Real eps_lb = trilinear_interp_device(der_arr, constants::EPSILON_IDX, prob_lo.data(), dx_arr.data(), px, py, pz);
                 amrex::Real eps_conv = dx_phys * dx_phys / (prms.dt_phys * prms.dt_phys * prms.dt_phys);
-                amrex::Real eps_SI = amrex::max(eps_lb * eps_conv, 1.0e-10);
+                amrex::Real eps_SI = amrex::max(eps_lb * eps_conv, amrex::Real(1.0e-10));
                 p.rdata(BubbleIdx::EPS_CACHED) = eps_SI;
                 
                 amrex::Real Sc = prms.nu_fluid / prms.D_O2;
@@ -1025,7 +1025,7 @@ void BubbleManager::advance(
             auto& aos = kv.second.GetArrayOfStructs();
             for (auto& p : aos()) {
                 if (!p.id().is_valid()) { continue; }
-                amrex::Real& cd = p.rdata(BubbleIdx::BREAKUP_COOLDOWN);
+                amrex::ParticleReal& cd = p.rdata(BubbleIdx::BREAKUP_COOLDOWN);
                 if (cd > 0.0) { cd -= 1.0; }
             }
         }

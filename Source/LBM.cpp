@@ -2129,7 +2129,7 @@ void LBM::relax_f_to_equilibrium(const int lev)
                         }
                         if (!fhat_positive || fabs(dg) < 1.0e-14) { break; }
                         alpha -= gval / dg;
-                        alpha = amrex::min(2.0, amrex::max(0.0, alpha));
+                        alpha = amrex::min(amrex::Real(2.0), amrex::max(amrex::Real(0.0), alpha));
                         if (fabs(gval) < 1.0e-12 * (fabs(H0) + 1.0e-30)) {
                             newton_converged = true;
                             break;
@@ -2444,7 +2444,7 @@ void LBM::relax_f_to_equilibrium(const int lev)
                                 if (!fhat_positive || fabs(dg) < 1.0e-14) break;
                                 alpha -= gval / dg;
                                 // clamp to [0, 2] for safety
-                                alpha = amrex::min(2.0, amrex::max(0.0, alpha));
+                                alpha = amrex::min(amrex::Real(2.0), amrex::max(amrex::Real(0.0), alpha));
                                 if (fabs(gval) < 1.0e-12 * (fabs(H0) + 1.0e-30)) {
                                     newton_converged = true;
                                     break;
@@ -4975,7 +4975,7 @@ void LBM::reconstruct_body_sdf(const int lev, amrex::Real time)
                 // If 0, force sdf to be positive (Solid)
                 int is_fluid_stat = stat_mask_arrs[nbx](i, j, k);
                 if (is_fluid_stat == 0) {
-                    sdf = amrex::max(sdf, 1.0);
+                    sdf = amrex::max(sdf, amrex::Real(1.0));
                 }
             }
             
@@ -4994,8 +4994,8 @@ void LBM::reconstruct_body_sdf(const int lev, amrex::Real time)
             }
             
             // Clamp to [0, 1]
-            phi = amrex::max(0.0, amrex::min(1.0, phi));
-            
+            phi = amrex::max(amrex::Real(0.0), amrex::min(amrex::Real(1.0), phi));
+
             frac_arrs[nbx](i, j, k, 0) = phi;
         });
     
@@ -6144,9 +6144,9 @@ void LBM::apply_reaction_source_terms(const int lev)
             }
 
             // Guard against numerical noise producing negative densities
-            rho_S = amrex::max(rho_S, 0.0);
-            rho_C = amrex::max(rho_C, 0.0);
-            rho_I = amrex::max(rho_I, 0.0);
+            rho_S = amrex::max(rho_S, amrex::Real(0.0));
+            rho_C = amrex::max(rho_C, amrex::Real(0.0));
+            rho_I = amrex::max(rho_I, amrex::Real(0.0));
 
             // Reaction rates
             const amrex::Real R_fwd = k_f * rho_S * rho_C;
@@ -6704,12 +6704,12 @@ void LBM::advance_phi(const int lev)
                 const amrex::Real uz_lo = 0.5 * (uzm + uz);
 
                 // Upwind face fluxes
-                const amrex::Real Fx_hi = amrex::max(ux_hi, 0.0)*phi  + amrex::min(ux_hi, 0.0)*phip;
-                const amrex::Real Fx_lo = amrex::max(ux_lo, 0.0)*phim + amrex::min(ux_lo, 0.0)*phi;
-                const amrex::Real Fy_hi = amrex::max(uy_hi, 0.0)*phi  + amrex::min(uy_hi, 0.0)*phijp;
-                const amrex::Real Fy_lo = amrex::max(uy_lo, 0.0)*phijm+ amrex::min(uy_lo, 0.0)*phi;
-                const amrex::Real Fz_hi = amrex::max(uz_hi, 0.0)*phi  + amrex::min(uz_hi, 0.0)*phikp;
-                const amrex::Real Fz_lo = amrex::max(uz_lo, 0.0)*phikm+ amrex::min(uz_lo, 0.0)*phi;
+                const amrex::Real Fx_hi = amrex::max(ux_hi, amrex::Real(0.0))*phi  + amrex::min(ux_hi, amrex::Real(0.0))*phip;
+                const amrex::Real Fx_lo = amrex::max(ux_lo, amrex::Real(0.0))*phim + amrex::min(ux_lo, amrex::Real(0.0))*phi;
+                const amrex::Real Fy_hi = amrex::max(uy_hi, amrex::Real(0.0))*phi  + amrex::min(uy_hi, amrex::Real(0.0))*phijp;
+                const amrex::Real Fy_lo = amrex::max(uy_lo, amrex::Real(0.0))*phijm+ amrex::min(uy_lo, amrex::Real(0.0))*phi;
+                const amrex::Real Fz_hi = amrex::max(uz_hi, amrex::Real(0.0))*phi  + amrex::min(uz_hi, amrex::Real(0.0))*phikp;
+                const amrex::Real Fz_lo = amrex::max(uz_lo, amrex::Real(0.0))*phikm+ amrex::min(uz_lo, amrex::Real(0.0))*phi;
 
                 // Conservative flux divergence
                 const amrex::Real adv_x = (Fx_hi - Fx_lo) / dx0;
@@ -6759,7 +6759,7 @@ void LBM::advance_phi(const int lev)
         auto const& pn = phi_new.arrays();
         amrex::ParallelFor(phi_new,
             [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
-                pn[nbx](i,j,k,0) = amrex::max(0.0, amrex::min(1.0, pn[nbx](i,j,k,0)));
+                pn[nbx](i,j,k,0) = amrex::max(amrex::Real(0.0), amrex::min(amrex::Real(1.0), pn[nbx](i,j,k,0)));
             });
         // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
     }
@@ -6794,7 +6794,7 @@ void LBM::advance_phi(const int lev)
                 const amrex::Real p = pn[nbx](i,j,k,0);
                 if (p > phi_lo && p < phi_hi) {
                     pn[nbx](i,j,k,0) =
-                        amrex::max(0.0, amrex::min(1.0, p + G_per_cell));
+                        amrex::max(amrex::Real(0.0), amrex::min(amrex::Real(1.0), p + G_per_cell));
                 }
             });
         // amrex::Gpu::synchronize(); // Optimization: Removed implicit host barrier
