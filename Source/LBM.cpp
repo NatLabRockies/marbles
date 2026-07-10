@@ -6603,12 +6603,11 @@ void LBM::apply_reaction_source_terms(const int lev)
             }
 
             // Compute local species densities by summing over populations
-            amrex::Real rho_S = 0.0, rho_C = 0.0, rho_I = 0.0, rho_P = 0.0;
+            amrex::Real rho_S = 0.0, rho_C = 0.0, rho_I = 0.0;
             for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
                 rho_S += fS_arrs[nbx](iv, q);
                 rho_C += fC_arrs[nbx](iv, q);
                 rho_I += fI_arrs[nbx](iv, q);
-                rho_P += fP_arrs[nbx](iv, q);
             }
 
             // Guard against numerical noise producing negative densities

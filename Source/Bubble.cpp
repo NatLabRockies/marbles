@@ -1253,13 +1253,11 @@ void BubbleManager::write_stats(
     amrex::Real n_O2_total = 0.0;
     amrex::Real dn_total = 0.0;
 
-    int fi = 0;
     for (int lev = 0; lev <= m_container.finestLevel(); ++lev) {
         for (auto& kv : m_container.GetParticles(lev)) {
             auto& aos = kv.second.GetArrayOfStructs();
             for (auto& p : aos()) {
                 if (!p.id().is_valid()) {
-                    ++fi;
                     continue;
                 }
                 ++n_bub;
@@ -1269,7 +1267,6 @@ void BubbleManager::write_stats(
                 d_max = std::max(d_max, d);
                 n_O2_total += p.rdata(bubble_idx::N_O2);
                 dn_total += p.rdata(bubble_idx::DN_I);
-                ++fi;
             }
         }
     }
