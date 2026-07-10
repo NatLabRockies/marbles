@@ -1503,9 +1503,9 @@ void LBM::advance(
             m_macrodata[lev].maxIndex(constants::TEMPERATURE_IDX);
         amrex::Print() << "[T_diag step=" << m_isteps[lev]
                        << "] T_min=" << T_min << " @ (" << ivmin[0] << ","
-                       << ivmin[1] << "," << ivmin[2] << ")"
+                       << ivmin[1] << "," << AMREX_D_PICK(0, 0, ivmin[2]) << ")"
                        << "  T_max=" << T_max << " @ (" << ivmax[0] << ","
-                       << ivmax[1] << "," << ivmax[2] << ")"
+                       << ivmax[1] << "," << AMREX_D_PICK(0, 0, ivmax[2]) << ")"
                        << "  T_ref=" << m_initialTemperature << "\n";
 
         // If a severe negative-T or hot-T excursion is present, also
@@ -1526,7 +1526,8 @@ void LBM::advance(
                 m_macrodata[lev].maxIndex(constants::RHO_IDX);
             amrex::Print() << "[T_diag_alarm step=" << m_isteps[lev]
                            << "] rho_max=" << rho_max << " @ (" << iv_rho[0]
-                           << "," << iv_rho[1] << "," << iv_rho[2] << ")\n";
+                           << "," << iv_rho[1] << ","
+                           << AMREX_D_PICK(0, 0, iv_rho[2]) << ")\n";
         }
     }
 }
