@@ -45,6 +45,37 @@ struct sycl::is_device_copyable<lbm::BubbleParams> : std::true_type
 
 namespace lbm {
 
+// -----------------------------------------------------------------------------
+// POD subset of BubbleParams captured by the per-bubble ParallelFor lambda in
+// BubbleManager::advance().  Capturing the full BubbleParams struct (which
+// contains amrex::Vector<Real> sparger_x/y/z and std::string stats_file) by
+// value would make the lambda's own type non-trivially-copyable, which SYCL
+// rejects at kernel-submit time (sycl::is_device_copyable) even though the
+// kernel body only reads these scalar members.  Structs-of-scalars are POD, so
+// the check passes cleanly on all backends (CUDA, HIP, SYCL, CPU).
+//
+// This must live at namespace scope: CUDA rejects function-local types in the
+// captured types of an extended __device__ / __host__ __device__ lambda.
+// -----------------------------------------------------------------------------
+struct BubbleParamsScalar
+{
+    amrex::Real dx_phys;
+    amrex::Real dt_phys;
+    amrex::Real nu_fluid;
+    amrex::Real rho_fluid;
+    amrex::Real g_grav;
+    amrex::Real force_cap_factor;
+    amrex::Real C_ref;
+    amrex::Real D_O2;
+    amrex::Real kL_coeff;
+    amrex::Real O2_solubility;
+    amrex::Real free_surface_z;
+    amrex::Real P_atm;
+    amrex::Real O2_molar_volume;
+    int require_liquid_host;
+    int boyle_law_enable;
+};
+
 // ============================================================================
 // Boyle's law / hydrostatic-pressure helper (June 2026).
 //
@@ -63,17 +94,26 @@ namespace lbm {
 //
 // v_m_at_depth is host-and-device callable (used by inject_bubbles on the
 // host and by the per-bubble update kernel on the GPU).
+//
+// Templated on the parameter struct so the same function can be called with
+// either the full BubbleParams (from host code) or a POD scalar-subset copy
+// (from the GPU lambda in advance()).  This avoids capturing the whole
+// BubbleParams — which contains non-trivially-copyable amrex::Vector /
+// std::string members — into the SYCL device kernel.  The lambda parameter
+// P must expose these scalar fields: boyle_law_enable, O2_molar_volume,
+// free_surface_z, dx_phys, P_atm, rho_fluid, g_grav.
 // ============================================================================
+template <typename P>
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
-v_m_at_depth(amrex::Real z_LB, const BubbleParams& p)
+v_m_at_depth(amrex::Real z_LB, const P& p)
 {
     if (p.boyle_law_enable == 0) {
         return p.O2_molar_volume;
     }
     const amrex::Real h_phys =
         amrex::max(amrex::Real(0.0), (p.free_surface_z - z_LB) * p.dx_phys);
-    const amrex::Real P = p.P_atm + p.rho_fluid * p.g_grav * h_phys;
-    return p.O2_molar_volume * (p.P_atm / P);
+    const amrex::Real pressure = p.P_atm + p.rho_fluid * p.g_grav * h_phys;
+    return p.O2_molar_volume * (p.P_atm / pressure);
 }
 
 // ============================================================================
@@ -870,7 +910,18 @@ void BubbleManager::advance(
             auto phi_arr = has_phi ? phi_mf->const_array(pti)
                                    : amrex::Array4<const amrex::Real>{};
 
-            auto prms = m_params;
+            // Populate the POD scalar-subset of m_params captured by the
+            // lambda below.  See BubbleParamsScalar (namespace scope, above)
+            // for the rationale.
+            const BubbleParamsScalar prms{
+                m_params.dx_phys,         m_params.dt_phys,
+                m_params.nu_fluid,        m_params.rho_fluid,
+                m_params.g_grav,          m_params.force_cap_factor,
+                m_params.C_ref,           m_params.D_O2,
+                m_params.kL_coeff,        m_params.O2_solubility,
+                m_params.free_surface_z,  m_params.P_atm,
+                m_params.O2_molar_volume, m_params.require_liquid_host,
+                m_params.boyle_law_enable};
 
             amrex::ParallelFor(num_part, [=] AMREX_GPU_DEVICE(int i) {
                 auto& p = pData[i];
