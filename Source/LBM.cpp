@@ -2,7 +2,7 @@
 #include <iomanip>
 #include <memory>
 #include <AMReX_Parser.H>
-
+#include <AMReX_GpuPrint.H>
 #include "LBM.H"
 
 namespace lbm {
@@ -2383,7 +2383,7 @@ void LBM::relax_f_to_equilibrium(const int lev)
                         if (std::isnan(eq_flow) || std::isnan(eq_ref)) {
                             const int n = amrex::Gpu::Atomic::Add(p_nan_eq, 1);
                             if (n < MAX_NAN_REPORTS) {
-                                printf(
+                                AMREX_DEVICE_PRINTF(
                                     "[EQ_UNIT_NaN] cell=(%d,%d,%d) q=%d "
                                     "eq_flow=%e eq_ref=%e T=%e "
                                     "vel=(%e,%e,%e)\n",
@@ -2564,7 +2564,7 @@ void LBM::relax_f_to_equilibrium(const int lev)
                             const int n =
                                 amrex::Gpu::Atomic::Add(p_nan_comp, 1);
                             if (n < MAX_NAN_REPORTS_COMP) {
-                                printf(
+                                AMREX_DEVICE_PRINTF(
                                     "[COMP_NaN] cell=(%d,%d,%d) q=%d "
                                     "f_old=%e eq=%e rho_comp=%e "
                                     "T=%e omega_comp=%e alpha_use=%e "
