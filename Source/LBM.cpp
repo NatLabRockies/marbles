@@ -1030,14 +1030,6 @@ void LBM::time_step(const int lev, const amrex::Real time, const int iteration)
     }
 
     if (lev < finest_level) {
-        m_fillpatch_op->fillpatch(lev + 1, m_ts_new[lev + 1], m_f[lev + 1]);
-        for (int i = 0; i < m_n_components; ++i) {
-            m_component_fillpatch_ops[i]->fillpatch(
-                lev + 1, m_ts_new[lev + 1], m_component_lattices[i][lev + 1]);
-        }
-
-        m_fillpatch_g_op->fillpatch(lev + 1, m_ts_new[lev + 1], m_g[lev + 1]);
-
         for (int i = 1; i <= m_nsubsteps[lev + 1]; ++i) {
             m_fillpatch_op->fillpatch(
                 lev + 1, time + (i - 1) * m_dts[lev + 1], m_f[lev + 1]);
