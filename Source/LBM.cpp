@@ -186,43 +186,37 @@ void LBM::init_data()
     stencil::check_stencil();
 
     // ------------------------------------------------------------------
-    // AMR-compatibility guards.  The following features do not yet
-    // participate correctly in AMReX's regrid machinery (missing
-    // fillpatch ops / prolongation, single-level containers, or level-
-    // locked reference data).  Rather than silently corrupt the
-    // solution on refined levels, abort with a clear message.  Remove
-    // the corresponding guard once the feature has been extended to
-    // multi-level (see LBM.cpp MakeNewLevelFromCoarse / RemakeLevel).
+    // AMR-compatibility notes for the FSLBM / moving-body / bubbles /
+    // stationary-body features (which do not exist in the upstream
+    // marbles main branch and therefore did not participate in AMReX's
+    // regrid machinery when originally added):
+    //
+    //   * Stationary-body mask (m_stationary_mask) is now defined and
+    //     populated in MakeNewLevelFromCoarse / RemakeLevel and cleared
+    //     in ClearLevel (see those functions below).
+    //
+    //   * Moving-body reference geometry (m_body_voxel_data) is now
+    //     re-captured on every level during initial InitFromScratch
+    //     (see initialize_moving_body_shape); the final capture at
+    //     maxLevel() wins, giving full-resolution SDF lookups on
+    //     refined regions.  Post-motion regrids skip the recapture so
+    //     the reference (body at t=0 position) is preserved.
+    //
+    //   * FSLBM fill-level phi (m_phi_fslbm) is now prolongated from
+    //     the coarse level in MakeNewLevelFromCoarse / RemakeLevel via
+    //     amrex::cell_cons_interp; m_cell_type is then re-derived from
+    //     phi + is_fluid via fslbm_reclassify_cell_type_from_phi.
+    //     Sub-cycled interface tracking at coarse/fine boundaries is
+    //     still simplistic (no mass rebalancing across C/F) but no
+    //     longer silently destroys the free surface on regrid.
+    //
+    //   * Lagrangian bubbles (m_bubbles) live on level 0 only.  Because
+    //     level 0's data is always averaged down from fine levels via
+    //     average_down_to() at the start of every advance(), and bubble
+    //     forcing on level 0 propagates to fine ghosts via fillpatch on
+    //     the next subcycle, this coupling is one-timestep-lagged but
+    //     converged and physically consistent for slow bubble dynamics.
     // ------------------------------------------------------------------
-    if (maxLevel() > 0) {
-        if (m_free_surface) {
-            amrex::Abort(
-                "FSLBM (lbm.free_surface = 1) is not compatible with AMR "
-                "(amr.max_level > 0).  The cell-type / fill-level fields "
-                "(m_cell_type, m_phi_fslbm) have no fillpatch op and are "
-                "reset to CELL_LIQUID / phi=1 on every regrid, silently "
-                "destroying the free surface on refined regions.  Set "
-                "amr.max_level = 0 or disable free_surface.");
-        }
-        if (m_body_is_moving) {
-            amrex::Abort(
-                "Moving body (lbm.body_is_moving = 1) is not compatible "
-                "with AMR (amr.max_level > 0).  The reference voxel field "
-                "(m_body_voxel_data) is captured once at whichever level "
-                "is initialized first (level 0) and its resolution is not "
-                "refined on higher levels.  Set amr.max_level = 0 or "
-                "disable body_is_moving.");
-        }
-        if (m_enable_bubbles) {
-            amrex::Abort(
-                "Lagrangian bubbles (lbm.enable_bubbles = 1) are not "
-                "compatible with AMR (amr.max_level > 0).  The bubble "
-                "container is bound to grids[0]/dmap[0] and bubble<->fluid "
-                "coupling only runs on level 0, so refined-level fields "
-                "are invisible to bubbles.  Set amr.max_level = 0 or "
-                "disable enable_bubbles.");
-        }
-    }
 
     if (m_restart_chkfile.empty()) {
         // start simulation from the beginning
@@ -3353,6 +3347,27 @@ void LBM::MakeNewLevelFromCoarse(
 
     m_fillpatch_g_op->fillpatch_from_coarse(lev, time, m_g[lev]);
 
+    // FSLBM: prolongate the fill-level phi from the coarse level and re-derive
+    // the cell-type enum locally.  Without this, the newly-created fine level
+    // has phi=1 / cell_type=LIQUID everywhere, silently destroying the free
+    // surface in the refined region.  We use amrex::cell_cons_interp with
+    // foextrap physbc at domain walls; the FSLBM interior kernels do their
+    // own periodic FillBoundary each step.
+    if (m_free_surface) {
+        amrex::Vector<amrex::BCRec> phi_bcs(
+            1, amrex::BCRec(
+                   amrex::BCType::foextrap, amrex::BCType::foextrap,
+                   amrex::BCType::foextrap, amrex::BCType::foextrap,
+                   amrex::BCType::foextrap, amrex::BCType::foextrap));
+        amrex::PhysBCFunctNoOp cphysbc, fphysbc;
+        amrex::InterpFromCoarseLevel(
+            m_phi_fslbm[lev], time, m_phi_fslbm[lev - 1], 0, 0, 1,
+            Geom(lev - 1), Geom(lev), cphysbc, 0, fphysbc, 0, refRatio(lev - 1),
+            &amrex::cell_cons_interp, phi_bcs, 0);
+        m_phi_fslbm[lev].FillBoundary(Geom(lev).periodicity());
+        fslbm_reclassify_cell_type_from_phi(lev);
+    }
+
     m_macrodata[lev].setVal(0.0);
     m_eq[lev].setVal(0.0);
     m_eq_g[lev].setVal(0.0);
@@ -3502,7 +3517,14 @@ void LBM::initialize_f(const int lev)
 
 void LBM::initialize_moving_body_shape(int lev)
 {
-    if (m_using_voxel_body) {
+    // Capture the reference voxel field from the current m_is_fluid[lev].
+    // During InitFromScratch, MakeNewLevelFromScratch runs for lev = 0..
+    // maxLevel in order, so we allow re-capture on each level and the FINAL
+    // capture (at maxLevel resolution) wins.  Once time evolution has begun
+    // (m_isteps[0] > 0) any subsequent MakeNewLevelFromCoarse call would be
+    // seeing a post-motion m_is_fluid[lev] rather than the reference, so we
+    // skip the recapture and keep the initial-setup snapshot.
+    if (m_using_voxel_body && m_isteps[0] > 0) {
         return;
     }
 
@@ -5579,6 +5601,29 @@ void LBM::RemakeLevel(
         m_component_lattices[i][lev].FillBoundary(Geom(lev).periodicity());
     }
     m_g[lev].FillBoundary(Geom(lev).periodicity());
+
+    // FSLBM: prolongate the fill-level phi from the coarse level (via the
+    // FillPatchTwoLevels swap pattern used above for m_f/m_g) and re-derive
+    // the cell-type enum locally.  Without this, RemakeLevel would leave phi=1
+    // / cell_type=LIQUID everywhere, silently destroying the free surface on
+    // the newly-remade level.
+    if (m_free_surface) {
+        amrex::MultiFab new_phi(ba, dm, 1, m_f_nghost);
+        amrex::Vector<amrex::BCRec> phi_bcs(
+            1, amrex::BCRec(
+                   amrex::BCType::foextrap, amrex::BCType::foextrap,
+                   amrex::BCType::foextrap, amrex::BCType::foextrap,
+                   amrex::BCType::foextrap, amrex::BCType::foextrap));
+        amrex::PhysBCFunctNoOp cphysbc, fphysbc;
+        amrex::FillPatchTwoLevels(
+            new_phi, m_f_nghost * amrex::IntVect::TheUnitVector(), time,
+            {&m_phi_fslbm[lev - 1]}, {time}, {&m_phi_fslbm[lev]}, {time}, 0, 0,
+            1, Geom(lev - 1), Geom(lev), cphysbc, 0, fphysbc, 0,
+            refRatio(lev - 1), &amrex::cell_cons_interp, phi_bcs, 0);
+        std::swap(new_phi, m_phi_fslbm[lev]);
+        m_phi_fslbm[lev].FillBoundary(Geom(lev).periodicity());
+        fslbm_reclassify_cell_type_from_phi(lev);
+    }
     m_macrodata[lev].setVal(0.0);
     m_eq[lev].setVal(0.0);
     m_eq_g[lev].setVal(0.0);
@@ -8276,6 +8321,50 @@ void LBM::fslbm_init_cell_type(const int lev)
 
     amrex::Print() << "FSLBM cell types initialized at lev=" << lev
                    << "  z_surf=" << z_surf << " m\n";
+}
+
+// ============================================================================
+// FSLBM: re-derive the CELL_SOLID/GAS/INTERFACE/LIQUID enum from an
+// already-populated m_phi_fslbm[lev] and m_is_fluid[lev].  Used by
+// MakeNewLevelFromCoarse / RemakeLevel after phi has been prolongated from
+// the coarse level, to restore a consistent cell-type field on the newly-
+// created or remade level without relying on the initial-condition
+// z_surf-based classifier (which is only correct at t=0).  Purely local, no
+// FillBoundary on phi needed here (callers do it before invoking us).
+// ============================================================================
+void LBM::fslbm_reclassify_cell_type_from_phi(const int lev)
+{
+    BL_PROFILE("LBM::fslbm_reclassify_cell_type_from_phi()");
+    using namespace lbm::constants;
+    const amrex::Real l_phi_lo = FSLBM_PHI_LO;
+    const amrex::Real l_phi_hi = FSLBM_PHI_HI;
+
+    auto const& if_arrs = m_is_fluid[lev].const_arrays();
+    auto const& phi_arrs = m_phi_fslbm[lev].arrays();
+    auto const& ct_arrs = m_cell_type[lev].arrays();
+
+    amrex::ParallelFor(
+        m_cell_type[lev], m_cell_type[lev].nGrowVect(),
+        [=] AMREX_GPU_DEVICE(
+            int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
+            if (if_arrs[nbx](i, j, k, IS_FLUID_IDX) == 0) {
+                ct_arrs[nbx](i, j, k, 0) = CELL_SOLID;
+                phi_arrs[nbx](i, j, k, 0) = amrex::Real(0.0);
+                return;
+            }
+            const amrex::Real p = phi_arrs[nbx](i, j, k, 0);
+            if (p >= l_phi_hi) {
+                ct_arrs[nbx](i, j, k, 0) = CELL_LIQUID;
+            } else if (p <= l_phi_lo) {
+                ct_arrs[nbx](i, j, k, 0) = CELL_GAS;
+            } else {
+                ct_arrs[nbx](i, j, k, 0) = CELL_INTERFACE;
+            }
+        });
+
+    m_cell_type[lev].FillBoundary(Geom(lev).periodicity());
+    // Keep the IS_FLUID marker consistent with the newly-derived cell types.
+    fslbm_sync_isfluid_markers(lev);
 }
 
 // ============================================================================

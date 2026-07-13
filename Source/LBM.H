@@ -155,6 +155,10 @@ public:
     // FSLBM (Körner 2005): initialize cell type + fill level from z_surf.
     void fslbm_init_cell_type(const int lev);
 
+    // FSLBM: re-derive m_cell_type from the current m_phi_fslbm and
+    // m_is_fluid; used after regrid prolongation.
+    void fslbm_reclassify_cell_type_from_phi(const int lev);
+
     // FSLBM: one free-surface sweep (streaming with ABB + φ update +
     // conversions). Replaces both advance_phi(lev) and stream(lev, m_f).
     void fslbm_advance_surface(const int lev);
