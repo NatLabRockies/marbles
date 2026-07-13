@@ -185,6 +185,45 @@ void LBM::init_data()
 
     stencil::check_stencil();
 
+    // ------------------------------------------------------------------
+    // AMR-compatibility guards.  The following features do not yet
+    // participate correctly in AMReX's regrid machinery (missing
+    // fillpatch ops / prolongation, single-level containers, or level-
+    // locked reference data).  Rather than silently corrupt the
+    // solution on refined levels, abort with a clear message.  Remove
+    // the corresponding guard once the feature has been extended to
+    // multi-level (see LBM.cpp MakeNewLevelFromCoarse / RemakeLevel).
+    // ------------------------------------------------------------------
+    if (maxLevel() > 0) {
+        if (m_free_surface) {
+            amrex::Abort(
+                "FSLBM (lbm.free_surface = 1) is not compatible with AMR "
+                "(amr.max_level > 0).  The cell-type / fill-level fields "
+                "(m_cell_type, m_phi_fslbm) have no fillpatch op and are "
+                "reset to CELL_LIQUID / phi=1 on every regrid, silently "
+                "destroying the free surface on refined regions.  Set "
+                "amr.max_level = 0 or disable free_surface.");
+        }
+        if (m_body_is_moving) {
+            amrex::Abort(
+                "Moving body (lbm.body_is_moving = 1) is not compatible "
+                "with AMR (amr.max_level > 0).  The reference voxel field "
+                "(m_body_voxel_data) is captured once at whichever level "
+                "is initialized first (level 0) and its resolution is not "
+                "refined on higher levels.  Set amr.max_level = 0 or "
+                "disable body_is_moving.");
+        }
+        if (m_enable_bubbles) {
+            amrex::Abort(
+                "Lagrangian bubbles (lbm.enable_bubbles = 1) are not "
+                "compatible with AMR (amr.max_level > 0).  The bubble "
+                "container is bound to grids[0]/dmap[0] and bubble<->fluid "
+                "coupling only runs on level 0, so refined-level fields "
+                "are invisible to bubbles.  Set amr.max_level = 0 or "
+                "disable enable_bubbles.");
+        }
+    }
+
     if (m_restart_chkfile.empty()) {
         // start simulation from the beginning
         const amrex::Real time = 0.0;
@@ -3274,6 +3313,11 @@ void LBM::MakeNewLevelFromCoarse(
     m_nu_sgs[lev].setVal(amrex::Real(0.0));
     m_mask[lev].define(
         ba, dm, m_mask[lev - 1].nComp(), m_mask[lev - 1].nGrow());
+    // The stationary-body mask must be defined (and populated from the
+    // wall geometry) on every level, not just the base level created by
+    // MakeNewLevelFromScratch, otherwise f_to_macrodata and friends will
+    // capture an empty MultiArray4 on the new fine level.
+    m_stationary_mask[lev].define(ba, dm, 1, m_is_fluid[lev].nGrow());
     m_cell_type[lev].define(ba, dm, 1, m_f_nghost);
     m_cell_type[lev].setVal(constants::CELL_LIQUID);
     m_phi_fslbm[lev].define(ba, dm, 1, m_f_nghost);
@@ -3284,6 +3328,7 @@ void LBM::MakeNewLevelFromCoarse(
     m_ts_new[lev] = time;
     m_ts_old[lev] = constants::LOW_NUM;
 
+    init_stationary_body(lev);
     initialize_is_fluid(lev);
     // initialize fractional field from integer mask (component 0)
     {
@@ -5513,6 +5558,11 @@ void LBM::RemakeLevel(
     m_nu_sgs[lev].define(ba, dm, 1, 0, amrex::MFInfo(), *(m_factory[lev]));
     m_nu_sgs[lev].setVal(amrex::Real(0.0));
     m_mask[lev].define(ba, dm, 1, 0);
+    // Re-define and re-populate the stationary-body mask on the new BA/DM.
+    // Without this, RemakeLevel leaves m_stationary_mask[lev] bound to the
+    // old (now-invalid) DistributionMap and f_to_macrodata segfaults on
+    // the first advance() after regrid.
+    m_stationary_mask[lev].define(ba, dm, 1, m_is_fluid[lev].nGrow());
     m_cell_type[lev].define(ba, dm, 1, m_f_nghost);
     m_cell_type[lev].setVal(constants::CELL_LIQUID);
     m_phi_fslbm[lev].define(ba, dm, 1, m_f_nghost);
@@ -5520,6 +5570,7 @@ void LBM::RemakeLevel(
     m_pre_fslbm_mass[lev].define(ba, dm, 2, 0);
     m_pre_fslbm_mass[lev].setVal(amrex::Real(0.0));
 
+    init_stationary_body(lev);
     initialize_is_fluid(lev);
     initialize_mask(lev);
     fill_f_inside_eb(lev);
@@ -5559,6 +5610,7 @@ void LBM::ClearLevel(int lev)
     m_is_fluid_fraction[lev].clear();
     m_plt_mf[lev].clear();
     m_mask[lev].clear();
+    m_stationary_mask[lev].clear();
     m_cell_type[lev].clear();
     m_phi_fslbm[lev].clear();
     m_pre_fslbm_mass[lev].clear();
