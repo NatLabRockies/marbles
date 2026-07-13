@@ -3356,9 +3356,12 @@ void LBM::MakeNewLevelFromCoarse(
     if (m_free_surface) {
         amrex::Vector<amrex::BCRec> phi_bcs(
             1, amrex::BCRec(
-                   amrex::BCType::foextrap, amrex::BCType::foextrap,
-                   amrex::BCType::foextrap, amrex::BCType::foextrap,
-                   amrex::BCType::foextrap, amrex::BCType::foextrap));
+                   AMREX_D_DECL(
+                       amrex::BCType::foextrap, amrex::BCType::foextrap,
+                       amrex::BCType::foextrap),
+                   AMREX_D_DECL(
+                       amrex::BCType::foextrap, amrex::BCType::foextrap,
+                       amrex::BCType::foextrap)));
         amrex::PhysBCFunctNoOp cphysbc, fphysbc;
         amrex::InterpFromCoarseLevel(
             m_phi_fslbm[lev], time, m_phi_fslbm[lev - 1], 0, 0, 1,
@@ -5611,9 +5614,12 @@ void LBM::RemakeLevel(
         amrex::MultiFab new_phi(ba, dm, 1, m_f_nghost);
         amrex::Vector<amrex::BCRec> phi_bcs(
             1, amrex::BCRec(
-                   amrex::BCType::foextrap, amrex::BCType::foextrap,
-                   amrex::BCType::foextrap, amrex::BCType::foextrap,
-                   amrex::BCType::foextrap, amrex::BCType::foextrap));
+                   AMREX_D_DECL(
+                       amrex::BCType::foextrap, amrex::BCType::foextrap,
+                       amrex::BCType::foextrap),
+                   AMREX_D_DECL(
+                       amrex::BCType::foextrap, amrex::BCType::foextrap,
+                       amrex::BCType::foextrap)));
         amrex::PhysBCFunctNoOp cphysbc, fphysbc;
         amrex::FillPatchTwoLevels(
             new_phi, m_f_nghost * amrex::IntVect::TheUnitVector(), time,
