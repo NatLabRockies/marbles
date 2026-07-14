@@ -664,8 +664,7 @@ void BubbleManager::do_breakup(
                 // FLOAT-precision guard: reject the split if either daughter
                 // diameter is non-finite (subnormal input to cbrt, overflow
                 // from an inflated V_total, ...).  Parent survives intact.
-                if (!amrex::Math::isfinite(d1) ||
-                    !amrex::Math::isfinite(d2)) {
+                if (!amrex::Math::isfinite(d1) || !amrex::Math::isfinite(d2)) {
                     continue;
                 }
 
@@ -1050,37 +1049,26 @@ void BubbleManager::advance(
                 amrex::Real ay_new = (FBy + FDy) / m_eff;
                 amrex::Real az_new = (FBz + FDz) / m_eff;
 
-                // FLOAT-precision guard: the existing force_cap_factor
-                // clamps only the force DEPOSITED into the fluid grid, not
-                // the bubble's OWN acceleration used by the Verlet update.
-                // Small bubbles with high-Re drag can produce ax = F/m_eff
-                // that grows as 1/d³ (m_eff ∝ d³) and overflow FLOAT
-                // range in a single step, corrupting VX/VY/VZ (and via
-                // Verlet the position) with Inf/NaN.  Apply the same
-                // acceleration cap  a_max = force_cap_factor · |g|  used
-                // for the deposit, so bubble kinematics stay finite even
-                // in the tail of the size distribution.  NaN/Inf fallback
-                // to zero acceleration.
-                if (prms.force_cap_factor > 0.0) {
-                    const amrex::Real a_max =
-                        prms.force_cap_factor * std::abs(prms.g_grav);
-                    const amrex::Real amag = std::sqrt(
-                        ax_new * ax_new + ay_new * ay_new + az_new * az_new);
-                    if (amag > a_max && amag > 0.0) {
-                        const amrex::Real s = a_max / amag;
-                        ax_new *= s;
-                        ay_new *= s;
-                        az_new *= s;
-                    }
-                    if (!amrex::Math::isfinite(ax_new)) {
-                        ax_new = 0.0;
-                    }
-                    if (!amrex::Math::isfinite(ay_new)) {
-                        ay_new = 0.0;
-                    }
-                    if (!amrex::Math::isfinite(az_new)) {
-                        az_new = 0.0;
-                    }
+                // FLOAT-precision guard: if ax_new became Inf/NaN via a
+                // subnormal m_eff (d^3 too small) or an unphysical drag
+                // sample, fall back to zero.  Do NOT apply a finite-value
+                // cap here: small bubbles near min_diameter physically see
+                // thousands of g's of turbulent acceleration near the
+                // impeller tip, and clamping ax_new suppresses their
+                // transport to the high-epsilon zone where the Hinze
+                // criterion fires — killing the breakup channel and
+                // collapsing the bubble population into a few giant
+                // blobs.  Genuine overflow (position -> Inf next step) is
+                // caught by the post-Verlet state validator further down;
+                // this fallback covers only the same-step Inf/NaN case.
+                if (!amrex::Math::isfinite(ax_new)) {
+                    ax_new = 0.0;
+                }
+                if (!amrex::Math::isfinite(ay_new)) {
+                    ay_new = 0.0;
+                }
+                if (!amrex::Math::isfinite(az_new)) {
+                    az_new = 0.0;
                 }
 
                 amrex::Real FAx = m_eff * ax_new;
@@ -1352,8 +1340,7 @@ void BubbleManager::advance(
                         !amrex::Math::isfinite(p.rdata(bubble_idx::VX)) ||
                         !amrex::Math::isfinite(p.rdata(bubble_idx::VY)) ||
                         !amrex::Math::isfinite(p.rdata(bubble_idx::VZ)) ||
-                        !amrex::Math::isfinite(
-                            p.rdata(bubble_idx::DIAMETER)) ||
+                        !amrex::Math::isfinite(p.rdata(bubble_idx::DIAMETER)) ||
                         !amrex::Math::isfinite(p.rdata(bubble_idx::N_O2)) ||
                         !amrex::Math::isfinite(p.rdata(bubble_idx::DN_I))) {
                         p.id() = -1;
@@ -1475,8 +1462,8 @@ void BubbleManager::write_stats(
     if (n_bad > 0) {
         amrex::Print() << "[bubble_stats step=" << step
                        << "] WARNING: " << n_bad
-                       << " bubbles with non-finite diameter skipped ("
-                       << n_bub << " valid)\n";
+                       << " bubbles with non-finite diameter skipped (" << n_bub
+                       << " valid)\n";
     }
 
     if (!m_stats_stream.is_open()) {
