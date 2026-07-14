@@ -110,6 +110,15 @@ v_m_at_depth(amrex::Real z_LB, const P& p)
     if (p.boyle_law_enable == 0) {
         return p.O2_molar_volume;
     }
+    // FLOAT-precision guard: a bubble whose z-position temporarily became
+    // non-finite (e.g. from a transient force-integration blowup, before
+    // the state-guard at the kernel entry catches it) would produce
+    // pressure = P_atm + rho*g*Inf = Inf and V_m = 0 * NaN.  Fall back to
+    // the reference molar volume so downstream diameter arithmetic stays
+    // finite until the bubble is invalidated on the next advance() sweep.
+    if (!amrex::Math::isfinite(z_LB)) {
+        return p.O2_molar_volume;
+    }
     const amrex::Real h_phys =
         amrex::max(amrex::Real(0.0), (p.free_surface_z - z_LB) * p.dx_phys);
     const amrex::Real pressure = p.P_atm + p.rho_fluid * p.g_grav * h_phys;
@@ -589,6 +598,16 @@ void BubbleManager::do_breakup(
 
                 const amrex::Real d = p.rdata(bubble_idx::DIAMETER);
 
+                // FLOAT-precision guard: a bubble whose diameter went
+                // non-finite via some transient arithmetic event must be
+                // removed before the Hinze test (d <= D_e evaluates to
+                // FALSE for NaN, so control would fall through and produce
+                // NaN daughters).  Invalidate the parent and move on.
+                if (!amrex::Math::isfinite(d)) {
+                    p.id() = -1;
+                    continue;
+                }
+
                 // Skip if bubble is already at or below minimum allowed size
                 if (d <= m_params.min_diameter) {
                     continue;
@@ -639,6 +658,14 @@ void BubbleManager::do_breakup(
                 // min_diameter. Prevents runaway fragmentation from near-wall
                 // epsilon spikes.
                 if (d1 < m_params.min_diameter || d2 < m_params.min_diameter) {
+                    continue;
+                }
+
+                // FLOAT-precision guard: reject the split if either daughter
+                // diameter is non-finite (subnormal input to cbrt, overflow
+                // from an inflated V_total, ...).  Parent survives intact.
+                if (!amrex::Math::isfinite(d1) ||
+                    !amrex::Math::isfinite(d2)) {
                     continue;
                 }
 
@@ -798,6 +825,13 @@ void BubbleManager::do_coalescence(amrex::Real phys_time)
                 const amrex::Real V_new = V_i + V_j;
                 const amrex::Real d_new =
                     std::cbrt(6.0 * V_new / amrex::Math::pi<amrex::Real>());
+                // FLOAT-precision guard: if the merged diameter is non-finite
+                // (subnormal-input cbrt, overflow, ...) abandon the merge and
+                // leave both parent bubbles intact.  Rare enough that this
+                // does not perturb the interfacial-area statistics.
+                if (!amrex::Math::isfinite(d_new)) {
+                    continue;
+                }
                 // Momentum conservation (using m ≈ 0, so mass average is
                 // unweighted)
                 const amrex::Real vx_new = 0.5 * (bvec[i].vx + bvec[j].vx);
@@ -926,6 +960,31 @@ void BubbleManager::advance(
             amrex::ParallelFor(num_part, [=] AMREX_GPU_DEVICE(int i) {
                 auto& p = pData[i];
                 if (!p.id().is_valid()) {
+                    return;
+                }
+
+                // ---------------------------------------------------------
+                // FLOAT-precision state guard.  A bubble whose position,
+                // velocity, diameter, or moles has become non-finite via
+                // some upstream arithmetic event would poison every
+                // computation below (drag interpolation, Boyle's-law
+                // pressure, forcing, position update, mass transfer, ...)
+                // and eventually raise FE_INVALID in write_stats.  Kill
+                // it here so Redistribute() removes it cleanly on the
+                // next call; the impact on ensemble kLa is negligible
+                // (< 1 in ~20 000 typical) and vastly preferable to a
+                // hard crash mid-run.  On DOUBLE builds none of these
+                // checks fire at all.
+                // ---------------------------------------------------------
+                if (!amrex::Math::isfinite(p.pos(0)) ||
+                    !amrex::Math::isfinite(p.pos(1)) ||
+                    !amrex::Math::isfinite(p.pos(2)) ||
+                    !amrex::Math::isfinite(p.rdata(bubble_idx::VX)) ||
+                    !amrex::Math::isfinite(p.rdata(bubble_idx::VY)) ||
+                    !amrex::Math::isfinite(p.rdata(bubble_idx::VZ)) ||
+                    !amrex::Math::isfinite(p.rdata(bubble_idx::DIAMETER)) ||
+                    !amrex::Math::isfinite(p.rdata(bubble_idx::N_O2))) {
+                    p.id() = -1;
                     return;
                 }
 
@@ -1316,6 +1375,7 @@ void BubbleManager::write_stats(
 
     // Gather statistics across all particles
     int n_bub = 0;
+    int n_bad = 0;
     amrex::Real d_sum = 0.0;
     amrex::Real d_min = 1.0e30;
     amrex::Real d_max = 0.0;
@@ -1329,8 +1389,16 @@ void BubbleManager::write_stats(
                 if (!p.id().is_valid()) {
                     continue;
                 }
-                ++n_bub;
                 const amrex::Real d = p.rdata(bubble_idx::DIAMETER);
+                // FLOAT-precision guard: skip and count bubbles with a
+                // non-finite diameter so the std::min / std::max below
+                // never triggers FE_INVALID.  n_bad is reported alongside
+                // n_bub so an anomalous rate is visible in the log.
+                if (!std::isfinite(d)) {
+                    ++n_bad;
+                    continue;
+                }
+                ++n_bub;
                 d_sum += d;
                 d_min = std::min(d_min, d);
                 d_max = std::max(d_max, d);
@@ -1341,6 +1409,13 @@ void BubbleManager::write_stats(
     }
 
     const amrex::Real d_mean = (n_bub > 0) ? (d_sum / n_bub) : 0.0;
+
+    if (n_bad > 0) {
+        amrex::Print() << "[bubble_stats step=" << step
+                       << "] WARNING: " << n_bad
+                       << " bubbles with non-finite diameter skipped ("
+                       << n_bub << " valid)\n";
+    }
 
     if (!m_stats_stream.is_open()) {
         return;
