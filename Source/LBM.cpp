@@ -1479,8 +1479,19 @@ void LBM::advance(
             amrex::Real C_L_mol_m3 = 0.0;
             amrex::Real V_liq_m3 = 0.0;
             compute_dissolved_o2_average(lev, rho_o2, C_L_mol_m3, V_liq_m3);
+            // Disable FPE trapping around the write.  Even though the
+            // per-bubble accumulation loop skips non-finite fields via
+            // std::isfinite guards, std::isfinite on x86 with -O3 may
+            // compile to a `x - x == 0` sequence whose subtraction raises
+            // FE_INVALID on a signaling-NaN input before returning the
+            // (correct) false — killing the run before the guard has a
+            // chance to filter.  Matches the disable/restore pattern
+            // used around m_bubbles.advance() above.
+            auto prev_fpe_stats = amrex::disableFPExcept(
+                amrex::FPExcept::invalid | amrex::FPExcept::overflow);
             m_bubbles.write_stats(
                 m_isteps[lev], phys_time, C_L_mol_m3, V_liq_m3);
+            amrex::setFPExcept(prev_fpe_stats);
         }
 
         // Fixed-location probe sampler (M-Star probe.txt analog).  No-op

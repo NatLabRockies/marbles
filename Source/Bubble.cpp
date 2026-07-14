@@ -1050,6 +1050,39 @@ void BubbleManager::advance(
                 amrex::Real ay_new = (FBy + FDy) / m_eff;
                 amrex::Real az_new = (FBz + FDz) / m_eff;
 
+                // FLOAT-precision guard: the existing force_cap_factor
+                // clamps only the force DEPOSITED into the fluid grid, not
+                // the bubble's OWN acceleration used by the Verlet update.
+                // Small bubbles with high-Re drag can produce ax = F/m_eff
+                // that grows as 1/d³ (m_eff ∝ d³) and overflow FLOAT
+                // range in a single step, corrupting VX/VY/VZ (and via
+                // Verlet the position) with Inf/NaN.  Apply the same
+                // acceleration cap  a_max = force_cap_factor · |g|  used
+                // for the deposit, so bubble kinematics stay finite even
+                // in the tail of the size distribution.  NaN/Inf fallback
+                // to zero acceleration.
+                if (prms.force_cap_factor > 0.0) {
+                    const amrex::Real a_max =
+                        prms.force_cap_factor * std::abs(prms.g_grav);
+                    const amrex::Real amag = std::sqrt(
+                        ax_new * ax_new + ay_new * ay_new + az_new * az_new);
+                    if (amag > a_max && amag > 0.0) {
+                        const amrex::Real s = a_max / amag;
+                        ax_new *= s;
+                        ay_new *= s;
+                        az_new *= s;
+                    }
+                    if (!amrex::Math::isfinite(ax_new)) {
+                        ax_new = 0.0;
+                    }
+                    if (!amrex::Math::isfinite(ay_new)) {
+                        ay_new = 0.0;
+                    }
+                    if (!amrex::Math::isfinite(az_new)) {
+                        az_new = 0.0;
+                    }
+                }
+
                 amrex::Real FAx = m_eff * ax_new;
                 amrex::Real FAy = m_eff * ay_new;
                 amrex::Real FAz = m_eff * az_new;
@@ -1304,6 +1337,29 @@ void BubbleManager::advance(
                     p.pos(1) = new_py;
                     p.pos(2) = new_pz;
 
+                    // FLOAT-precision post-Verlet state validator.  The
+                    // entry-guard catches bubbles that were already bad on
+                    // arrival, but a bubble can also be corrupted DURING
+                    // this kernel step (unphysical drag / Boyle-law product
+                    // that slipped past the acceleration cap, a diameter
+                    // update that hit a subnormal).  Catch that same-step
+                    // so write_stats (called immediately after this
+                    // kernel) never sees a non-finite field.  Invalidate
+                    // and skip the free-surface exit check below.
+                    if (!amrex::Math::isfinite(p.pos(0)) ||
+                        !amrex::Math::isfinite(p.pos(1)) ||
+                        !amrex::Math::isfinite(p.pos(2)) ||
+                        !amrex::Math::isfinite(p.rdata(bubble_idx::VX)) ||
+                        !amrex::Math::isfinite(p.rdata(bubble_idx::VY)) ||
+                        !amrex::Math::isfinite(p.rdata(bubble_idx::VZ)) ||
+                        !amrex::Math::isfinite(
+                            p.rdata(bubble_idx::DIAMETER)) ||
+                        !amrex::Math::isfinite(p.rdata(bubble_idx::N_O2)) ||
+                        !amrex::Math::isfinite(p.rdata(bubble_idx::DN_I))) {
+                        p.id() = -1;
+                        return;
+                    }
+
                     // 6. Free Surface Outgassing Exit
                     if (has_phi) {
                         int fsi = static_cast<int>(amrex::Math::floor(
@@ -1390,11 +1446,17 @@ void BubbleManager::write_stats(
                     continue;
                 }
                 const amrex::Real d = p.rdata(bubble_idx::DIAMETER);
-                // FLOAT-precision guard: skip and count bubbles with a
-                // non-finite diameter so the std::min / std::max below
-                // never triggers FE_INVALID.  n_bad is reported alongside
-                // n_bub so an anomalous rate is visible in the log.
-                if (!std::isfinite(d)) {
+                const amrex::Real n_o2 = p.rdata(bubble_idx::N_O2);
+                const amrex::Real dn = p.rdata(bubble_idx::DN_I);
+                // FLOAT-precision guard: skip and count bubbles with any
+                // non-finite scalar we accumulate below.  Restricting the
+                // guard to diameter alone (an earlier fix) left the
+                // n_O2_total / dn_total accumulators exposed to Inf + Inf
+                // (of opposite signs) which raises FE_INVALID.  n_bad is
+                // reported alongside n_bub so an anomalous rate is visible
+                // in the log.
+                if (!std::isfinite(d) || !std::isfinite(n_o2) ||
+                    !std::isfinite(dn)) {
                     ++n_bad;
                     continue;
                 }
@@ -1402,8 +1464,8 @@ void BubbleManager::write_stats(
                 d_sum += d;
                 d_min = std::min(d_min, d);
                 d_max = std::max(d_max, d);
-                n_O2_total += p.rdata(bubble_idx::N_O2);
-                dn_total += p.rdata(bubble_idx::DN_I);
+                n_O2_total += n_o2;
+                dn_total += dn;
             }
         }
     }
