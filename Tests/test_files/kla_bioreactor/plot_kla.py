@@ -71,6 +71,15 @@ def parse_bubble_stats(path):
     the overlapping window appears twice.  We deduplicate by the ``step``
     column keeping the LAST occurrence for each step (which is the row
     written by the most recent restart, i.e. the freshest physics).
+
+    Post-blowup truncation: if a run enters a catastrophic FSLBM state
+    (rare in DOUBLE, more common in FLOAT — the LBM component-lattice
+    can hit a NaN cascade at the bottom-wall boundary after O(1e6)
+    steps), the tail of the CSV holds sentinel-value junk (n_bubbles=0,
+    d_min=1e30, C_L~1e-21).  Downstream fits crash on these values.
+    Truncate at the first row where the bubble population has fully
+    collapsed OR C_L drops below zero or above 2*C_sat — all valid
+    physics rows are preserved intact.
     """
     rows = []
     with open(path, newline="") as f:
@@ -94,6 +103,35 @@ def parse_bubble_stats(path):
         for r in rows:
             by_step[r["step"]] = r
         rows = [by_step[s] for s in sorted(by_step)]
+
+    # Truncate at first post-blowup row.  A row is "bad" if:
+    #   * n_bubbles == 0 AND the previous row had n_bubbles > 100
+    #     (population totally collapsed — physical run cannot bring it
+    #     back to hundreds within one stats interval)
+    #   * OR C_L_mol_m3 outside a physically-plausible band
+    #     [-C_SAT*0.01, 2*C_SAT], catching Inf / negative-1e30 sentinels
+    if rows:
+        n_col = "n_bubbles"
+        c_col = "C_L_mol_m3"
+        prev_n = None
+        cutoff = None
+        for i, r in enumerate(rows):
+            n = r.get(n_col)
+            c = r.get(c_col)
+            bad = False
+            if (n is not None and n == 0 and prev_n is not None
+                    and prev_n > 100):
+                bad = True
+            if c is not None and (c < -0.01 * C_SAT_MOL_M3
+                                  or c > 2.0 * C_SAT_MOL_M3
+                                  or not np.isfinite(c)):
+                bad = True
+            if bad:
+                cutoff = i
+                break
+            prev_n = n
+        if cutoff is not None:
+            rows = rows[:cutoff]
 
     cols = {}
     for r in rows:
