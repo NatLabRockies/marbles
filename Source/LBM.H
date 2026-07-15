@@ -342,6 +342,14 @@ private:
     amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> m_body_voxel_dx{0.0};
     amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> m_body_initial_center{0.0};
     bool m_using_voxel_body = false;
+    // True only while read_checkpoint_file is repopulating m_is_fluid at
+    // t > 0 -- lets initialize_moving_body_shape recapture the reference
+    // voxel table for every level (finest wins), matching cold-start
+    // behaviour.  Outside this window, mid-run RemakeLevel / regrid calls
+    // to initialize_moving_body_shape still short-circuit (they would
+    // otherwise overwrite the reference with a post-motion m_is_fluid
+    // snapshot).
+    bool m_in_restart_init = false;
 
     // Stationary body reference data
     amrex::Vector<amrex::iMultiFab> m_stationary_mask;

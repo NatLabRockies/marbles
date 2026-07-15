@@ -3559,10 +3559,16 @@ void LBM::initialize_moving_body_shape(int lev)
     // During InitFromScratch, MakeNewLevelFromScratch runs for lev = 0..
     // maxLevel in order, so we allow re-capture on each level and the FINAL
     // capture (at maxLevel resolution) wins.  Once time evolution has begun
-    // (m_isteps[0] > 0) any subsequent MakeNewLevelFromCoarse call would be
-    // seeing a post-motion m_is_fluid[lev] rather than the reference, so we
-    // skip the recapture and keep the initial-setup snapshot.
-    if (m_using_voxel_body && m_isteps[0] > 0) {
+    // (m_isteps[0] > 0) any subsequent MakeNewLevelFromCoarse / RemakeLevel
+    // call would be seeing a post-motion m_is_fluid[lev] rather than the
+    // reference, so we skip the recapture and keep the initial-setup
+    // snapshot.  The one exception is read_checkpoint_file's own
+    // level-init loop, which runs at m_isteps[0] > 0 but has *just*
+    // freshly re-voxelised m_is_fluid via initialize_from_stl (STL is
+    // stationary; the reference frame does not rotate with the body);
+    // it sets m_in_restart_init = true around that loop so all levels
+    // recapture, matching the cold-start finest-wins behaviour.
+    if (m_using_voxel_body && m_isteps[0] > 0 && !m_in_restart_init) {
         return;
     }
 
@@ -6672,6 +6678,13 @@ void LBM::read_checkpoint_file()
     }
 
     // Populate the other data
+    //
+    // Enable the restart-init override for the initialize_moving_body_shape
+    // guard so that every level (not just level 0) re-captures the
+    // reference voxel table -- matching cold-start where the finest
+    // level wins.  Reset after the loop so the guard reverts to its
+    // normal "skip on mid-run RemakeLevel/regrid" behaviour.
+    m_in_restart_init = true;
     for (int lev = 0; lev <= finest_level; ++lev) {
         // Repopulate the stationary-body mask (baffles / stationary STL /
         // crack files).  This is deterministic from input parameters; it
@@ -6709,6 +6722,7 @@ void LBM::read_checkpoint_file()
 
         compute_derived(lev);
     }
+    m_in_restart_init = false;
 }
 
 // utility to skip to next line in Header
