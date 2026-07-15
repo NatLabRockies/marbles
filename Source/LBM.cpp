@@ -3387,20 +3387,6 @@ void LBM::MakeNewLevelFromCoarse(
 
     init_stationary_body(lev);
     initialize_is_fluid(lev);
-    // initialize fractional field from integer mask (component 0)
-    {
-        auto const& if_arrs = m_is_fluid[lev].const_arrays();
-        auto const& frac_arrs = m_is_fluid_fraction[lev].arrays();
-        amrex::ParallelFor(
-            m_is_fluid[lev], m_is_fluid[lev].nGrowVect(),
-            [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
-                frac_arrs[nbx](i, j, k, 0) =
-                    static_cast<amrex::Real>(if_arrs[nbx](i, j, k, 0));
-            });
-        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host
-        // barrier
-    }
     initialize_mask(lev);
     m_fillpatch_op->fillpatch_from_coarse(lev, time, m_f[lev]);
     for (int i = 0; i < m_n_components; ++i) {
@@ -3508,20 +3494,6 @@ void LBM::MakeNewLevelFromScratch(
     // Initialize the data
     init_stationary_body(lev);
     initialize_is_fluid(lev);
-    // initialize fractional field from integer mask (component 0)
-    {
-        auto const& if_arrs = m_is_fluid[lev].const_arrays();
-        auto const& frac_arrs = m_is_fluid_fraction[lev].arrays();
-        amrex::ParallelFor(
-            m_is_fluid[lev], m_is_fluid[lev].nGrowVect(),
-            [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
-                frac_arrs[nbx](i, j, k, 0) =
-                    static_cast<amrex::Real>(if_arrs[nbx](i, j, k, 0));
-            });
-        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host
-        // barrier
-    }
 
     // FSLBM (Körner 2005): sharp-interface cell-type + fill-level
     // initialization.
@@ -3895,6 +3867,27 @@ void LBM::initialize_is_fluid(const int lev)
         });
 
     initialize_from_stl(Geom(lev), m_is_fluid[lev]);
+
+    // Seed the fractional field from the integer mask so that non-moving-body
+    // levels have a well-defined m_is_fluid_fraction after this function
+    // returns.  For moving bodies, reconstruct_body_sdf immediately overwrites
+    // this with the smooth SDF-based fraction.  Without this seed, the
+    // RemakeLevel code path (unlike MakeNewLevelFromCoarse /
+    // MakeNewLevelFromScratch) leaves m_is_fluid_fraction[lev] with
+    // fresh-alloc sNaN memory; VisMF::CalculateMinMax on the plotfile then
+    // trips fpe_trap_invalid on any regridded no-body AMR run (e.g. the
+    // 2D sod_amr regression test).
+    {
+        auto const& if_arrs = m_is_fluid[lev].const_arrays();
+        auto const& frac_arrs = m_is_fluid_fraction[lev].arrays();
+        amrex::ParallelFor(
+            m_is_fluid[lev], m_is_fluid[lev].nGrowVect(),
+            [=] AMREX_GPU_DEVICE(
+                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
+                frac_arrs[nbx](i, j, k, 0) = static_cast<amrex::Real>(
+                    if_arrs[nbx](i, j, k, lbm::constants::IS_FLUID_IDX));
+            });
+    }
 
     // If body is moving, reconstruct the SDF at t=0 to ensure correct initial
     // position
