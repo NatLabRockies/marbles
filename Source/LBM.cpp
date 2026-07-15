@@ -3762,36 +3762,64 @@ void LBM::init_stationary_body(int lev)
         pp.query("stationary_stl_reverse_normal", reverse_normal);
         pp.query("stationary_stl_center", center);
 
-        amrex::STLtools stlobj;
-        stlobj.read_stl_file(stl_file, scale, center, reverse_normal);
+        if constexpr (sizeof(amrex::Real) < 8) {
+            // PRECISION=FLOAT: use the double-precision voxelizer (see
+            // EB.H::voxelize_stl_double_precision).  Fill a scratch
+            // iMultiFab with 1/0 (outside/inside), then min-merge into
+            // m_stationary_mask so any pre-existing solid voxels stay
+            // solid.
+            amrex::iMultiFab stat_stl(
+                m_stationary_mask[lev].boxArray(),
+                m_stationary_mask[lev].DistributionMap(), 1,
+                m_stationary_mask[lev].nGrow());
+            stat_stl.setVal(1);
+            lbm::voxelize_stl_double_precision(
+                stl_file, scale, center, reverse_normal, Geom(lev), stat_stl,
+                /*comp=*/0, /*inside_value=*/0, /*outside_value=*/1);
 
-        amrex::MultiFab marker(
-            m_stationary_mask[lev].boxArray(),
-            m_stationary_mask[lev].DistributionMap(), 1,
-            m_stationary_mask[lev].nGrow());
+            auto const& stl_arrs = stat_stl.const_arrays();
+            auto const& mask_arrs = m_stationary_mask[lev].arrays();
+            amrex::ParallelFor(
+                m_stationary_mask[lev], m_stationary_mask[lev].nGrowVect(),
+                [=] AMREX_GPU_DEVICE(
+                    int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
+                    mask_arrs[nbx](i, j, k) = amrex::min(
+                        mask_arrs[nbx](i, j, k), stl_arrs[nbx](i, j, k, 0));
+                });
+        } else {
+            // PRECISION=DOUBLE: keep amrex::STLtools path unchanged.
+            amrex::STLtools stlobj;
+            stlobj.read_stl_file(stl_file, scale, center, reverse_normal);
 
-        const amrex::Real outside_value = 1.0; // Fluid
-        const amrex::Real inside_value = 0.0;  // Solid
-        marker.setVal(1.0);
-        stlobj.fill(
-            marker, marker.nGrowVect(), Geom(lev), outside_value, inside_value);
-        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host
-        // barrier
+            amrex::MultiFab marker(
+                m_stationary_mask[lev].boxArray(),
+                m_stationary_mask[lev].DistributionMap(), 1,
+                m_stationary_mask[lev].nGrow());
 
-        auto const& marker_arrs = marker.const_arrays();
-        auto const& mask_arrs = m_stationary_mask[lev].arrays();
-        amrex::ParallelFor(
-            m_stationary_mask[lev], m_stationary_mask[lev].nGrowVect(),
-            [=] AMREX_GPU_DEVICE(
-                int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
-                // Combine with existing mask (intersection of fluids -> min)
-                // 0=Solid, 1=Fluid. min(1, 0) = 0 (Solid).
-                int val = static_cast<int>(marker_arrs[nbx](i, j, k, 0));
-                mask_arrs[nbx](i, j, k) =
-                    amrex::min(mask_arrs[nbx](i, j, k), val);
-            });
-        // amrex::Gpu::synchronize(); // Optimization: Removed implicit host
-        // barrier
+            const amrex::Real outside_value = 1.0; // Fluid
+            const amrex::Real inside_value = 0.0;  // Solid
+            marker.setVal(1.0);
+            stlobj.fill(
+                marker, marker.nGrowVect(), Geom(lev), outside_value,
+                inside_value);
+            // amrex::Gpu::synchronize(); // Optimization: Removed implicit
+            // host barrier
+
+            auto const& marker_arrs = marker.const_arrays();
+            auto const& mask_arrs = m_stationary_mask[lev].arrays();
+            amrex::ParallelFor(
+                m_stationary_mask[lev], m_stationary_mask[lev].nGrowVect(),
+                [=] AMREX_GPU_DEVICE(
+                    int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
+                    // Combine with existing mask (intersection of fluids ->
+                    // min) 0=Solid, 1=Fluid. min(1, 0) = 0 (Solid).
+                    int val = static_cast<int>(marker_arrs[nbx](i, j, k, 0));
+                    mask_arrs[nbx](i, j, k) =
+                        amrex::min(mask_arrs[nbx](i, j, k), val);
+                });
+            // amrex::Gpu::synchronize(); // Optimization: Removed implicit
+            // host barrier
+        }
     }
 
     if (has_crack) {
