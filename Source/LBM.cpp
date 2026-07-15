@@ -2232,7 +2232,8 @@ void LBM::relax_f_to_equilibrium(const int lev)
                     constexpr amrex::Real EPS =
                         std::numeric_limits<amrex::Real>::epsilon();
                     constexpr amrex::Real DG_FLOOR = EPS * amrex::Real(100.0);
-                    constexpr amrex::Real GVAL_REL_TOL = EPS * amrex::Real(10.0);
+                    constexpr amrex::Real GVAL_REL_TOL =
+                        EPS * amrex::Real(10.0);
                     amrex::Real alpha = 2.0;
                     bool newton_converged = false;
                     for (int iter = 0; iter < 10; ++iter) {
@@ -2498,8 +2499,7 @@ void LBM::relax_f_to_equilibrium(const int lev)
                     // next stream + spill / replenish cycle will refill
                     // them from valid neighbours.
                     if (any_nonfinite || !std::isfinite(rho_comp)) {
-                        for (int q = 0; q < constants::N_MICRO_STATES;
-                             ++q) {
+                        for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
                             f_comp_arr(iv, q) = amrex::Real(0.0);
                         }
                         return;

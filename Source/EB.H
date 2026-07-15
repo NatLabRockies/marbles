@@ -58,10 +58,15 @@ void generate_voxel_cracks(
 // Ghost cells covered by the box array's periodicity are also written.
 // If `stl_file` cannot be opened or contains no triangles, aborts.
 void voxelize_stl_double_precision(
-    const std::string& stl_file, amrex::Real scale,
-    const amrex::Array<amrex::Real, 3>& center, int reverse_normal,
-    const amrex::Geometry& geom, amrex::iMultiFab& out, int comp = 0,
-    int inside_value = 0, int outside_value = 1);
+    const std::string& stl_file,
+    amrex::Real scale,
+    const amrex::Array<amrex::Real, 3>& center,
+    int reverse_normal,
+    const amrex::Geometry& geom,
+    amrex::iMultiFab& out,
+    int comp = 0,
+    int inside_value = 0,
+    int outside_value = 1);
 
 } // namespace lbm
 #endif

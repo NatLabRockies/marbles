@@ -1,10 +1,10 @@
 #include "EB.H"
 #include "Geometry.H"
 #include "Constants.H"
-#include <cstring> // for std::memcpy
-#include <sstream> // for CSV parsing
-#include <fstream> // for STL parsing in voxelize_stl_double_precision
-#include <cstdint> // for uint32_t in STL binary reader
+#include <cstring>   // for std::memcpy
+#include <sstream>   // for CSV parsing
+#include <fstream>   // for STL parsing in voxelize_stl_double_precision
+#include <cstdint>   // for uint32_t in STL binary reader
 #include <algorithm> // for std::min / std::max in triangle bbox reject
 #include <array>     // for std::array in the double-precision STL reader
 
@@ -29,8 +29,8 @@ using DTri = std::array<std::array<double, 3>, 3>; // 3 vertices, 3 coords each
 //   12  bytes  vertex 2 (3 x float32)
 //   12  bytes  vertex 3 (3 x float32)
 //    2  bytes  attribute byte count (discarded)
-static bool read_binary_stl_double(
-    const std::string& fname, std::vector<DTri>& tris)
+static bool
+read_binary_stl_double(const std::string& fname, std::vector<DTri>& tris)
 {
     std::ifstream is(fname, std::ios::binary);
     if (!is.good()) {
@@ -131,9 +131,7 @@ read_ascii_stl_double(const std::string& fname, std::vector<DTri>& tris)
 // coincidental edge hit would be perturbed by O(1e-16) and land
 // unambiguously on one side.
 static bool segment_triangle_intersect_double(
-    const double a[3],
-    const double b[3],
-    const DTri& tri)
+    const double a[3], const double b[3], const DTri& tri)
 {
     const double* t1 = tri[0].data();
     const double* t2 = tri[1].data();
@@ -154,8 +152,7 @@ static bool segment_triangle_intersect_double(
     const double e1[3] = {t2[0] - t1[0], t2[1] - t1[1], t2[2] - t1[2]};
     const double e2[3] = {t3[0] - t1[0], t3[1] - t1[1], t3[2] - t1[2]};
     const double n[3] = {
-        e1[1] * e2[2] - e1[2] * e2[1],
-        e1[2] * e2[0] - e1[0] * e2[2],
+        e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2],
         e1[0] * e2[1] - e1[1] * e2[0]};
 
     // Segment direction.
@@ -170,16 +167,14 @@ static bool segment_triangle_intersect_double(
     // Solve for parameter u in [0, 1] such that P = a + u*d lies on the
     // triangle's plane.  P - t1 . n = 0  =>  (a-t1 + u d) . n = 0.
     const double au_t1[3] = {t1[0] - a[0], t1[1] - a[1], t1[2] - a[2]};
-    const double u_num =
-        au_t1[0] * n[0] + au_t1[1] * n[1] + au_t1[2] * n[2];
+    const double u_num = au_t1[0] * n[0] + au_t1[1] * n[1] + au_t1[2] * n[2];
     const double u = u_num / dot_dn;
     if (u < 0.0 || u > 1.0) {
         return false;
     }
 
     // Intersection point in triangle plane.
-    const double P[3] = {
-        a[0] + u * d[0], a[1] + u * d[1], a[2] + u * d[2]};
+    const double P[3] = {a[0] + u * d[0], a[1] + u * d[1], a[2] + u * d[2]};
 
     // Barycentric coordinates via dot products (Ericson 2005).
     const double p1[3] = {P[0] - t1[0], P[1] - t1[1], P[2] - t1[2]};
@@ -205,17 +200,21 @@ static bool segment_triangle_intersect_double(
 // Public entry point (see EB.H for full documentation).
 // ---------------------------------------------------------------
 void voxelize_stl_double_precision(
-    const std::string& stl_file, amrex::Real scale_r,
-    const amrex::Array<amrex::Real, 3>& center_r, int reverse_normal,
-    const amrex::Geometry& geom, amrex::iMultiFab& out, int comp,
-    int inside_value, int outside_value)
+    const std::string& stl_file,
+    amrex::Real scale_r,
+    const amrex::Array<amrex::Real, 3>& center_r,
+    int reverse_normal,
+    const amrex::Geometry& geom,
+    amrex::iMultiFab& out,
+    int comp,
+    int inside_value,
+    int outside_value)
 {
     BL_PROFILE("LBM::voxelize_stl_double_precision()");
 
     const double scale = static_cast<double>(scale_r);
     const double center[3] = {
-        static_cast<double>(center_r[0]),
-        static_cast<double>(center_r[1]),
+        static_cast<double>(center_r[0]), static_cast<double>(center_r[1]),
         static_cast<double>(center_r[2])};
 
     // ---- Step 1: root reads the STL file in double, applies transform.
@@ -255,9 +254,8 @@ void voxelize_stl_double_precision(
             }
         }
 
-        amrex::Print() << "voxelize_stl_double_precision: " << stl_file
-                       << " (" << tris.size()
-                       << " triangles, scale=" << scale
+        amrex::Print() << "voxelize_stl_double_precision: " << stl_file << " ("
+                       << tris.size() << " triangles, scale=" << scale
                        << ", reverse_normal=" << reverse_normal << ")\n";
     }
 
@@ -303,12 +301,10 @@ void voxelize_stl_double_precision(
     const auto plo = geom.ProbLoArray();
     const auto dx = geom.CellSizeArray();
     const double plo_d[3] = {
-        static_cast<double>(plo[0]),
-        static_cast<double>(plo[1]),
+        static_cast<double>(plo[0]), static_cast<double>(plo[1]),
         static_cast<double>(plo[2])};
     const double dx_d[3] = {
-        static_cast<double>(dx[0]),
-        static_cast<double>(dx[1]),
+        static_cast<double>(dx[0]), static_cast<double>(dx[1]),
         static_cast<double>(dx[2])};
 
     const amrex::IntVect nghost = out.nGrowVect();
@@ -362,10 +358,10 @@ void voxelize_stl_double_precision(
                     }
                     // ptref is outside -> even crossings means cell is on
                     // the same side (outside), odd means opposite (inside).
-                    const int val = ((crossings & 1) == 0) ? outside_value
-                                                           : inside_value;
-                    hbuf[static_cast<size_t>(
-                        ii + nx_g * (jj + ny_g * kk))] = val;
+                    const int val =
+                        ((crossings & 1) == 0) ? outside_value : inside_value;
+                    hbuf[static_cast<size_t>(ii + nx_g * (jj + ny_g * kk))] =
+                        val;
                 }
             }
         }
@@ -471,18 +467,15 @@ void initialize_from_stl(
             const amrex::Real inside_value = 0.0;
             marker.setVal(1.0);
             stlobj.fill(
-                marker, marker.nGrowVect(), geom, outside_value,
-                inside_value);
+                marker, marker.nGrowVect(), geom, outside_value, inside_value);
             amrex::Gpu::synchronize();
 
             auto const& marker_arrs = marker.const_arrays();
             auto const& is_fluid_arrs = is_fluid.arrays();
             amrex::ParallelFor(
                 is_fluid, is_fluid.nGrowVect(),
-                [=] AMREX_GPU_DEVICE(
-                    int nbx, int i, int j, int k) noexcept {
-                    is_fluid_arrs[nbx](
-                        i, j, k, lbm::constants::IS_FLUID_IDX) =
+                [=] AMREX_GPU_DEVICE(int nbx, int i, int j, int k) noexcept {
+                    is_fluid_arrs[nbx](i, j, k, lbm::constants::IS_FLUID_IDX) =
                         static_cast<int>(marker_arrs[nbx](i, j, k, 0));
                 });
             amrex::Gpu::synchronize();
