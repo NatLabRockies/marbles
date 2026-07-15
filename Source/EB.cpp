@@ -10,6 +10,7 @@
 
 namespace lbm {
 
+#if (AMREX_SPACEDIM == 3)
 namespace {
 
 // ---------------------------------------------------------------
@@ -29,8 +30,7 @@ using DTri = std::array<std::array<double, 3>, 3>; // 3 vertices, 3 coords each
 //   12  bytes  vertex 2 (3 x float32)
 //   12  bytes  vertex 3 (3 x float32)
 //    2  bytes  attribute byte count (discarded)
-static bool
-read_binary_stl_double(const std::string& fname, std::vector<DTri>& tris)
+bool read_binary_stl_double(const std::string& fname, std::vector<DTri>& tris)
 {
     std::ifstream is(fname, std::ios::binary);
     if (!is.good()) {
@@ -74,8 +74,7 @@ read_binary_stl_double(const std::string& fname, std::vector<DTri>& tris)
 //     endfacet
 //     ...
 //   endsolid
-static bool
-read_ascii_stl_double(const std::string& fname, std::vector<DTri>& tris)
+bool read_ascii_stl_double(const std::string& fname, std::vector<DTri>& tris)
 {
     std::ifstream is(fname);
     if (!is.good()) {
@@ -130,7 +129,7 @@ read_ascii_stl_double(const std::string& fname, std::vector<DTri>& tris)
 // picks such a point in `voxelize_stl_double_precision`); any
 // coincidental edge hit would be perturbed by O(1e-16) and land
 // unambiguously on one side.
-static bool segment_triangle_intersect_double(
+bool segment_triangle_intersect_double(
     const double a[3], const double b[3], const DTri& tri)
 {
     const double* t1 = tri[0].data();
@@ -139,11 +138,11 @@ static bool segment_triangle_intersect_double(
 
     // Bounding-box quick reject (per-axis, both directions).
     for (int d = 0; d < 3; ++d) {
-        const double tlo = std::min({t1[d], t2[d], t3[d]});
-        const double thi = std::max({t1[d], t2[d], t3[d]});
-        const double slo = std::min(a[d], b[d]);
-        const double shi = std::max(a[d], b[d]);
-        if (shi < tlo || slo > thi) {
+        const double tri_lo = std::min({t1[d], t2[d], t3[d]});
+        const double tri_hi = std::max({t1[d], t2[d], t3[d]});
+        const double seg_lo = std::min(a[d], b[d]);
+        const double seg_hi = std::max(a[d], b[d]);
+        if (seg_hi < tri_lo || seg_lo > tri_hi) {
             return false;
         }
     }
@@ -195,6 +194,7 @@ static bool segment_triangle_intersect_double(
 }
 
 } // anonymous namespace
+#endif // AMREX_SPACEDIM == 3
 
 // ---------------------------------------------------------------
 // Public entry point (see EB.H for full documentation).
@@ -212,7 +212,19 @@ void voxelize_stl_double_precision(
 {
     BL_PROFILE("LBM::voxelize_stl_double_precision()");
 
-    const double scale = static_cast<double>(scale_r);
+#if (AMREX_SPACEDIM != 3)
+    // STL voxelization is intrinsically 3D.  This function should never be
+    // reached in 2D builds -- callers in EB.cpp / LBM.cpp guard the FLOAT
+    // branch with the same #if.  Provide an abort stub so link and
+    // -Warray-bounds succeed even if a 2D FLOAT test is ever added.
+    amrex::ignore_unused(
+        stl_file, scale_r, center_r, reverse_normal, geom, out, comp,
+        inside_value, outside_value);
+    amrex::Abort(
+        "voxelize_stl_double_precision: STL voxelization requires "
+        "AMREX_SPACEDIM == 3");
+#else
+    const auto scale = static_cast<double>(scale_r);
     const double center[3] = {
         static_cast<double>(center_r[0]), static_cast<double>(center_r[1]),
         static_cast<double>(center_r[2])};
@@ -249,7 +261,7 @@ void voxelize_stl_double_precision(
             // reverse_normal semantics from amrex::STLtools: swap v1<->v2.
             // The intersection test is winding-independent, but we honour
             // the flip for parity with the AMReX path.
-            if (reverse_normal) {
+            if (reverse_normal != 0) {
                 std::swap(tri[0], tri[1]);
             }
         }
@@ -260,10 +272,10 @@ void voxelize_stl_double_precision(
     }
 
     // ---- Step 2: broadcast the triangle list to all ranks.
-    long ntri_l = static_cast<long>(tris.size());
+    auto ntri_l = static_cast<long>(tris.size());
     amrex::ParallelDescriptor::Bcast(
         &ntri_l, 1, amrex::ParallelDescriptor::IOProcessorNumber());
-    const size_t ntri = static_cast<size_t>(ntri_l);
+    const auto ntri = static_cast<size_t>(ntri_l);
     if (ntri == 0) {
         amrex::Abort(
             "voxelize_stl_double_precision: 0 triangles read from " + stl_file);
@@ -287,8 +299,12 @@ void voxelize_stl_double_precision(
     for (const auto& tri : tris) {
         for (int v = 0; v < 3; ++v) {
             for (int d = 0; d < 3; ++d) {
-                if (tri[v][d] < bbmin[d]) bbmin[d] = tri[v][d];
-                if (tri[v][d] > bbmax[d]) bbmax[d] = tri[v][d];
+                if (tri[v][d] < bbmin[d]) {
+                    bbmin[d] = tri[v][d];
+                }
+                if (tri[v][d] > bbmax[d]) {
+                    bbmax[d] = tri[v][d];
+                }
             }
         }
     }
@@ -315,10 +331,10 @@ void voxelize_stl_double_precision(
         const amrex::Box gbox = amrex::grow(mfi.validbox(), nghost);
         const auto lo = amrex::lbound(gbox);
         const auto hi = amrex::ubound(gbox);
-        const long nx_g = static_cast<long>(hi.x - lo.x + 1);
-        const long ny_g = static_cast<long>(hi.y - lo.y + 1);
-        const long nz_g = static_cast<long>(hi.z - lo.z + 1);
-        const long npts = nx_g * ny_g * nz_g;
+        const int nx_g = hi.x - lo.x + 1;
+        const int ny_g = hi.y - lo.y + 1;
+        const int nz_g = hi.z - lo.z + 1;
+        const long npts = static_cast<long>(nx_g) * ny_g * nz_g;
 
         std::vector<int> hbuf(static_cast<size_t>(npts), outside_value);
 
@@ -378,6 +394,7 @@ void voxelize_stl_double_precision(
 
     amrex::Gpu::synchronize();
     out.FillBoundary(geom.periodicity());
+#endif // AMREX_SPACEDIM == 3
 }
 
 void initialize_eb(const amrex::Geometry& geom, const int max_level)
