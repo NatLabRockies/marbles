@@ -2219,7 +2219,20 @@ void LBM::relax_f_to_equilibrium(const int lev)
                 }
 
                 if (all_positive) {
-                    // Newton: g(alpha) = H(f + alpha*s) - H0 = 0
+                    // Newton: g(alpha) = H(f + alpha*s) - H0 = 0.
+                    // Precision-aware convergence tolerances: the hard
+                    // 1e-14 / 1e-12 values baked in below were tuned for
+                    // DOUBLE (eps ~= 1e-16), but for FLOAT (eps ~= 1.2e-7)
+                    // a |dg| of 1e-13 is pure rounding noise yet still
+                    // passes the < 1e-14 check, so  alpha -= gval/dg
+                    // produces spurious huge updates that eventually push
+                    // the populations into the [COMP_NaN] cascade.  Scale
+                    // with numeric_limits::epsilon so both precisions get
+                    // meaningful floors.
+                    constexpr amrex::Real EPS =
+                        std::numeric_limits<amrex::Real>::epsilon();
+                    constexpr amrex::Real DG_FLOOR = EPS * amrex::Real(100.0);
+                    constexpr amrex::Real GVAL_REL_TOL = EPS * amrex::Real(10.0);
                     amrex::Real alpha = 2.0;
                     bool newton_converged = false;
                     for (int iter = 0; iter < 10; ++iter) {
@@ -2236,14 +2249,14 @@ void LBM::relax_f_to_equilibrium(const int lev)
                             gval += fhat * ln_ratio;
                             dg += sq * (ln_ratio + 1.0);
                         }
-                        if (!fhat_positive || fabs(dg) < 1.0e-14) {
+                        if (!fhat_positive || fabs(dg) < DG_FLOOR) {
                             break;
                         }
                         alpha -= gval / dg;
                         alpha = amrex::min(
                             amrex::Real(2.0),
                             amrex::max(amrex::Real(0.0), alpha));
-                        if (fabs(gval) < 1.0e-12 * (fabs(H0) + 1.0e-30)) {
+                        if (fabs(gval) < GVAL_REL_TOL * (fabs(H0) + DG_FLOOR)) {
                             newton_converged = true;
                             break;
                         }
@@ -2458,8 +2471,38 @@ void LBM::relax_f_to_equilibrium(const int lev)
                     const auto eq_unit_arr = eq_unit_arrs[nbx];
 
                     amrex::Real rho_comp = 0.0;
+                    bool any_nonfinite = false;
                     for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
-                        rho_comp += f_comp_arr(iv, q);
+                        const amrex::Real fq = f_comp_arr(iv, q);
+                        if (!std::isfinite(fq)) {
+                            any_nonfinite = true;
+                            break;
+                        }
+                        rho_comp += fq;
+                    }
+
+                    // FLOAT-precision safety net: a cell whose component
+                    // populations acquired NaN / Inf via streaming from a
+                    // corrupted neighbour (typical origin: spurious
+                    // CELL_GAS spawned by FSLBM interface degradation
+                    // after ~1e6 steps in FLOAT) or via the IFC->GAS
+                    // spill of an already-bad source must be RESET to a
+                    // clean zero state before the entropic solver runs
+                    // on it.  Otherwise rho_comp <= 1e-30 evaluates to
+                    // FALSE for NaN (unordered compare), control falls
+                    // through, and the Newton iteration produces more
+                    // NaN that streams to more cells next step -- a
+                    // whole-plane cascade of [COMP_NaN] as observed in
+                    // run 15180708 (147 cells at k=6 in a single stats
+                    // window).  Zero-clean the populations here; the
+                    // next stream + spill / replenish cycle will refill
+                    // them from valid neighbours.
+                    if (any_nonfinite || !std::isfinite(rho_comp)) {
+                        for (int q = 0; q < constants::N_MICRO_STATES;
+                             ++q) {
+                            f_comp_arr(iv, q) = amrex::Real(0.0);
+                        }
+                        return;
                     }
 
                     const amrex::Real temperature =
@@ -2548,7 +2591,16 @@ void LBM::relax_f_to_equilibrium(const int lev)
 
                         if (all_positive) {
                             // Newton iteration: g(alpha) = H(f + alpha*s) - H0
-                            // = 0
+                            // = 0.  Precision-aware tolerances (see the
+                            // twin comment in the main f-lattice entropic
+                            // solve above): scale with epsilon so FLOAT
+                            // and DOUBLE both have meaningful floors.
+                            constexpr amrex::Real EPS =
+                                std::numeric_limits<amrex::Real>::epsilon();
+                            constexpr amrex::Real DG_FLOOR =
+                                EPS * amrex::Real(100.0);
+                            constexpr amrex::Real GVAL_REL_TOL =
+                                EPS * amrex::Real(10.0);
                             amrex::Real alpha =
                                 2.0; // start at BGK mirror point
                             bool newton_converged = false;
@@ -2569,7 +2621,7 @@ void LBM::relax_f_to_equilibrium(const int lev)
                                     gval += fhat * ln_fhat_w;
                                     dg += sq * (ln_fhat_w + 1.0);
                                 }
-                                if (!fhat_positive || fabs(dg) < 1.0e-14) {
+                                if (!fhat_positive || fabs(dg) < DG_FLOOR) {
                                     break;
                                 }
                                 alpha -= gval / dg;
@@ -2578,7 +2630,7 @@ void LBM::relax_f_to_equilibrium(const int lev)
                                     amrex::Real(2.0),
                                     amrex::max(amrex::Real(0.0), alpha));
                                 if (fabs(gval) <
-                                    1.0e-12 * (fabs(H0) + 1.0e-30)) {
+                                    GVAL_REL_TOL * (fabs(H0) + DG_FLOOR)) {
                                     newton_converged = true;
                                     break;
                                 }
@@ -9969,6 +10021,28 @@ void LBM::fslbm_advance_surface(const int lev)
                     // 2nd pass: distribute f_comp[q] proportionally to the
                     // chosen target set (LIQUID preferred, else IFC).
                     const amrex::Real inv_wsum = amrex::Real(1.0) / wsum;
+                    // FLOAT-precision guard: pre-check the source cell for
+                    // non-finite populations.  A single NaN in f_comp[q]
+                    // of a converting cell would multiply through the
+                    // spill weights and Atomic::AddNoRet into neighbouring
+                    // LIQUID cells, silently poisoning them (they then
+                    // fail the component collision next step -- the same
+                    // whole-plane [COMP_NaN] cascade motivating the entry-
+                    // guard in relax component collision).  Zero the
+                    // source and skip spill on any non-finite payload.
+                    bool source_finite = true;
+                    for (int q = 0; q < N_MICRO_STATES; ++q) {
+                        if (!std::isfinite(f_comp_arrs[nbx](i, j, k, q))) {
+                            source_finite = false;
+                            break;
+                        }
+                    }
+                    if (!source_finite) {
+                        for (int q = 0; q < N_MICRO_STATES; ++q) {
+                            f_comp_arrs[nbx](i, j, k, q) = amrex::Real(0.0);
+                        }
+                        return;
+                    }
                     for (int nq = 1; nq < N_MICRO_STATES; ++nq) {
                         const int ni = i + evs[nq][0];
                         const int nj = j + evs[nq][1];
