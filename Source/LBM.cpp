@@ -5327,6 +5327,29 @@ void LBM::reconstruct_body_sdf(const int lev, amrex::Real time)
 
     if (omega_mag > 1e-12) {
         m_body_rotation_angle += omega_mag * dt;
+        // Wrap the accumulator into [0, 2*PI) each step so that the
+        // downstream cos_theta / sin_theta computations always see a
+        // small argument.  Without this wrap, m_body_rotation_angle
+        // grows unboundedly (~0.0005 rad/step for the kLa bioreactor
+        // gives ~419 rad after 10 s physical); when the file is
+        // compiled with PRECISION=FLOAT and CUDA `--use_fast_math`,
+        // the intrinsic __cosf / __sinf are only accurate for
+        // |theta| < ~100, and beyond that they can produce O(1e-2)
+        // rad errors.  That perturbs the rotated point enough to
+        // flip the voxel-index truncation at STL-boundary cells and
+        // is visible in ParaView as spurious solid patches near the
+        // impeller hub in FLOAT runs (DOUBLE is unaffected because
+        // its eps is 1e-16, but wrapping is harmless there and
+        // keeps behaviour precision-independent).
+        const amrex::Real two_pi =
+            amrex::Real(2.0) * amrex::Math::pi<amrex::Real>();
+        if (m_body_rotation_angle >= two_pi ||
+            m_body_rotation_angle < amrex::Real(0.0)) {
+            m_body_rotation_angle = std::fmod(m_body_rotation_angle, two_pi);
+            if (m_body_rotation_angle < amrex::Real(0.0)) {
+                m_body_rotation_angle += two_pi;
+            }
+        }
         if (m_print_int > 0 && m_isteps[0] % m_print_int == 0) {
             amrex::Print() << "Updating rotation: dt=" << dt
                            << " omega=" << omega_mag
@@ -6604,6 +6627,20 @@ void LBM::read_checkpoint_file()
         } else {
             theta = omega_mag_target *
                     (T - amrex::Real(0.5) * static_cast<amrex::Real>(N));
+        }
+        // Wrap into [0, 2*PI) for the same reason as in
+        // reconstruct_body_sdf: keep the sin/cos argument bounded so
+        // FLOAT builds with --use_fast_math don't lose precision at
+        // long restart times.
+        {
+            const amrex::Real two_pi =
+                amrex::Real(2.0) * amrex::Math::pi<amrex::Real>();
+            if (theta >= two_pi || theta < amrex::Real(0.0)) {
+                theta = std::fmod(theta, two_pi);
+                if (theta < amrex::Real(0.0)) {
+                    theta += two_pi;
+                }
+            }
         }
         m_body_rotation_angle = theta;
         amrex::Print() << "[restart] Restored body rotation angle = "
