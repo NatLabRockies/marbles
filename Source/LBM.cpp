@@ -2204,68 +2204,109 @@ void LBM::relax_f_to_equilibrium(const int lev)
                         }
                     }
                 }
-                amrex::Real alpha_use = amrex::max(alpha_pos * 0.95, 0.0);
+                // Fallback in case Newton is skipped or fails.  Safety
+                // factor 0.9 (was 0.95): a slightly larger positivity
+                // margin buys robustness in FLOAT high-shear cells whose
+                // alpha_pos is set by a marginally-positive population.
+                amrex::Real alpha_use =
+                    amrex::max(alpha_pos * amrex::Real(0.9), amrex::Real(0.0));
 
-                // Attempt Newton only when all pre-collision pops are positive
-                amrex::Real H0 = 0.0;
-                bool all_positive = true;
+                // --- Fast path for near-equilibrium cells ---
+                // If |f - f_eq|^2 << |f|^2 the flow is smooth enough that
+                // the Newton solve would resolve to alpha ~ omega anyway,
+                // and its 27 log evaluations per iteration hit precision
+                // noise floors in FLOAT where they matter least.  Detect
+                // via a cheap Σs²/Σf² ratio and skip the Newton in that
+                // regime.
+                amrex::Real ssum = 0.0, fsum = 0.0;
                 for (int q = 0; q < NQ; ++q) {
-                    const amrex::Real fq = f_arr(iv, q);
-                    if (fq <= 0.0) {
-                        all_positive = false;
-                        break;
-                    }
-                    H0 += fq * log(fq / f_ref[q]);
+                    const amrex::Real sq_val = eq_all[q] - f_arr(iv, q);
+                    const amrex::Real fq_val = f_arr(iv, q);
+                    ssum += sq_val * sq_val;
+                    fsum += fq_val * fq_val;
                 }
+                const bool near_eq = (ssum < amrex::Real(1.0e-4) * fsum);
 
-                if (all_positive) {
-                    // Newton: g(alpha) = H(f + alpha*s) - H0 = 0.
-                    // Precision-aware convergence tolerances: the hard
-                    // 1e-14 / 1e-12 values baked in below were tuned for
-                    // DOUBLE (eps ~= 1e-16), but for FLOAT (eps ~= 1.2e-7)
-                    // a |dg| of 1e-13 is pure rounding noise yet still
-                    // passes the < 1e-14 check, so  alpha -= gval/dg
-                    // produces spurious huge updates that eventually push
-                    // the populations into the [COMP_NaN] cascade.  Scale
-                    // with numeric_limits::epsilon so both precisions get
-                    // meaningful floors.
-                    constexpr amrex::Real EPS =
-                        std::numeric_limits<amrex::Real>::epsilon();
-                    constexpr amrex::Real DG_FLOOR = EPS * amrex::Real(100.0);
-                    constexpr amrex::Real GVAL_REL_TOL =
-                        EPS * amrex::Real(10.0);
-                    amrex::Real alpha = 2.0;
-                    bool newton_converged = false;
-                    for (int iter = 0; iter < 10; ++iter) {
-                        amrex::Real gval = -H0, dg = 0.0;
-                        bool fhat_positive = true;
-                        for (int q = 0; q < NQ; ++q) {
-                            const amrex::Real sq = eq_all[q] - f_arr(iv, q);
-                            const amrex::Real fhat = f_arr(iv, q) + alpha * sq;
-                            if (fhat <= 0.0) {
-                                fhat_positive = false;
+                if (near_eq) {
+                    // BGK step is safe within positivity limit.
+                    alpha_use = amrex::min(omega, alpha_pos);
+                } else {
+                    // Attempt Newton only when all pre-collision pops are
+                    // positive (H0 is well-defined).
+                    amrex::Real H0 = 0.0;
+                    bool all_positive = true;
+                    for (int q = 0; q < NQ; ++q) {
+                        const amrex::Real fq = f_arr(iv, q);
+                        if (fq <= 0.0) {
+                            all_positive = false;
+                            break;
+                        }
+                        // log1p((fq - f_ref)/f_ref) preserves the low bits
+                        // of the ratio for near-equilibrium f (where the
+                        // classical log(fq/f_ref) suffers from the 1+eps
+                        // being computed before log).
+                        const amrex::Real eps_q = (fq - f_ref[q]) / f_ref[q];
+                        H0 += fq * log1p(eps_q);
+                    }
+
+                    if (all_positive) {
+                        // Newton: g(alpha) = H(f + alpha*s) - H0 = 0.
+                        // Precision-aware convergence tolerances: the hard
+                        // 1e-14 / 1e-12 values baked in for DOUBLE are pure
+                        // rounding noise in FLOAT and let dg-corrupted
+                        // Newton updates through; scale with epsilon so
+                        // both precisions get meaningful floors.  Step
+                        // magnitude is capped at MAX_STEP so a spuriously
+                        // small |dg| cannot spawn a huge alpha excursion.
+                        constexpr amrex::Real EPS =
+                            std::numeric_limits<amrex::Real>::epsilon();
+                        constexpr amrex::Real DG_FLOOR =
+                            EPS * amrex::Real(100.0);
+                        constexpr amrex::Real GVAL_REL_TOL =
+                            EPS * amrex::Real(10.0);
+                        constexpr auto MAX_STEP = amrex::Real(0.5);
+
+                        amrex::Real alpha = 2.0;
+                        bool newton_converged = false;
+                        for (int iter = 0; iter < 10; ++iter) {
+                            amrex::Real gval = -H0, dg = 0.0;
+                            bool fhat_positive = true;
+                            for (int q = 0; q < NQ; ++q) {
+                                const amrex::Real sq = eq_all[q] - f_arr(iv, q);
+                                const amrex::Real fhat =
+                                    f_arr(iv, q) + alpha * sq;
+                                if (fhat <= 0.0) {
+                                    fhat_positive = false;
+                                    break;
+                                }
+                                const amrex::Real eps_h =
+                                    (fhat - f_ref[q]) / f_ref[q];
+                                const amrex::Real ln_ratio = log1p(eps_h);
+                                gval += fhat * ln_ratio;
+                                dg += sq * (ln_ratio + 1.0);
+                            }
+                            if (!fhat_positive || fabs(dg) < DG_FLOOR) {
                                 break;
                             }
-                            const amrex::Real ln_ratio = log(fhat / f_ref[q]);
-                            gval += fhat * ln_ratio;
-                            dg += sq * (ln_ratio + 1.0);
+                            // Damped Newton: cap step magnitude at MAX_STEP.
+                            amrex::Real step = -gval / dg;
+                            step = amrex::min(
+                                MAX_STEP, amrex::max(-MAX_STEP, step));
+                            alpha += step;
+                            alpha = amrex::min(
+                                amrex::Real(2.0),
+                                amrex::max(amrex::Real(0.0), alpha));
+                            if (fabs(gval) <
+                                GVAL_REL_TOL * (fabs(H0) + DG_FLOOR)) {
+                                newton_converged = true;
+                                break;
+                            }
                         }
-                        if (!fhat_positive || fabs(dg) < DG_FLOOR) {
-                            break;
+                        if (newton_converged) {
+                            alpha_use = amrex::min(omega, alpha);
                         }
-                        alpha -= gval / dg;
-                        alpha = amrex::min(
-                            amrex::Real(2.0),
-                            amrex::max(amrex::Real(0.0), alpha));
-                        if (fabs(gval) < GVAL_REL_TOL * (fabs(H0) + DG_FLOOR)) {
-                            newton_converged = true;
-                            break;
-                        }
+                        // else: alpha_use remains the 0.9*alpha_pos fallback
                     }
-                    if (newton_converged) {
-                        alpha_use = amrex::min(omega, alpha);
-                    }
-                    // else: alpha_use remains positivity-preserving fallback
                 }
 
                 // -----------------------------------------------------------
@@ -2568,78 +2609,115 @@ void LBM::relax_f_to_equilibrium(const int lev)
                                 }
                             }
                         }
-                        alpha_use = amrex::max(alpha_pos * 0.95, 0.0);
+                        alpha_use = amrex::max(
+                            alpha_pos * amrex::Real(0.9), amrex::Real(0.0));
 
-                        // Attempt the full entropic solve only when all
-                        // pre-collision populations are strictly positive (H0
-                        // is well-defined).
-                        amrex::Real H0 = 0.0;
-                        bool all_positive = true;
+                        // Fast path for near-equilibrium cells: skip the
+                        // full entropic Newton when |f_comp - f_eq|^2 is
+                        // tiny compared to |f_comp|^2.  See main f-lattice
+                        // solver above for the rationale.
+                        amrex::Real ssum_c = 0.0, fsum_c = 0.0;
                         for (int q = 0; q < NQ; ++q) {
-                            amrex::Real fq = f_comp_arr(iv, q);
-                            if (fq <= 0.0) {
-                                all_positive = false;
-                                break;
-                            }
-                            amrex::Real eq_ref_q = eq_unit_arr(iv, q + NQ);
-                            if (eq_ref_q <= 0.0 || std::isnan(eq_ref_q)) {
-                                all_positive = false;
-                                break;
-                            }
-                            H0 += fq * log(fq / eq_ref_q);
+                            const amrex::Real sq_val =
+                                eq_all[q] - f_comp_arr(iv, q);
+                            const amrex::Real fq_val = f_comp_arr(iv, q);
+                            ssum_c += sq_val * sq_val;
+                            fsum_c += fq_val * fq_val;
                         }
+                        const bool near_eq_c =
+                            (ssum_c < amrex::Real(1.0e-4) * fsum_c);
 
-                        if (all_positive) {
-                            // Newton iteration: g(alpha) = H(f + alpha*s) - H0
-                            // = 0.  Precision-aware tolerances (see the
-                            // twin comment in the main f-lattice entropic
-                            // solve above): scale with epsilon so FLOAT
-                            // and DOUBLE both have meaningful floors.
-                            constexpr amrex::Real EPS =
-                                std::numeric_limits<amrex::Real>::epsilon();
-                            constexpr amrex::Real DG_FLOOR =
-                                EPS * amrex::Real(100.0);
-                            constexpr amrex::Real GVAL_REL_TOL =
-                                EPS * amrex::Real(10.0);
-                            amrex::Real alpha =
-                                2.0; // start at BGK mirror point
-                            bool newton_converged = false;
-                            for (int iter = 0; iter < 10; ++iter) {
-                                amrex::Real gval = -H0, dg = 0.0;
-                                bool fhat_positive = true;
-                                for (int q = 0; q < NQ; ++q) {
-                                    amrex::Real sq =
-                                        eq_all[q] - f_comp_arr(iv, q);
-                                    amrex::Real fhat =
-                                        f_comp_arr(iv, q) + alpha * sq;
-                                    if (fhat <= 0.0) {
-                                        fhat_positive = false;
+                        if (near_eq_c) {
+                            alpha_use = amrex::min(omega_comp, alpha_pos);
+                        } else {
+                            // Attempt the full entropic solve only when all
+                            // pre-collision populations are strictly
+                            // positive (H0 is well-defined).
+                            amrex::Real H0 = 0.0;
+                            bool all_positive = true;
+                            for (int q = 0; q < NQ; ++q) {
+                                amrex::Real fq = f_comp_arr(iv, q);
+                                if (fq <= 0.0) {
+                                    all_positive = false;
+                                    break;
+                                }
+                                amrex::Real eq_ref_q = eq_unit_arr(iv, q + NQ);
+                                if (eq_ref_q <= 0.0 || std::isnan(eq_ref_q)) {
+                                    all_positive = false;
+                                    break;
+                                }
+                                // log1p((fq - eq_ref)/eq_ref) — see main
+                                // f-lattice solver for the near-equilibrium
+                                // precision argument.
+                                const amrex::Real eps_q =
+                                    (fq - eq_ref_q) / eq_ref_q;
+                                H0 += fq * log1p(eps_q);
+                            }
+
+                            if (all_positive) {
+                                // Newton iteration: g(alpha) = H(f + alpha*s)
+                                // - H0 = 0.  Precision-aware tolerances (see
+                                // main f-lattice solver): scale with epsilon
+                                // so FLOAT and DOUBLE both have meaningful
+                                // floors.  Step magnitude capped at MAX_STEP
+                                // (damped Newton) so a spuriously small
+                                // |dg| cannot spawn a huge alpha excursion
+                                // in FLOAT.
+                                constexpr amrex::Real EPS =
+                                    std::numeric_limits<amrex::Real>::epsilon();
+                                constexpr amrex::Real DG_FLOOR =
+                                    EPS * amrex::Real(100.0);
+                                constexpr amrex::Real GVAL_REL_TOL =
+                                    EPS * amrex::Real(10.0);
+                                constexpr auto MAX_STEP = amrex::Real(0.5);
+
+                                amrex::Real alpha =
+                                    2.0; // start at BGK mirror point
+                                bool newton_converged = false;
+                                for (int iter = 0; iter < 10; ++iter) {
+                                    amrex::Real gval = -H0, dg = 0.0;
+                                    bool fhat_positive = true;
+                                    for (int q = 0; q < NQ; ++q) {
+                                        amrex::Real sq =
+                                            eq_all[q] - f_comp_arr(iv, q);
+                                        amrex::Real fhat =
+                                            f_comp_arr(iv, q) + alpha * sq;
+                                        if (fhat <= 0.0) {
+                                            fhat_positive = false;
+                                            break;
+                                        }
+                                        const amrex::Real eps_h =
+                                            (fhat - eq_unit_arr(iv, q + NQ)) /
+                                            eq_unit_arr(iv, q + NQ);
+                                        const amrex::Real ln_fhat_w =
+                                            log1p(eps_h);
+                                        gval += fhat * ln_fhat_w;
+                                        dg += sq * (ln_fhat_w + 1.0);
+                                    }
+                                    if (!fhat_positive || fabs(dg) < DG_FLOOR) {
                                         break;
                                     }
-                                    amrex::Real ln_fhat_w =
-                                        log(fhat / eq_unit_arr(iv, q + NQ));
-                                    gval += fhat * ln_fhat_w;
-                                    dg += sq * (ln_fhat_w + 1.0);
+                                    // Damped Newton: cap step magnitude.
+                                    amrex::Real step = -gval / dg;
+                                    step = amrex::min(
+                                        MAX_STEP, amrex::max(-MAX_STEP, step));
+                                    alpha += step;
+                                    // clamp to [0, 2] for safety
+                                    alpha = amrex::min(
+                                        amrex::Real(2.0),
+                                        amrex::max(amrex::Real(0.0), alpha));
+                                    if (fabs(gval) <
+                                        GVAL_REL_TOL * (fabs(H0) + DG_FLOOR)) {
+                                        newton_converged = true;
+                                        break;
+                                    }
                                 }
-                                if (!fhat_positive || fabs(dg) < DG_FLOOR) {
-                                    break;
+                                if (newton_converged) {
+                                    alpha_use = amrex::min(omega_comp, alpha);
                                 }
-                                alpha -= gval / dg;
-                                // clamp to [0, 2] for safety
-                                alpha = amrex::min(
-                                    amrex::Real(2.0),
-                                    amrex::max(amrex::Real(0.0), alpha));
-                                if (fabs(gval) <
-                                    GVAL_REL_TOL * (fabs(H0) + DG_FLOOR)) {
-                                    newton_converged = true;
-                                    break;
-                                }
+                                // else: alpha_use remains 0.9*alpha_pos
+                                // fallback
                             }
-                            if (newton_converged) {
-                                alpha_use = amrex::min(omega_comp, alpha);
-                            }
-                            // else: alpha_use remains positivity-preserving
-                            // fallback
                         }
                     }
 
