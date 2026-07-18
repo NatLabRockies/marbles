@@ -4437,6 +4437,31 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                     return;
                 }
 
+                // Sanitize source before spilling.  A newly-solid cell can
+                // inherit non-finite f/g from streaming while it was still
+                // fluid (a corrupted upstream neighbour, entropic Newton
+                // failure in FLOAT, etc.), and without this check we would
+                // atomically propagate NaN/Inf into every LIQUID/INTERFACE
+                // neighbour listed above -- exactly the failure mode that
+                // motivated the 8a71131 guard on the FSLBM IFC->GAS
+                // component spill, but here on the moving-body path.
+                // Mass in this one cell is lost; the domain stays finite.
+                bool source_finite = true;
+                for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+                    if (!std::isfinite(f_arrs[nbx](i, j, k, q)) ||
+                        !std::isfinite(g_arrs[nbx](i, j, k, q))) {
+                        source_finite = false;
+                        break;
+                    }
+                }
+                if (!source_finite) {
+                    for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+                        f_arrs[nbx](i, j, k, q) = 0.0;
+                        g_arrs[nbx](i, j, k, q) = 0.0;
+                    }
+                    return;
+                }
+
                 // Second pass: distribute to neighbors using normalized weights
                 for (int nq = 1; nq < constants::N_MICRO_STATES; ++nq) {
                     int ni = i + evs[nq][0];
@@ -4596,6 +4621,29 @@ void LBM::refill_and_spill(const int lev, amrex::Real threshold)
                 // If still no fluid neighbor (cell fully buried in solid), mass
                 // is lost
                 if (weight_sum == 0.0) {
+                    for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+                        f_comp_arrs[nbx](i, j, k, q) = 0.0;
+                    }
+                    return;
+                }
+
+                // Sanitize source before spilling (see main-lattice spill
+                // above and the FSLBM IFC->GAS guard added in 8a71131).
+                // Motivating failure: run 15262930 developed negative and
+                // then non-finite component densities in solid cells over
+                // ~1.7M steps, and the atomic AddNoRet below propagated
+                // those into fluid neighbours -- the next entropic-Newton
+                // pass hit log(negative) = NaN and the whole component
+                // lattice cascaded.  Losing this one cell's mass is
+                // preferable to poisoning its neighbours.
+                bool source_finite_c = true;
+                for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
+                    if (!std::isfinite(f_comp_arrs[nbx](i, j, k, q))) {
+                        source_finite_c = false;
+                        break;
+                    }
+                }
+                if (!source_finite_c) {
                     for (int q = 0; q < constants::N_MICRO_STATES; ++q) {
                         f_comp_arrs[nbx](i, j, k, q) = 0.0;
                     }
@@ -7125,12 +7173,23 @@ void LBM::compute_dissolved_o2_average(
             [=] AMREX_GPU_DEVICE(
                 int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 const int ct = ct_a[nbx](i, j, k, 0);
+                const amrex::Real r = rho_a[nbx](i, j, k, 0);
+                // Defense in depth: a single corrupted rho_o2 cell would
+                // otherwise NaN-poison the domain-wide MultiFab::sum below
+                // and SIGFPE the run.  Skip and rely on the spill / entropic
+                // guards elsewhere to repair the underlying condition.
+                if (!std::isfinite(r)) {
+                    return;
+                }
                 if (ct == constants::CELL_LIQUID) {
-                    acc_a[nbx](i, j, k, 0) = rho_a[nbx](i, j, k, 0);
+                    acc_a[nbx](i, j, k, 0) = r;
                     acc_a[nbx](i, j, k, 1) = amrex::Real(1.0);
                 } else if (ct == constants::CELL_INTERFACE) {
                     const amrex::Real phi = phi_a[nbx](i, j, k, 0);
-                    acc_a[nbx](i, j, k, 0) = rho_a[nbx](i, j, k, 0) * phi;
+                    if (!std::isfinite(phi)) {
+                        return;
+                    }
+                    acc_a[nbx](i, j, k, 0) = r * phi;
                     acc_a[nbx](i, j, k, 1) = phi;
                 }
             });
@@ -7141,7 +7200,11 @@ void LBM::compute_dissolved_o2_average(
             [=] AMREX_GPU_DEVICE(
                 int nbx, int i, int j, int k [[maybe_unused]]) noexcept {
                 if (if_a[nbx](i, j, k, constants::IS_FLUID_IDX) == 1) {
-                    acc_a[nbx](i, j, k, 0) = rho_a[nbx](i, j, k, 0);
+                    const amrex::Real r = rho_a[nbx](i, j, k, 0);
+                    if (!std::isfinite(r)) {
+                        return;
+                    }
+                    acc_a[nbx](i, j, k, 0) = r;
                     acc_a[nbx](i, j, k, 1) = amrex::Real(1.0);
                 }
             });
