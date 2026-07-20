@@ -100,9 +100,9 @@ amr.max_grid_size_x = 90
 amr.max_grid_size_y = 180
 amr.max_grid_size_z = 180
 amr.blocking_factor = 2
-amr.plot_int = 1000         # every 
-amr.print_int = 200
-amr.chk_int = 20000        # checkpoint every ~2.4 s physical
+amr.plot_int = 10000         # every 
+amr.print_int = 2000
+amr.chk_int = 100000        # checkpoint every ~2.4 s physical
 amr.file_name_digits = 5
 
 # ---------------------------------------------------------------
@@ -129,7 +129,7 @@ lbm.alpha = 0.016
 # Constants.H (Yu et al. 2005 DNS calibration).  Default OFF in code for
 # backward compatibility; enable here.  The same ν_T also feeds the
 # existing EPSILON diagnostic consumed by bubble breakup / kL.
-lbm.use_sgs_in_collision = 1
+lbm.use_sgs_in_collision = 0
 
 # One passive scalar: dissolved O₂  (component 0)
 # D_O2_LB = nu_LB / Sc = 0.016 / 500 = 3.20e-5
@@ -388,7 +388,7 @@ bubble.min_diameter   = 1.0e-4       # m  (0.1 mm)
 bubble.eps_max        = 50.0         # m²/s³
 
 # Statistics output
-bubble.stats_int  = 200             # steps between CSV writes (~0.01 s physical)
+bubble.stats_int  = 2000             # steps between CSV writes (~0.01 s physical)
 bubble.stats_file = "bubble_stats.csv"
 
 # Force-deposition safety mechanisms (June 2026).
@@ -430,7 +430,7 @@ probe.positions    = 150.0 90.0 -40.0 \
                       90.0 90.0  20.0 \
                       90.0 90.0 -70.0 \
                       90.0 90.0  60.0
-probe.stats_int    = 200          # steps between rows (~0.0024 s physical)
+probe.stats_int    = 2000          # steps between rows (~0.0024 s physical)
 probe.stats_file   = "probes.csv"
 
 # ---------------------------------------------------------------
