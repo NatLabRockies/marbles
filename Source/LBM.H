@@ -737,32 +737,6 @@ private:
     // if/when needed.
     amrex::Real m_fslbm_mass_target = amrex::Real(-1.0);
 
-    // Topological guard on the IFC -> GAS reclassification in
-    // fslbm_advance_surface Step 5 (July 2026).
-    //
-    // When true (default), the (phi < FSLBM_PHI_LO) branch checks the
-    // 6 face-neighbours before converting: if ANY neighbour is
-    // CELL_LIQUID or a high-phi (>0.5) CELL_INTERFACE, the conversion
-    // is skipped and the cell stays classified as CELL_INTERFACE (its
-    // low phi is left untouched, to be refilled by the next step's
-    // Step 2 mass exchange from healthy neighbours).
-    //
-    // Rationale: FLOAT-precision round-off in BGK collision + streaming
-    // (relative ~1e-7) drives spurious phi excursions below
-    // FSLBM_PHI_LO = 1e-4 in interface cells that are still bulk-
-    // connected.  Without the guard each such crossing is a permanent
-    // IFC->GAS reclassification that discards phi*rho of physical mass
-    // and eventually collapses the surface (see run 15297794 at t=28 s).
-    // Genuinely detached cells (spray, isolated bubble caps with no
-    // liquid support) still convert normally, so the guard is a no-op
-    // for the physically correct cases.
-    //
-    // Set lbm.fslbm_topological_gas_guard = 0 to force the legacy
-    // unguarded conversion (useful for A/B validation of the drain
-    // rate, or as a safety valve if the guard is ever found to
-    // interact badly with a new geometry).
-    bool m_fslbm_topological_gas_guard = true;
-
     // ---------------------------------------------------------------
     // Smagorinsky SGS in the collision (Thomas et al. 2021 Eq. 4)
     // ---------------------------------------------------------------

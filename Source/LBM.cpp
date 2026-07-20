@@ -482,8 +482,6 @@ void LBM::read_parameters()
             pp.query(
                 "fslbm_global_mass_clamp_interval",
                 m_fslbm_global_mass_clamp_interval);
-            pp.query(
-                "fslbm_topological_gas_guard", m_fslbm_topological_gas_guard);
 
             amrex::Print() << "\n=== Free Surface Configuration (FSLBM) ==="
                            << std::endl;
@@ -542,14 +540,6 @@ void LBM::read_parameters()
                                << m_fslbm_global_mass_clamp_interval
                                << " step(s)" << std::endl;
             }
-            amrex::Print()
-                << "  Topological GAS guard    : "
-                << (m_fslbm_topological_gas_guard
-                        ? "ON  (skip IFC->GAS if any face-neighbour is "
-                          "LIQUID or IFC with phi>0.5; suppresses "
-                          "FLOAT-noise reclassification)"
-                        : "OFF (legacy: unguarded (phi<PHI_LO) -> GAS)")
-                << std::endl;
         }
     }
 
@@ -10094,10 +10084,6 @@ void LBM::fslbm_advance_surface(const int lev)
             mass_flux.arrays(); // comp 0: flag, comp 1: excess mass, comp 2:
                                 // spawn flag
 
-        // Runtime toggle for the topological IFC->GAS guard (captured
-        // by value into the device lambda below).  Default true.
-        const bool topo_guard = m_fslbm_topological_gas_guard;
-
         amrex::ParallelFor(
             m_cell_type[lev],
             [=] AMREX_GPU_DEVICE(
@@ -10119,79 +10105,6 @@ void LBM::fslbm_advance_surface(const int lev)
                     phi_arrs[nbx](iv, 0) = phi;
                 }
                 if (phi < FSLBM_PHI_LO) {
-                    // ------------------------------------------------------
-                    // Topological guard against FLOAT-precision noise
-                    // reclassification (July 2026).  Runtime toggle:
-                    // lbm.fslbm_topological_gas_guard (default ON).
-                    //
-                    // In FLOAT precision the local rho fluctuations from
-                    // BGK collision + streaming round-off (relative ~1e-7)
-                    // drift phi = mass/rho at INTERFACE cells enough to
-                    // transiently cross FSLBM_PHI_LO = 1e-4.  Without a
-                    // guard every such crossing permanently reclassifies
-                    // the cell as CELL_GAS and discards phi*rho of
-                    // physical mass, eventually eroding the entire
-                    // surface skin -- observed as N_liq drift at
-                    // ~0.35 cells/step in run 15297794 and the t=28 s
-                    // free-surface collapse.
-                    //
-                    // Guard: only convert to GAS if this cell has NO
-                    // liquid or high-phi interface neighbour.  A cell
-                    // embedded in the surface skin with bulk-connected
-                    // neighbours should not spontaneously vanish from
-                    // round-off; the natural IFC-LIQ mass exchange
-                    // (Step 2) refills phi within a few steps.  Genuinely
-                    // detached cells (spray droplets, isolated bubble
-                    // caps with no liquid support) still convert normally
-                    // -- the guard is a bounded no-op for those.
-                    //
-                    // Physical motivation: mirrors Koerner et al. (2005)
-                    // implicit voxelisation, where an interface cell is
-                    // required to have at least one liquid neighbour.
-                    //
-                    // Safety: reads iv +/- 1 face-neighbours from
-                    // ct_arrs and phi_arrs.  m_cell_type has 3 ghost
-                    // cells (m_f_nghost), so the ±1 offsets are always
-                    // addressable.  Grid-boundary neighbours may read
-                    // one-step-stale ghost values (last FillBoundary was
-                    // pre-Step 4), which is acceptable for a bounded
-                    // heuristic.
-                    //
-                    // Cost: 6 int loads + up to 6 real loads per
-                    // reclassification candidate.  At ~1e3 candidates /
-                    // step out of 5.8M cells, negligible.
-                    // ------------------------------------------------------
-                    bool has_bulk_support = false;
-                    if (topo_guard) {
-                        for (int d = 0; d < AMREX_SPACEDIM && !has_bulk_support;
-                             ++d) {
-                            for (int sgn = -1; sgn <= 1; sgn += 2) {
-                                amrex::IntVect iv_n = iv;
-                                iv_n[d] += sgn;
-                                const int nct = ct_arrs[nbx](iv_n, 0);
-                                if (nct == CELL_LIQUID ||
-                                    (nct == CELL_INTERFACE &&
-                                     phi_arrs[nbx](iv_n, 0) >
-                                         amrex::Real(0.5))) {
-                                    has_bulk_support = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    if (has_bulk_support) {
-                        // Skip conversion this step.  Do NOT modify phi:
-                        // if the drain is genuine, phi stays below
-                        // FSLBM_PHI_LO and the guard will re-evaluate
-                        // next step when neighbours also drain; if it
-                        // was FLOAT noise, mass exchange from healthy
-                        // neighbours refills phi > FSLBM_PHI_LO
-                        // organically.  Mass accounting stays exact:
-                        // phi*rho remains counted in [mass_diag] M_tot
-                        // and in the global mass clamp.
-                        return;
-                    }
-                    // ------------------------------------------------------
                     // Convert to GAS.
                     //
                     // Mass:  phi*rho is the small "real liquid mass" carried
