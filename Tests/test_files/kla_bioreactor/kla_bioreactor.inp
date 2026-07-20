@@ -237,6 +237,31 @@ lbm.fslbm_global_mass_clamp = 1
 # clamp every step (~3% step-time overhead, exact mass preservation).
 lbm.fslbm_global_mass_clamp_interval = 10
 
+# Topological guard on the IFC -> GAS reclassification in Step 5 of
+# fslbm_advance_surface (July 2026).  When 1 (default), the
+# (phi < FSLBM_PHI_LO) branch of the conversion kernel checks the 6
+# face-neighbours before converting: if ANY neighbour is CELL_LIQUID or
+# a high-phi (>0.5) CELL_INTERFACE, the conversion is skipped and the
+# cell stays classified as CELL_INTERFACE with its low phi untouched
+# (Step 2 mass exchange from healthy neighbours refills it within a few
+# steps).  Genuinely detached cells (spray droplets, isolated bubble caps
+# with no liquid support) still convert normally.
+#
+# Rationale: FLOAT-precision round-off in BGK collision + streaming
+# (relative ~1e-7) drives spurious phi excursions below PHI_LO = 1e-4 in
+# interface cells that are still bulk-connected.  Without the guard each
+# such crossing is a permanent IFC->GAS reclassification that discards
+# phi*rho of physical mass; in run 15297794 (fixed-mode clamp) this drove
+# N_liq down at ~0.35 cells/step and produced the free-surface collapse
+# at t=28 s.  With the guard the fixed-mode clamp injects far less
+# phantom mass (no chronic reclassification stream to compensate for),
+# breaking the density-inflation positive feedback that killed both
+# 15291245 and 15297794.
+#
+# Set to 0 for A/B validation of the drain rate, or as a safety valve
+# if the guard is ever found to interact badly with a new geometry.
+lbm.fslbm_topological_gas_guard = 1
+
 # ---------------------------------------------------------------
 # Bubble module
 # ---------------------------------------------------------------

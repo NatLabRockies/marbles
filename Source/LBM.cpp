@@ -482,6 +482,8 @@ void LBM::read_parameters()
             pp.query(
                 "fslbm_global_mass_clamp_interval",
                 m_fslbm_global_mass_clamp_interval);
+            pp.query(
+                "fslbm_topological_gas_guard", m_fslbm_topological_gas_guard);
 
             amrex::Print() << "\n=== Free Surface Configuration (FSLBM) ==="
                            << std::endl;
@@ -540,6 +542,14 @@ void LBM::read_parameters()
                                << m_fslbm_global_mass_clamp_interval
                                << " step(s)" << std::endl;
             }
+            amrex::Print()
+                << "  Topological GAS guard    : "
+                << (m_fslbm_topological_gas_guard
+                        ? "ON  (skip IFC->GAS if any face-neighbour is "
+                          "LIQUID or IFC with phi>0.5; suppresses "
+                          "FLOAT-noise reclassification)"
+                        : "OFF (legacy: unguarded (phi<PHI_LO) -> GAS)")
+                << std::endl;
         }
     }
 
@@ -10084,6 +10094,10 @@ void LBM::fslbm_advance_surface(const int lev)
             mass_flux.arrays(); // comp 0: flag, comp 1: excess mass, comp 2:
                                 // spawn flag
 
+        // Runtime toggle for the topological IFC->GAS guard (captured
+        // by value into the device lambda below).  Default true.
+        const bool topo_guard = m_fslbm_topological_gas_guard;
+
         amrex::ParallelFor(
             m_cell_type[lev],
             [=] AMREX_GPU_DEVICE(
@@ -10107,7 +10121,8 @@ void LBM::fslbm_advance_surface(const int lev)
                 if (phi < FSLBM_PHI_LO) {
                     // ------------------------------------------------------
                     // Topological guard against FLOAT-precision noise
-                    // reclassification (July 2026).
+                    // reclassification (July 2026).  Runtime toggle:
+                    // lbm.fslbm_topological_gas_guard (default ON).
                     //
                     // In FLOAT precision the local rho fluctuations from
                     // BGK collision + streaming round-off (relative ~1e-7)
@@ -10147,17 +10162,20 @@ void LBM::fslbm_advance_surface(const int lev)
                     // step out of 5.8M cells, negligible.
                     // ------------------------------------------------------
                     bool has_bulk_support = false;
-                    for (int d = 0; d < AMREX_SPACEDIM && !has_bulk_support;
-                         ++d) {
-                        for (int sgn = -1; sgn <= 1; sgn += 2) {
-                            amrex::IntVect iv_n = iv;
-                            iv_n[d] += sgn;
-                            const int nct = ct_arrs[nbx](iv_n, 0);
-                            if (nct == CELL_LIQUID ||
-                                (nct == CELL_INTERFACE &&
-                                 phi_arrs[nbx](iv_n, 0) > amrex::Real(0.5))) {
-                                has_bulk_support = true;
-                                break;
+                    if (topo_guard) {
+                        for (int d = 0; d < AMREX_SPACEDIM && !has_bulk_support;
+                             ++d) {
+                            for (int sgn = -1; sgn <= 1; sgn += 2) {
+                                amrex::IntVect iv_n = iv;
+                                iv_n[d] += sgn;
+                                const int nct = ct_arrs[nbx](iv_n, 0);
+                                if (nct == CELL_LIQUID ||
+                                    (nct == CELL_INTERFACE &&
+                                     phi_arrs[nbx](iv_n, 0) >
+                                         amrex::Real(0.5))) {
+                                    has_bulk_support = true;
+                                    break;
+                                }
                             }
                         }
                     }
