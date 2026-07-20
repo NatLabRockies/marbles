@@ -9934,7 +9934,20 @@ void LBM::fslbm_advance_surface(const int lev)
                     rho, amrex::Real(1.0e-10)); // Prevent division by zero
                 const amrex::Real phi_new =
                     phi_arrs[nbx](iv, 0) + dm_arrs[nbx](iv, 0) / rho;
-                phi_arrs[nbx](iv, 0) = phi_new;
+                // Non-finite guard: if streaming produced a non-finite dm
+                // (e.g. cascade from a corrupted upstream neighbour after
+                // ~28 s physical in FLOAT), OR phi itself was already
+                // Inf/NaN, force the cell to a clean phi = 0 state.  This
+                // triggers a bounded INTERFACE -> GAS conversion in the
+                // block just below (phi * rho = 0 * rho = 0 mass loss)
+                // instead of dumping -Inf * rho into the phi-excess
+                // channel, which would cascade to every INTERFACE
+                // neighbour via Step 5a and collapse the free surface
+                // (observed in run 15291245 at step 2336000: 67k spurious
+                // GAS -> INTERFACE promotions in a single step,
+                // M_lost_step = -inf).  Well-behaved cells are unaffected.
+                phi_arrs[nbx](iv, 0) =
+                    std::isfinite(phi_new) ? phi_new : amrex::Real(0.0);
                 // No clamping: let phi evolve naturally (for diagnostics)
                 dm_arrs[nbx](iv, 1) =
                     amrex::Real(0.0); // No excess redistribution
@@ -10079,7 +10092,18 @@ void LBM::fslbm_advance_surface(const int lev)
                 if (ct_arrs[nbx](iv, 0) != CELL_INTERFACE) {
                     return;
                 }
-                const amrex::Real phi = phi_arrs[nbx](iv, 0);
+                amrex::Real phi = phi_arrs[nbx](iv, 0);
+                // Non-finite defense in depth (see Step 4 phi_new guard).
+                // If a corrupted phi somehow reached here (e.g. inherited
+                // from a neighbour before the guard fired), replace with
+                // 0.0 so the (phi < PHI_LO) branch below dumps 0 * rho
+                // into the excess channel rather than -Inf * rho.  Also
+                // rewrite phi_arrs so downstream reads see the clean
+                // value.
+                if (!std::isfinite(phi)) {
+                    phi = amrex::Real(0.0);
+                    phi_arrs[nbx](iv, 0) = phi;
+                }
                 if (phi < FSLBM_PHI_LO) {
                     // Convert to GAS.
                     //
@@ -10384,7 +10408,18 @@ void LBM::fslbm_advance_surface(const int lev)
                     }
                     rho =
                         amrex::max(rho, l_fslbm_rho_ref * amrex::Real(1.0e-4));
-                    phi_arrs[nbx](iv, 0) += total_excess / rho;
+                    const amrex::Real dphi = total_excess / rho;
+                    // Non-finite guard: total_excess is summed from
+                    // neighbouring flag_arrs[.,1] entries -- if any
+                    // neighbour's conversion produced Inf/NaN in the
+                    // excess channel that escaped the two upstream guards,
+                    // skip this redistribution rather than propagating the
+                    // corruption into every INTERFACE cell in the
+                    // stencil.  Bounded local mass loss; unbounded cell-
+                    // type cascade prevented.
+                    if (std::isfinite(dphi)) {
+                        phi_arrs[nbx](iv, 0) += dphi;
+                    }
                 }
             });
         // amrex::Gpu::synchronize(); // Optimization: Removed implicit host
