@@ -2923,11 +2923,20 @@ void LBM::f_to_macrodata(const int lev)
                         qx += ev[0] * g_arr(iv, q), qy += ev[1] * g_arr(iv, q),
                         qz += ev[2] * g_arr(iv, q));
                 }
-                // Guard: if rho collapsed to zero (isolated newly-fluid cell
-                // with no donor) zero the velocity so we don't produce NaN.
+                // Guard: if rho collapsed to zero or below the FLOAT noise
+                // floor (isolated newly-fluid cell with no donor, or a
+                // subnormal residual after aggressive spill/refill) zero
+                // the velocity so we don't produce NaN or catastrophic
+                // cancellation in u = mesh_speed / rho.  Threshold 1e-6:
+                //   * FLOAT: FLT_EPSILON ~= 1.2e-7, so 1e-6 sits ~8x above
+                //     the noise floor - cells below have no physically
+                //     meaningful mass in single precision.
+                //   * DOUBLE: DBL_EPSILON ~= 2.2e-16, so 1e-6 is still
+                //     10 decades above the noise floor and only catches
+                //     genuinely empty cells.
                 // f_to_macrodata will be called again after the next refill so
                 // the cell recovers in the next step.
-                if (rho > amrex::Real(1.0e-12)) {
+                if (rho > amrex::Real(1.0e-6)) {
                     AMREX_D_DECL(
                         u *= l_mesh_speed / rho, v *= l_mesh_speed / rho,
                         w *= l_mesh_speed / rho);
@@ -3055,10 +3064,13 @@ void LBM::f_to_macrodata(const int lev)
                 //
                 // The l_T_ref fallback is bit-identical to the healthy path
                 // for well-conditioned cells (branch only taken when rho
-                // <= 1e-12 or the get_temperature result is non-finite /
-                // non-positive).  The body_is_isothermal / fluid_is_isothermal
+                // <= 1e-6 or the get_temperature result is non-finite /
+                // non-positive).  Threshold 1e-6 matches the velocity
+                // guard above; 1e-12 (DOUBLE-precision legacy) is essentially
+                // a no-op in FLOAT (FLT_EPSILON ~= 1.2e-7).
+                // The body_is_isothermal / fluid_is_isothermal
                 // overrides below still fire as before.
-                if (rho > amrex::Real(1.0e-12) && std::isfinite(rho) &&
+                if (rho > amrex::Real(1.0e-6) && std::isfinite(rho) &&
                     std::isfinite(two_rho_e)) {
                     temperature = get_temperature(two_rho_e, rho, u, v, w, cv);
                     if (!std::isfinite(temperature) ||
@@ -8018,7 +8030,13 @@ void LBM::apply_macroscopic_forcing(int lev, const amrex::MultiFab* force_mf)
             // produce inv_rho = 1/NaN = NaN, poisoning the entire Delta_f /
             // Delta_g force injection.  Using !(rho >= threshold) inverts
             // the sense so NaN falls into the skip branch.
-            if (!(rho >= amrex::Real(1.0e-12)) || !std::isfinite(rho)) {
+            //
+            // Threshold 1e-6: matches the velocity and T guards in
+            // f_to_macrodata.  The old 1e-12 was a DOUBLE-precision
+            // legacy value and essentially useless in FLOAT builds
+            // (FLT_EPSILON ~= 1.2e-7 sits above 1e-12), catching only
+            // exact-zero and NaN rho.
+            if (!(rho >= amrex::Real(1.0e-6)) || !std::isfinite(rho)) {
                 return;
             }
 
