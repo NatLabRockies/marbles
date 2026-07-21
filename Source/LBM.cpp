@@ -2866,6 +2866,10 @@ void LBM::f_to_macrodata(const int lev)
     const bool fluid_is_isothermal = m_fluidIsIsothermal;
     const amrex::Real body_temperature = m_bodyTemperature;
 
+    // Fallback temperature for degenerate cells whose rho or two_rho_e is
+    // zero, negative, or non-finite.  See T-sanitisation guard below.
+    const amrex::Real l_T_ref = m_initialTemperature;
+
     const bool body_is_moving = m_body_is_moving;
     const auto body_velocity = m_body_velocity;
     const auto body_angular_velocity = m_body_angular_velocity;
@@ -3022,7 +3026,48 @@ void LBM::f_to_macrodata(const int lev)
                     md_arr(iv, constants::QZ_IDX) = qz);
 
                 amrex::Real temperature;
-                temperature = get_temperature(two_rho_e, rho, u, v, w, cv);
+                // Sanitise T against degenerate / non-finite inputs (July
+                // 2026).
+                //
+                // get_temperature(two_rho_e, rho, u, v, w, cv) evaluates
+                //   T = (0.5/Cv) * (two_rho_e/rho - (u^2 + v^2 + w^2)).
+                // Three failure modes need a safe fallback:
+                //   (a) rho = 0 exactly AND two_rho_e = 0 exactly
+                //       (impeller-vacated cell whose refill_and_spill zeroed
+                //       f/g because no persistent-fluid donor existed):
+                //       T = 0/0 = NaN.
+                //   (b) rho or two_rho_e already NaN from a poisoned
+                //       neighbour streaming into this cell.
+                //   (c) rho <= 0 with finite two_rho_e (negative rho from
+                //       collision noise in a low-mass IFC cell):
+                //       T becomes negative or Inf.
+                //
+                // In all three cases the physically-correct value is the
+                // reference temperature (this cell has no meaningful
+                // thermal state anyway).  Writing NaN or negative T to
+                // macrodata poisons the subsequent collision step's f_eq,
+                // then the next stream carries NaN to face-neighbours,
+                // starting the cascade observed in impeller-swept cells
+                // in FLOAT runs (e.g. run 15317777 first NaN at cell
+                // (73,104,45), step 1 386 000).  The repair pass inside
+                // fslbm_advance_surface heals f/g locally on the next
+                // step, but by then the NaN has already streamed out.
+                //
+                // The l_T_ref fallback is bit-identical to the healthy path
+                // for well-conditioned cells (branch only taken when rho
+                // <= 1e-12 or the get_temperature result is non-finite /
+                // non-positive).  The body_is_isothermal / fluid_is_isothermal
+                // overrides below still fire as before.
+                if (rho > amrex::Real(1.0e-12) && std::isfinite(rho) &&
+                    std::isfinite(two_rho_e)) {
+                    temperature = get_temperature(two_rho_e, rho, u, v, w, cv);
+                    if (!std::isfinite(temperature) ||
+                        temperature <= amrex::Real(0.0)) {
+                        temperature = l_T_ref;
+                    }
+                } else {
+                    temperature = l_T_ref;
+                }
 
                 if (body_is_isothermal) {
                     // Clamp T to body_temperature on layers 1+2 around the
@@ -7967,7 +8012,13 @@ void LBM::apply_macroscopic_forcing(int lev, const amrex::MultiFab* force_mf)
             const auto d_arr = d_arrs[nbx];
 
             const amrex::Real rho = md_arr(iv, constants::RHO_IDX);
-            if (rho < 1.0e-12) {
+            // NaN-safe rho guard (July 2026).  The plain (rho < 1e-12)
+            // check misses NaN, because any comparison with NaN in IEEE-754
+            // evaluates to false; a NaN rho would then pass through and
+            // produce inv_rho = 1/NaN = NaN, poisoning the entire Delta_f /
+            // Delta_g force injection.  Using !(rho >= threshold) inverts
+            // the sense so NaN falls into the skip branch.
+            if (!(rho >= amrex::Real(1.0e-12)) || !std::isfinite(rho)) {
                 return;
             }
 
