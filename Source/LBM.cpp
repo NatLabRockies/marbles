@@ -11011,7 +11011,44 @@ void LBM::fslbm_advance_surface(const int lev)
 
             if (N_liq_now > amrex::Real(0.5)) {
                 const amrex::Real deficit = m_fslbm_mass_target - M_current;
-                const amrex::Real eps_cell = deficit / N_liq_now;
+                amrex::Real eps_cell = deficit / N_liq_now;
+
+                // Safety cap on |eps_cell| to prevent the amplification-
+                // feedback failure mode observed in runs 15051573 and
+                // 15334156 (July 2026).  Failure signature: FSLBM interface
+                // erodes past a critical point, LIQUID/INTERFACE cells
+                // reclassify to GAS en masse in a single 2000-step window
+                // (in 15334156 the entire k=7 layer near the tank floor
+                // flipped between step 1030000 and 1032000), N_liq crashes
+                // from ~2.9M to O(1000).  The clamp then computes
+                //     eps_cell = deficit / N_liq
+                //                = ~3.42e6 / ~1000 = ~3400 per pass
+                // and injects ~3400 units of f[iv][0] into each surviving
+                // LIQUID cell every 5 steps.  Density explodes to O(1e30)
+                // within a few thousand steps and every downstream moment
+                // computation goes NaN.  This is the exact scenario the
+                // inp file comment at lbm.nu warns about.
+                //
+                // Cap of 1e-4 leaves ~10x headroom above the highest
+                // healthy |eps_cell| observed in production runs
+                // (~1e-5 in run 15334156 at healthy steps), and ~5000x
+                // below the eps ~ f_0 destabilisation threshold documented
+                // for the earlier interface-target draft (commit bdfcbed).
+                // When the cap fires the clamp stops fully restoring the
+                // deficit, so mass conservation degrades, but the run
+                // does not explode -- it degrades gracefully, and the
+                // mass_diag / fslbm_clamp print makes the degraded
+                // regime visible.
+                constexpr amrex::Real eps_cell_max = amrex::Real(1.0e-4);
+                const bool cap_fired =
+                    (eps_cell > eps_cell_max) || (eps_cell < -eps_cell_max);
+                if (eps_cell > eps_cell_max) {
+                    eps_cell = eps_cell_max;
+                }
+                if (eps_cell < -eps_cell_max) {
+                    eps_cell = -eps_cell_max;
+                }
+
                 auto const& f_w_E = m_f[lev].arrays();
                 auto const& ct_E2 = m_cell_type[lev].const_arrays();
                 amrex::ParallelFor(
@@ -11036,6 +11073,7 @@ void LBM::fslbm_advance_surface(const int lev)
                         << "] M_target=" << m_fslbm_mass_target
                         << " M_current=" << M_current << " deficit=" << deficit
                         << " eps_cell=" << eps_cell
+                        << (cap_fired ? " (CAPPED)" : "")
                         << " N_liq=" << static_cast<long>(N_liq_now) << "\n";
                 }
             }
