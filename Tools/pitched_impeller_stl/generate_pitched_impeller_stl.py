@@ -1,8 +1,8 @@
 """
 Generate a pitched-blade turbine (PBT) impeller STL for marblesThermal.
 
-Geometry reference: M-Star CFD "Modeling Chemical Reactions" tutorial
-  https://docs.mstarcfd.com/1b_HowToGuides/modeling-chemical-reactions.html
+Geometry reference: Reference Solver CFD "Modeling Chemical Reactions" tutorial
+  (reference solver documentation)
   - Tank: 0.3 m tall x 0.3 m diameter, dx = 2.344e-3 m  (128x128 cells)
   - Impeller: 0.125 m diameter, 4-blade 45-degree pitched blade turbine (PBT-4)
 

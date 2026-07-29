@@ -642,12 +642,12 @@ void LBM::read_parameters()
         }
     }
 
-    // Fixed-location probe sampler (M-Star probe.txt analog).
+    // Fixed-location probe sampler (Reference Solver probe.txt analog).
     read_probe_parameters();
 }
 
 // ============================================================================
-// Probe sampler (M-Star probe.txt analog)
+// Probe sampler (Reference Solver probe.txt analog)
 // ============================================================================
 void LBM::read_probe_parameters()
 {
@@ -1494,8 +1494,9 @@ void LBM::advance(
             amrex::setFPExcept(prev_fpe_stats);
         }
 
-        // Fixed-location probe sampler (M-Star probe.txt analog).  No-op
-        // when probe.enable = 0 or step not on the probe.stats_int cadence.
+        // Fixed-location probe sampler (Reference Solver probe.txt analog).
+        // No-op when probe.enable = 0 or step not on the probe.stats_int
+        // cadence.
         write_probe_stats(m_isteps[lev], phys_time);
     } else {
         // No bubble back-coupling on this level (either bubbles disabled or
@@ -11039,7 +11040,7 @@ void LBM::fslbm_advance_surface(const int lev)
                 // does not explode -- it degrades gracefully, and the
                 // mass_diag / fslbm_clamp print makes the degraded
                 // regime visible.
-                constexpr amrex::Real eps_cell_max = amrex::Real(1.0e-4);
+                constexpr auto eps_cell_max = amrex::Real(1.0e-4);
                 const bool cap_fired =
                     (eps_cell > eps_cell_max) || (eps_cell < -eps_cell_max);
                 if (eps_cell > eps_cell_max) {

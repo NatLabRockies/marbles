@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-k_La verification for the kLa-bioreactor run against the M-Star benchmark
-https://docs.mstarcfd.com/1b_HowToGuides/predicting-mass-transfer-kLA.html
+k_La verification for the kLa-bioreactor run against the Reference Solver benchmark
+(reference solver documentation)
 target k_La ≈ 4.1 /hr at 400 RPM, 0.4 L/min air, dilute aqueous O₂.
 
 Focus: Method C only — direct volume-averaged ⟨C_L⟩(t) reduced from the
@@ -12,7 +12,7 @@ C_L_mol_m3 column (along with V_liq_m3).
 Three estimators of k_La, in order of physical defensibility:
 
   (1) Constrained exponential fit with C∞ ≡ C_sat = 1.428 mol/m³.
-      Matches the M-Star "gassing-out" measurement convention exactly:
+      Matches the Reference Solver "gassing-out" measurement convention exactly:
           C_L(t) = C_sat · (1 − exp(−k_La · t))
       Single-parameter fit, robust even when the trajectory is
       mostly in the linear-rise regime (curvature near saturation
@@ -52,7 +52,7 @@ from scipy.optimize import curve_fit
 DT_PHYS          = 1.19365e-5     # s / LB step
 C_REF            = 100.0          # mol/m³ per LB-rho unit (lbm.O2_concentration_reference)
 C_SAT_MOL_M3     = 0.032 * 44.6   # = 1.428 mol/m³  Henry-saturated liquid
-KLA_BENCHMARK_S  = 4.1 / 3600.0   # 1.139e-3 /s (M-Star reference)
+KLA_BENCHMARK_S  = 4.1 / 3600.0   # 1.139e-3 /s (Reference Solver reference)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 WORK_CSV   = SCRIPT_DIR / "bubble_stats.csv"
@@ -276,7 +276,7 @@ def main():
                 color="C3",
                 label=f"[2] Log-linear:                 k_La = {kLa_ll_hr:.2f} /hr")
     ax.plot(t_ref, C_t_constrained(t_ref, KLA_BENCHMARK_S), ":",
-            color="k", label=f"M-Star benchmark: k_La = 4.1 /hr")
+            color="k", label=f"Reference Solver benchmark: k_La = 4.1 /hr")
     # Y-range: pad above the data so the fitted curves (which extrapolate
     # toward C_sat) and the local slope all stay visible without compressing
     # everything to a line.  Use 3× the data range as headroom.
@@ -308,7 +308,7 @@ def main():
             ax.plot(t_ref, intercept + slope * t_ref, "-", color="C3",
                     label=f"log-linear fit: −k_La = {slope:.4e} /s ⇒ k_La = {-slope*3600:.2f} /hr")
         ax.plot(t_ref, np.log(C_SAT_MOL_M3) - KLA_BENCHMARK_S * t_ref, ":",
-                color="k", label="M-Star slope (k_La = 4.1 /hr)")
+                color="k", label="Reference Solver slope (k_La = 4.1 /hr)")
         ax.set_xlabel("physical time (s)")
         ax.set_ylabel("ln(C_sat − ⟨C_L⟩)")
         ax.set_title("Log-linear view — slope = −k_La directly (steeper = larger k_La)")

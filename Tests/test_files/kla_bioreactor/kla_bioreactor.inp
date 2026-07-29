@@ -119,7 +119,7 @@ lbm.dt_outer = 1.0
 # step ~305k when the FSLBM interface eroded past a critical threshold
 # and the mass clamp amplified 2000 remaining LIQUID cells to rho=1e+30
 # within a few thousand steps.  nu=0.016 is the value that produced the
-# validated kLa = 3.95 /hr against M-Star Fig 25.
+# validated kLa = 3.95 /hr against Reference Solver Fig 25.
 lbm.nu    = 0.016
 lbm.alpha = 0.016
 
@@ -235,7 +235,7 @@ lbm.fslbm_global_mass_clamp = 1
 # leak rate ~1 mass/step and target ~3.4e6, N=10 keeps deficit bounded
 # at ~10 units (3e-6 relative) which is well below noise.  Set to 1 to
 # clamp every step (~3% step-time overhead, exact mass preservation).
-lbm.fslbm_global_mass_clamp_interval = 10
+lbm.fslbm_global_mass_clamp_interval = 5
 
 # ---------------------------------------------------------------
 # Bubble module
@@ -357,7 +357,7 @@ bubble.breakup_model  = "triangle"   # mode = 0.2 (80/20 vol split most probable
 # 0.1 mm ≈ physical Hinze limit at peak impeller ε ~ 2000 m²/s³.
 bubble.min_diameter   = 1.0e-4       # m  (0.1 mm)
 # Maximum local epsilon fed to Hinze criterion [m²/s³].
-# M-Star reports peak ε ≈ 10 m²/s³ for this geometry (5L, 400 RPM, 1mm lattice).
+# Reference Solver reports peak ε ≈ 10 m²/s³ for this geometry (5L, 400 RPM, 1mm lattice).
 # Cap at 50 m²/s³ (5× safety factor) to prevent under-resolved boundary-layer
 # spikes from driving unphysical fragmentation.  At 50 m²/s³, D_e ≈ 0.68 mm.
 bubble.eps_max        = 50.0         # m²/s³
@@ -383,18 +383,18 @@ bubble.force_cap_factor    = 50.0
 bubble.require_liquid_host = 1
 
 # ---------------------------------------------------------------
-# Fixed-location probes (M-Star probe.txt analog, Fig. 22 style)
+# Fixed-location probes (Reference Solver probe.txt analog, Fig. 22 style)
 # ---------------------------------------------------------------
 # Sample dissolved-O₂ concentration C_L (mol/m³) at fixed spatial points
 # every probe.stats_int steps and write to a CSV file.  Analog of
-# M-Star's `probe.txt` output that feeds their Fig. 22 gassing-out fit
+# Reference Solver's `probe.txt` output that feeds their Fig. 22 gassing-out fit
 # (their kLa = 4.1 /hr benchmark).
 #
 # Positions are in LB cell coordinates (matching geometry.prob_lo/hi).
 # Tank domain: x,y ∈ [0, 180],  z ∈ [-90, 90].  Impeller centre at
 # (90, 90, -40), radius 29 cells, free surface at z = 70.  Suggested
 # locations:
-#   probe0 = (150, 90, -40)  M-Star analog: between impeller tip (r=29)
+#   probe0 = (150, 90, -40)  Reference Solver analog: between impeller tip (r=29)
 #                            and side wall (x=180), at impeller z-height
 #   probe1 = ( 90, 90,  20)  mid-column, tank centerline
 #   probe2 = ( 90, 90, -70)  near sparger (below impeller)

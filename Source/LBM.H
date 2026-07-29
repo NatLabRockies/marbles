@@ -835,7 +835,7 @@ private:
     std::fstream m_species_stats_stream;
 
     // ---------------------------------------------------------------
-    // Fixed-location probes (analog of M-Star's probe.txt output)
+    // Fixed-location probes (analog of Reference Solver's probe.txt output)
     // ---------------------------------------------------------------
     // Sample dissolved-O2 concentration at fixed spatial points at a
     // configurable interval, write to a CSV file.  Configuration lives

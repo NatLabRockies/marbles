@@ -1,6 +1,6 @@
 # Implementation Plan: Two-Phase kLa Mass Transfer Test Case
 
-**Primary reference:** [M-Star CFD — Predicting Mass Transfer (kLa) in Gasified Bioreactors](https://docs.mstarcfd.com/1b_HowToGuides/predicting-mass-transfer-kLA.html)  
+**Primary reference:** [Reference Solver CFD — Predicting Mass Transfer (kLa) in Gasified Bioreactors]((reference solver documentation))  
 **Model details:** Thomas et al. (2021), *A mechanistic approach for predicting mass transfer in bioreactors*, CES 237, 116538. DOI: 10.1016/j.ces.2021.116538
 
 **Status:** FSLBM free-surface fully implemented and stable. Latest commit `5d270e3` (branch `moving-body`): surface tension + contact angle. Lagrangian bubble / kLa modules not yet started.
@@ -21,7 +21,7 @@ couples:
 4. A free surface through which bubbles exit
 
 Target validation metric: $k_L a \approx 4.1\ \text{hr}^{-1}$ matching the
-M-Star benchmark at 400 RPM, 0.4 L/min gas flow.
+Reference Solver benchmark at 400 RPM, 0.4 L/min gas flow.
 
 ---
 
@@ -370,7 +370,7 @@ Contents:
 - `sparger.csv` — 7 sparger hole positions
 - `pitched_impeller.stl` — reuse from `stirred_tank_reacting/`
 - `baffled_wall.stl` — same
-- Reference data: M-Star measured $k_L a = 4.5\ \text{hr}^{-1}$
+- Reference data: Reference Solver measured $k_L a = 4.5\ \text{hr}^{-1}$
 
 ---
 
@@ -378,9 +378,9 @@ Contents:
 
 `Tools/kla_plot.ipynb` — plots:
 1. Time-evolution of dissolved O₂ at probe (fit to extract $k_L a$)
-2. Bubble size distribution (histogram, vs. M-Star Fig. 21)
-3. Total transfer rate $\dot{n}_T$ vs time (vs. M-Star Fig. 24)
-4. Shaft power vs total dissipation (energy check, vs. M-Star Fig. 20)
+2. Bubble size distribution (histogram, vs. Reference Solver Fig. 21)
+3. Total transfer rate $\dot{n}_T$ vs time (vs. Reference Solver Fig. 24)
+4. Shaft power vs total dissipation (energy check, vs. Reference Solver Fig. 20)
 5. Optional: spatial O₂ distribution (from plotfiles)
 
 ---
@@ -389,12 +389,12 @@ Contents:
 
 | Quantity | Target | Source |
 |---|---|---|
-| $k_L a$ at probe (exponential fit) | 4.1 hr⁻¹ | M-Star guide |
+| $k_L a$ at probe (exponential fit) | 4.1 hr⁻¹ | Reference Solver guide |
 | $k_L a$ volume-averaged | ~4.1 hr⁻¹ | Thomas et al. (4.8 hr⁻¹ at similar conditions) |
 | Probe vs. volume-average agreement | < 5% | mass conservation check (Thomas et al.) |
-| Shaft power number $N_p$ | ~1.5 | M-Star guide |
+| Shaft power number $N_p$ | ~1.5 | Reference Solver guide |
 | Shaft power = dissipated power $P_d$ | < 5% difference | Thomas et al. energy balance check |
-| Mean bubble diameter above impeller | ~3 mm | M-Star guide |
+| Mean bubble diameter above impeller | ~3 mm | Reference Solver guide |
 | Gas hold-up | < 1% | Thomas et al. 5 L result |
 | Power balance error | < 10% | energy conservation |
 
@@ -422,7 +422,7 @@ Contents:
     validate with single-bubble rise reaching the surface and correct
     gas hold-up — 1–1.5 days
 11. **Full bioreactor run** + notebook with both $k_L a$ methods (probe fit +
-    volume-average); validation against M-Star targets — 1–2 days
+    volume-average); validation against Reference Solver targets — 1–2 days
 12. **Sensitivity study**: breakup kernels (triangle / equal / random);
     confirm insensitivity consistent with Thomas et al. Fig. 10 — 0.5 day
 13. **Optional**: CO₂ scrubbing (second scalar + bidirectional transfer) — 1 day

@@ -2,7 +2,7 @@
 """
 Plot the four fixed-location O2 probes from probes.csv.
 
-Probes are the M-Star Fig. 22 analog: sample dissolved O2 at four fixed
+Probes are the Reference Solver Fig. 22 analog: sample dissolved O2 at four fixed
 LB-cell positions every probe.stats_int steps.  For a lumped-parameter
 gassing-out fit, each probe should follow
 
@@ -13,15 +13,15 @@ mixed.  Non-uniform probes tell us about mixing time; matched probes tell
 us about accurate k_La.
 
 Positions (from the run header):
-    p0 = (150, 90, -40)   between impeller tip and side wall (M-Star analog)
+    p0 = (150, 90, -40)   between impeller tip and side wall (Reference Solver analog)
     p1 = ( 90, 90,  20)   mid-column, tank centerline
     p2 = ( 90, 90, -70)   near sparger, below impeller
     p3 = ( 90, 90,  60)   just below free surface (z_surface = 70)
 
 The reference lines follow plot_kla_fig25.py conventions:
-    * M-Star Fig. 22 k_La = 4.1 /hr  (headline benchmark)
+    * Reference Solver Fig. 22 k_La = 4.1 /hr  (headline benchmark)
     * Experiment (Zakrzewski 2020) = 5.1 /hr
-    * Experiment (M-Star docs) = 4.5 /hr
+    * Experiment (Reference Solver docs) = 4.5 /hr
 """
 from __future__ import annotations
 
@@ -45,8 +45,8 @@ CSV_PATH = SCRIPT_DIR / "probes.csv"
 OUT_PNG  = SCRIPT_DIR / "kla_probes.png"
 
 # Reference k_La values (same convention as plot_kla_fig25.py)
-MSTAR_KLA_FIG22_HR    = 4.1
-EXPERIMENTAL_KLA_HR   = 4.5   # M-Star docs, unattributed
+REFERENCE_KLA_FIG22_HR    = 4.1
+EXPERIMENTAL_KLA_HR   = 4.5   # Reference Solver docs, unattributed
 ZAKRZEWSKI_KLA_HR     = 5.1   # Thomas et al. 2021 citation
 
 # The current LES run uses C_eq = 0.275 mol/m^3 (see kla_bioreactor.inp
@@ -158,8 +158,8 @@ def main() -> int:
         else:
             print(f"  {lbl:50s}  k_La = {k*3600:.3f} /hr")
     print(f"\nReferences:")
-    print(f"  M-Star Fig.22 (probe)          : {MSTAR_KLA_FIG22_HR:.2f} /hr")
-    print(f"  Experiment (M-Star docs)       : {EXPERIMENTAL_KLA_HR:.2f} /hr")
+    print(f"  Reference Solver Fig.22 (probe)          : {REFERENCE_KLA_FIG22_HR:.2f} /hr")
+    print(f"  Experiment (Reference Solver docs)       : {EXPERIMENTAL_KLA_HR:.2f} /hr")
     print(f"  Experiment (Zakrzewski 2020)   : {ZAKRZEWSKI_KLA_HR:.2f} /hr")
 
     # ------------------------------------------------------------------
@@ -181,12 +181,12 @@ def main() -> int:
     ax.axhline(C_SAT_CURRENT, color="k", ls=":", lw=1.0,
                label=f"C_sat (surface_bc) = {C_SAT_CURRENT} mol/m³")
     # Reference exponentials at experimental k_La — for visual anchor.
-    ax.plot(tref, C_SAT_CURRENT * (1.0 - np.exp(-MSTAR_KLA_FIG22_HR/3600 * tref)),
+    ax.plot(tref, C_SAT_CURRENT * (1.0 - np.exp(-REFERENCE_KLA_FIG22_HR/3600 * tref)),
             "-", color="black", lw=2.0, alpha=0.6,
-            label=f"M-Star Fig.22:  k_La = {MSTAR_KLA_FIG22_HR:.2f} /hr")
+            label=f"Reference Solver Fig.22:  k_La = {REFERENCE_KLA_FIG22_HR:.2f} /hr")
     ax.plot(tref, C_SAT_CURRENT * (1.0 - np.exp(-EXPERIMENTAL_KLA_HR/3600 * tref)),
             "--", color="#7f7f7f", lw=1.6, alpha=0.7,
-            label=f"experiment (M-Star docs):  k_La = {EXPERIMENTAL_KLA_HR:.2f} /hr")
+            label=f"experiment (Reference Solver docs):  k_La = {EXPERIMENTAL_KLA_HR:.2f} /hr")
     ax.plot(tref, C_SAT_CURRENT * (1.0 - np.exp(-ZAKRZEWSKI_KLA_HR/3600 * tref)),
             "--", color="#8c564b", lw=1.6, alpha=0.7,
             label=f"experiment (Zakrzewski 2020):  k_La = {ZAKRZEWSKI_KLA_HR:.2f} /hr")
@@ -210,9 +210,9 @@ def main() -> int:
             ax.plot(t[m], y, "-", color=colour, lw=1.4, alpha=0.85, label=lbl)
     # Reference slope lines at experimental k_La values.
     tref_r = np.linspace(0.2, tmax * 1.02, 200)
-    ax.plot(tref_r, np.log(C_SAT_CURRENT) - MSTAR_KLA_FIG22_HR/3600 * tref_r,
+    ax.plot(tref_r, np.log(C_SAT_CURRENT) - REFERENCE_KLA_FIG22_HR/3600 * tref_r,
             "-", color="black", lw=2.0, alpha=0.6,
-            label=f"slope = -{MSTAR_KLA_FIG22_HR:.2f}/hr  (M-Star Fig.22)")
+            label=f"slope = -{REFERENCE_KLA_FIG22_HR:.2f}/hr  (Reference Solver Fig.22)")
     ax.plot(tref_r, np.log(C_SAT_CURRENT) - ZAKRZEWSKI_KLA_HR/3600 * tref_r,
             "--", color="#8c564b", lw=1.6, alpha=0.7,
             label=f"slope = -{ZAKRZEWSKI_KLA_HR:.2f}/hr  (Zakrzewski 2020)")
