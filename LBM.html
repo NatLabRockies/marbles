@@ -1,0 +1,136 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Lattice Boltzmann Method &mdash; MARBLES 0.1 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=03e43079" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=2709fde1"></script>
+      <script src="_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+      <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-mml-chtml.js"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Validation and demonstration" href="VandV.html" />
+    <link rel="prev" title="Linting" href="Linting.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            MARBLES
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="Introduction.html">Introduction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="GettingStarted.html">Getting Started</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Lattice Boltzmann Method</a></li>
+<li class="toctree-l1"><a class="reference internal" href="VandV.html">Validation and demonstration</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">MARBLES</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Lattice Boltzmann Method</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/LBM.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="lattice-boltzmann-method">
+<span id="lbm"></span><h1>Lattice Boltzmann Method<a class="headerlink" href="#lattice-boltzmann-method" title="Link to this heading"></a></h1>
+<p>We briefly describe the Lattice Boltzmann (LBM) method. For more details, the reader is referred to the book “The Lattice Boltzmann Method” by Timm Krüger et al (Springer, 2016).</p>
+<p>We introduce the distribution function in position-velocity space <span class="math notranslate nohighlight">\(f(x, \xi, t)\)</span>, where <span class="math notranslate nohighlight">\(\xi = \frac{\mathrm{d}x}{\mathrm{d}t}\)</span>, the ensemble average of velocities of particles at a location <span class="math notranslate nohighlight">\(x\)</span>. In this notation, <span class="math notranslate nohighlight">\(f\)</span> represents the density of particles with average velocity <span class="math notranslate nohighlight">\(xi\)</span>, at location <span class="math notranslate nohighlight">\(x\)</span>, at time <span class="math notranslate nohighlight">\(t\)</span>. This enables a continuum description on a kinetic level, i.e., the macroscopic fluid properties are moments of <span class="math notranslate nohighlight">\(f(x, \xi, t)\)</span>.</p>
+<p>The Boltzmann equation describes the evolution of the distribution function:</p>
+<div class="math notranslate nohighlight">
+\[\left(\frac{\partial}{\partial t} + \frac{\mathrm{d}x}{\mathrm{d}t} \frac{\partial}{\partial x} + \frac{\mathrm{d}\xi}{\mathrm{d}t} \frac{\partial}{\partial \xi} \right) f(x, \xi, t) = \Omega(f)\]</div>
+<p>where <span class="math notranslate nohighlight">\(\Omega(f)\)</span> is the collision operator. These collisions conserve mass, momentum and energy. If one uses the Bhatnagar-Gross-Krook (BGK) model with single relaxation time, it can be written:</p>
+<div class="math notranslate nohighlight">
+\[\Omega(f) = -\frac{1}{\tau} \left( f - f^{\mathrm{eq}} \right)\]</div>
+<p>where <span class="math notranslate nohighlight">\(f^{\mathrm{eq}}\)</span> is the equilibrium distribution. The next step is to discretize in the velocity space. At each lattice intersection, particles are allowed to move in some specific lattice directions, thereby discretizing the velocity vector space. Because particles do not have equal probabilities of moving in certain directions, it is necessary to normalize the contributions by weights based on the direction of movement. The final step in the formulation is to replace the ensemble average of particles at a given lattice site by a finite number of particles at that site, i.e., <span class="math notranslate nohighlight">\(f(x, \xi, t) = f(x, t)\)</span>. This last simplification leads to the lattice Boltzmann equation:</p>
+<div class="math notranslate nohighlight">
+\[f_i(x+e_i\Delta t, t+\Delta t) - f_i(x,t) = -\frac{\Delta t}{\tau} \left( f_i(x,t) - f_i^{\mathrm{eq}}(x,t)\right)\]</div>
+<p>where <span class="math notranslate nohighlight">\(i\)</span> denotes the components of <span class="math notranslate nohighlight">\(f\)</span> at a given lattice site. In two dimensions, usually denoted D2Q9, there are nine lattice vectors (i.e., nine components of <span class="math notranslate nohighlight">\(f\)</span>) connected to each lattice points (the possible directions in which particles can move). The left hand side is referred to as the streaming step and it is a linear operation. It simply states that the distribution at <span class="math notranslate nohighlight">\(x\)</span> and time <span class="math notranslate nohighlight">\(t\)</span> and moving at velocity <span class="math notranslate nohighlight">\(e_i\)</span> will be at <span class="math notranslate nohighlight">\(x+e_i\)</span> at time <span class="math notranslate nohighlight">\(t + \Delta t\)</span>. The right hand side is the collision step and is entirely local. These properties of linearity in the streaming and locality in the collisions lead to the computational strengths of LBM. It should be noted that, by using Chapman-Enskog analysis, the lattice-Boltzmann equation reduces to Navier-Stokes equations. The viscosity of the fluid is denoted:</p>
+<div class="math notranslate nohighlight">
+\[\nu = c_s^2 \left(\tau - \frac{\Delta t}{2} \right)\]</div>
+<p>In this notation, the equilibrium Maxwell distribution along direction <span class="math notranslate nohighlight">\(i\)</span> is written:</p>
+<div class="math notranslate nohighlight">
+\[f_i^{\mathrm{eq}} = w_i \rho \left(1+\frac{e_i \cdot u}{c_s^2} + \frac{(e_i \cdot u)^2}{2 c_s^4} - \frac{u \cdot u}{2 c_s^2} \right)\]</div>
+<p>where <span class="math notranslate nohighlight">\(u\)</span> is the velocity vector, <span class="math notranslate nohighlight">\(\rho\)</span> is the density, <span class="math notranslate nohighlight">\(w_i\)</span> are the normalization weights, and <span class="math notranslate nohighlight">\(c_s = \frac{\Delta x}{\Delta t} \frac{1}{\sqrt{3}}\)</span> is the speed of sound. The macroscopic variables are derived from the distribution function as:</p>
+<div class="math notranslate nohighlight">
+\[ \begin{align}\begin{aligned}\rho(x, t) &amp;= \sum_{i} f_i(x, t)\\u(x, t) &amp;= \frac{1}{\rho} \sum_{i} e_i f_i(x, t)\end{aligned}\end{align} \]</div>
+<p>MARBLES implements both the D3Q27 LBM approach for two dimensional and three dimensional flow, respectively.</p>
+<p>For the thermal version of MARBLES, please refer to additional theory related to the additional energy lattice and cross coupling,
+in the PhD thesis
+“Sawant, Nilesh. ‘Kinetic Modeling of Reactive Flows.’. ETH Zurich, 2023. <a class="reference external" href="https://doi.org/10.3929/ETHZ-B-000607045">https://doi.org/10.3929/ETHZ-B-000607045</a>.”</p>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="Linting.html" class="btn btn-neutral float-left" title="Linting" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="VandV.html" class="btn btn-neutral float-right" title="Validation and demonstration" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023, the Alliance for Sustainable Energy, LLC., through National Renewable Energy Laboratory. All rights reserved.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

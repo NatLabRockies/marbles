@@ -1,0 +1,180 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tutorials &mdash; MARBLES 0.1 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=03e43079" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=2709fde1"></script>
+      <script src="_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Testing" href="Testing.html" />
+    <link rel="prev" title="Input Files and Controls" href="InputFiles.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            MARBLES
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="Introduction.html">Introduction</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="GettingStarted.html">Getting Started</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="Building.html">Building</a></li>
+<li class="toctree-l2"><a class="reference internal" href="InputFiles.html">Input Files and Controls</a></li>
+<li class="toctree-l2"><a class="reference internal" href="InputFiles.html#comprehensive-list-of-runtime-parameters">Comprehensive List of Runtime Parameters</a></li>
+<li class="toctree-l2 current"><a class="current reference internal" href="#">Tutorials</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#running-a-first-simulation">Running a First Simulation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#visualization-with-paraview-or-visit">Visualization with ParaView or VisIt</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#quantitative-data-analysis-with-post-processing-tools">Quantitative Data Analysis with Post-Processing Tools</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="Testing.html">Testing</a></li>
+<li class="toctree-l2"><a class="reference internal" href="Linting.html">Linting</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="LBM.html">Lattice Boltzmann Method</a></li>
+<li class="toctree-l1"><a class="reference internal" href="VandV.html">Validation and demonstration</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">MARBLES</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="GettingStarted.html">Getting Started</a></li>
+      <li class="breadcrumb-item active">Tutorials</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/Tutorials.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="tutorials">
+<span id="id1"></span><h1>Tutorials<a class="headerlink" href="#tutorials" title="Link to this heading"></a></h1>
+<p>The several cases in the <code class="docutils literal notranslate"><span class="pre">Tests/test_files</span></code> directory are a good starting point for setting up new cases. In addition, there are several <a class="reference external" href="https://github.com/AMReX-Codes/amrex-tutorials">tutorials from AMReX</a> that may be useful for general familiarity with how to build and run AMReX codes.</p>
+<section id="running-a-first-simulation">
+<h2>Running a First Simulation<a class="headerlink" href="#running-a-first-simulation" title="Link to this heading"></a></h2>
+<p>This short tutorial demonstrates how to execute a 2D flow around a single cylinder and how to inspect the output.</p>
+<ol class="arabic">
+<li><p><strong>Compile MARBLES</strong>: Follow the compilation instructions in the <a class="reference internal" href="Building.html#building"><span class="std std-ref">Building</span></a> section to generate the <code class="docutils literal notranslate"><span class="pre">marbles</span></code> executable.</p></li>
+<li><p><strong>Navigate to the Test Directory</strong>: Change into the single cylinder test directory.</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nb">cd</span><span class="w"> </span>Tests/test_files/single_cylinder
+</pre></div>
+</div>
+</li>
+<li><p><strong>Execute the Simulation</strong>: Run the executable using MPI, passing the input file as an argument. Adjust the path to where your compiled executable is located.</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>mpirun<span class="w"> </span>-np<span class="w"> </span><span class="m">4</span><span class="w"> </span>../../../marbles<span class="w"> </span>single_cylinder.inp
+</pre></div>
+</div>
+</li>
+<li><p><strong>Monitor the Output</strong>: As the simulation runs, MARBLES will print step information and create plotfiles continuously (e.g., <code class="docutils literal notranslate"><span class="pre">plt00000</span></code>, <code class="docutils literal notranslate"><span class="pre">plt00010</span></code>, etc.) at the intervals specified by the <code class="docutils literal notranslate"><span class="pre">amr.plot_int</span></code> parameter in the input file.</p></li>
+</ol>
+</section>
+<section id="visualization-with-paraview-or-visit">
+<h2>Visualization with ParaView or VisIt<a class="headerlink" href="#visualization-with-paraview-or-visit" title="Link to this heading"></a></h2>
+<p>The output directories generated by MARBLES (the <code class="docutils literal notranslate"><span class="pre">pltXXXXX</span></code> folders) are AMReX format plotfiles. They contain the mesh grid data, state variables (like density, velocity magnitude, temperature), and the embedded boundary geometry representation.</p>
+<p><strong>Using ParaView:</strong>
+ParaView has built-in support for reading AMReX plotfiles.</p>
+<ol class="arabic simple">
+<li><p>Open ParaView.</p></li>
+<li><p>Go to <strong>File &gt; Open</strong>, navigate to the output folder, and enter the <code class="docutils literal notranslate"><span class="pre">pltXXXXX</span></code> directory.</p></li>
+<li><p>Select the <code class="docutils literal notranslate"><span class="pre">Header</span></code> file inside it. (Alternatively, ParaView may let you open the folder directly as AMReX/BoxLib).</p></li>
+<li><p>In the Properties panel, click <strong>Apply</strong>.</p></li>
+<li><p>You can now select variables like <code class="docutils literal notranslate"><span class="pre">vel_mag</span></code> or <code class="docutils literal notranslate"><span class="pre">density</span></code> from the drop-down menu to view using pseudocolor plots, slice the domain, or generate contours around the embedded geometry.</p></li>
+</ol>
+<p><strong>Using VisIt:</strong>
+VisIt also natively reads AMReX plotfiles.</p>
+<ol class="arabic simple">
+<li><p>Open VisIt.</p></li>
+<li><p>Click <strong>Open</strong>, navigate to your test directory, and select the <code class="docutils literal notranslate"><span class="pre">Header</span></code> file within the <code class="docutils literal notranslate"><span class="pre">pltXXXXX</span></code> folder.</p></li>
+<li><p>Add a <strong>Pseudocolor</strong> plot for a variable like <code class="docutils literal notranslate"><span class="pre">vel_mag</span></code> and click <strong>Draw</strong>.</p></li>
+</ol>
+</section>
+<section id="quantitative-data-analysis-with-post-processing-tools">
+<h2>Quantitative Data Analysis with Post-Processing Tools<a class="headerlink" href="#quantitative-data-analysis-with-post-processing-tools" title="Link to this heading"></a></h2>
+<p>For many validation configurations, MARBLES includes Python tools and Jupyter notebooks to analyze output and post-process the physical quantities analytically.</p>
+<p>For example, in the Sod Shock Tube test:</p>
+<ol class="arabic">
+<li><p>Run the simulation in <code class="docutils literal notranslate"><span class="pre">Tests/test_files/sod/</span></code>.</p></li>
+<li><p>Navigate to the <code class="docutils literal notranslate"><span class="pre">Tools/sod_test/</span></code> directory.</p></li>
+<li><p>Launch the provided Jupyter notebook:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>jupyter<span class="w"> </span>notebook<span class="w"> </span>sod_test.ipynb
+</pre></div>
+</div>
+</li>
+<li><p>The notebook contains Python scripts utilizing common scientific packages (like <code class="docutils literal notranslate"><span class="pre">numpy</span></code>, <code class="docutils literal notranslate"><span class="pre">scipy</span></code>, <code class="docutils literal notranslate"><span class="pre">matplotlib</span></code>) to extract 1D profiles of density, velocity, and pressure from the simulation and compares them directly to the exact analytical Sod shock tube solution.</p></li>
+</ol>
+<p>Other scripts in the <code class="docutils literal notranslate"><span class="pre">Tools/</span></code> directory (such as <code class="docutils literal notranslate"><span class="pre">viscosity_test/viscosity_tester.ipynb</span></code> and <code class="docutils literal notranslate"><span class="pre">thermaldiffusivity_test/thermaldiffusivity_tester.ipynb</span></code>) serve as an excellent starting point for building custom Python data extraction and validation scripts for your own setups.</p>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="InputFiles.html" class="btn btn-neutral float-left" title="Input Files and Controls" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="Testing.html" class="btn btn-neutral float-right" title="Testing" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023, the Alliance for Sustainable Energy, LLC., through National Renewable Energy Laboratory. All rights reserved.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
