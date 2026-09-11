@@ -1,11 +1,11 @@
 #include "VelocityBC.H"
 
 namespace lbm::bc {
-NoOp::NoOp() = default;
+NoOp::NoOp(const std::string& /*prefix*/) {}
 
-Constant::Constant()
+Constant::Constant(const std::string& prefix)
 {
-    amrex::ParmParse pp("velocity_bc_constant");
+    amrex::ParmParse pp(prefix);
     pp.query("dir", m_op.dir);
 
     m_op.model_type = 1;
@@ -20,9 +20,9 @@ Constant::Constant()
     m_op.u0 = m_op.Mach_ref * m_op.speed_of_sound_ref;
 }
 
-Channel::Channel()
+Channel::Channel(const std::string& prefix)
 {
-    amrex::ParmParse pp("velocity_bc_channel");
+    amrex::ParmParse pp(prefix);
 
     m_op.model_type = 1;
     pp.query("Mach_ref", m_op.Mach_ref);
@@ -36,9 +36,9 @@ Channel::Channel()
     m_op.u_ref = m_op.Mach_ref * m_op.speed_of_sound_ref;
 }
 
-Parabolic::Parabolic()
+Parabolic::Parabolic(const std::string& prefix)
 {
-    amrex::ParmParse pp("velocity_bc_parabolic");
+    amrex::ParmParse pp(prefix);
     pp.query("normal_dir", m_op.normal_dir);
     pp.query("tangential_dir", m_op.tangential_dir);
 

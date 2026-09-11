@@ -2,9 +2,9 @@ name: MARBLES-CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, moving-body, bioreactors]
   pull_request:
-    branches: [main]
+    branches: [main, bioreactors]
   schedule:
     - cron: "0 5 * * 1"
 

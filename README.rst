@@ -30,6 +30,18 @@ MARBLES software is released in NREL Software Record `SWR-23-37
 <https://doi.org/10.11578/dc.20231009.2>`_ “MARBLES (Multi-scale
 Adaptively Refined Boltzmann LatticE Solver)”.
 
+Bioreactor demonstration
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``bioreactors`` branch adds moving geometry, multiple dilute
+components, a free surface, and bio-reactions. The clip below shows the
+first 10 seconds of a stirred-tank kLa case from
+``Tests/test_files/kla_bioreactor``.
+
+.. image:: figs/kla_bioreactor_10s.gif
+   :alt: kLa bioreactor simulation, first 10 seconds
+   :width: 640
+
 Getting Started
 ~~~~~~~~~~~~~~~
 

@@ -1,0 +1,69 @@
+max_step = 10000
+
+# geometry parameters
+geometry.prob_lo = 0.0 0.0 -2.0
+geometry.prob_hi = 660.0 660.0 2.0
+geometry.is_periodic = 0 0 1
+
+# timestepping
+amr.n_cell  = 660 660 4
+amr.max_level = 0
+amr.max_grid_size = 32
+amr.blocking_factor_x = 2
+amr.blocking_factor_y = 1
+amr.blocking_factor_z = 1
+amr.plot_int = 100
+amr.chk_int = 10000000
+amr.file_name_digits = 5
+
+lbm.bc_lo = 5 5 0
+lbm.bc_hi = 5 5 0
+lbm.dx_outer = 1.0
+lbm.dt_outer = 1.0
+
+#nu = u D / Re
+#nu = M a D / Re
+#nu = M sqrt(gamma R T) D / Re
+#nu = 0.1 sqrt(1.4 1 0.03333) 30 / 100 
+
+lbm.nu = 0.008
+lbm.alpha = 0.008
+lbm.initial_temperature = 0.03333
+lbm.adiabatic_exponent = 1.4
+lbm.save_streaming = 0
+lbm.compute_forces = 1
+
+lbm.body_is_isothermal = 0
+lbm.body_temperature = 0.060
+
+lbm.velocity_bc_type = "parabolic"
+velocity_bc_parabolic.Mach_ref = 0.1
+velocity_bc_parabolic.normal_dir = 1
+velocity_bc_parabolic.tangential_dir = 0
+velocity_bc_parabolic.initial_density = 1.0
+velocity_bc_parabolic.initial_temperature = 0.03333
+velocity_bc_parabolic.adiabatic_exponent = 1.4
+
+lbm.ic_type = "constant"
+ic_constant.mach_components = 0.0 0.0 0.0
+ic_constant.density = 1.0
+ic_constant.initial_temperature = 0.03333
+ic_constant.adiabatic_exponent = 1.4
+
+# MOVING BODY PARAMETERS - NEW
+body.is_moving = true
+body.velocity = 0.0 0.0 0.0
+body.angular_velocity = 0.0 0.0 0.0005
+body.center = 330.0 330.0 0.0
+
+eb2.geom_type = "all_regular"
+eb2.stl_file = "impeller.stl"
+eb2.stl_center = 330.0 330.0 0.0
+eb2.stl_scale = 1.0
+eb2.stl_reverse_normal = 0
+
+amrex.fpe_trap_invalid = 1
+amrex.fpe_trap_zero = 1
+amrex.fpe_trap_overflow = 1
+amrex.the_arena_is_managed = 0
+amrex.abort_on_out_of_gpu_memory = 1

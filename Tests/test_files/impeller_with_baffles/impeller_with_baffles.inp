@@ -1,0 +1,90 @@
+max_step = 10000
+
+# geometry parameters
+geometry.prob_lo = 0.0 0.0 -2.0
+geometry.prob_hi = 660.0 660.0 2.0
+geometry.is_periodic = 0 0 1
+
+# timestepping
+amr.n_cell  = 660 660 4
+amr.max_level = 0
+amr.max_grid_size = 32
+amr.blocking_factor_x = 2
+amr.blocking_factor_y = 1
+amr.blocking_factor_z = 1
+amr.plot_int = 100
+amr.chk_int = 10000000
+amr.file_name_digits = 5
+
+lbm.bc_lo = 5 5 0
+lbm.bc_hi = 5 5 0
+lbm.dx_outer = 1.0
+lbm.dt_outer = 1.0
+
+#nu = u D / Re
+#nu = M a D / Re
+#nu = M sqrt(gamma R T) D / Re
+#nu = 0.1 sqrt(1.4 1 0.03333) 30 / 100 
+
+lbm.nu = 0.008
+lbm.alpha = 0.008
+lbm.initial_temperature = 0.03333
+lbm.adiabatic_exponent = 1.4
+lbm.save_streaming = 0
+lbm.compute_forces = 1
+
+lbm.body_is_isothermal = 0
+lbm.body_temperature = 0.060
+
+lbm.velocity_bc_type = "parabolic"
+velocity_bc_parabolic.Mach_ref = 0.1
+velocity_bc_parabolic.normal_dir = 1
+velocity_bc_parabolic.tangential_dir = 0
+velocity_bc_parabolic.initial_density = 1.0
+velocity_bc_parabolic.initial_temperature = 0.03333
+velocity_bc_parabolic.adiabatic_exponent = 1.4
+
+lbm.ic_type = "constant"
+ic_constant.mach_components = 0.0 0.0 0.0
+ic_constant.density = 1.0
+ic_constant.initial_temperature = 0.03333
+ic_constant.adiabatic_exponent = 1.4
+
+# MOVING BODY PARAMETERS - NEW
+body.is_moving = true
+body.velocity = 0.0 0.0 0.0
+body.angular_velocity = 0.0 0.0 0.0005
+body.center = 330.0 330.0 0.0
+
+eb2.geom_type = "all_regular"
+eb2.use_voxel_cracks = 1
+voxel_cracks.crack_file = "impeller.csv"
+
+# STATIONARY WALL WITH BAFFLES
+# Wall Radius = 300.0
+# Baffles: 4 rectangular plates of size 50x10 attached to the wall
+# Parser function returns negative for solid (standard SDF convention? No, code expects positive for solid in sdf variable, but parser returns -sdf)
+# Wait, code: sdf_stat = -parser_stat_exe(x, y, z); sdf = max(sdf, sdf_stat);
+# If parser returns R_wall - r:
+#   Inside fluid (r < R): Positive. sdf_stat = Negative (Fluid).
+#   Inside wall (r > R): Negative. sdf_stat = Positive (Solid).
+# So parser should return Positive for Fluid, Negative for Solid.
+#
+# Wall: 300 - r (Pos if r < 300)
+# Baffle (Solid): Negative.
+# Baffle SDF (neg inside): max(abs(x-cx)-Lx, abs(y-cy)-Ly)
+# We want Union of Solids -> Intersection of Fluids.
+# Fluid = min(Fluid_Wall, Fluid_Baffle1, ...)
+#
+# Baffle 1 (Right): Center (605, 330), Size 25x5 (Total 50x10)
+# Baffle 2 (Top): Center (330, 605), Size 5x25
+# Baffle 3 (Left): Center (55, 330), Size 25x5
+# Baffle 4 (Bottom): Center (330, 55), Size 5x25
+
+eb2.stationary_parser_function = "min(300.0 - sqrt((x-330.0)*(x-330.0) + (y-330.0)*(y-330.0)), min(max(abs(x-605.0)-25.0, abs(y-330.0)-5.0), min(max(abs(x-330.0)-5.0, abs(y-605.0)-25.0), min(max(abs(x-55.0)-25.0, abs(y-330.0)-5.0), max(abs(x-330.0)-5.0, abs(y-55.0)-25.0)))))"
+
+amrex.fpe_trap_invalid = 1
+amrex.fpe_trap_zero = 1
+amrex.fpe_trap_overflow = 1
+amrex.the_arena_is_managed = 0
+amrex.abort_on_out_of_gpu_memory = 1

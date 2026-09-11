@@ -1,6 +1,8 @@
 target_sources(${marbles_lib_name}
   PRIVATE
     BC.H
+    Bubble.H
+    Bubble.cpp
     Constants.H
     EB.H
     EB.cpp

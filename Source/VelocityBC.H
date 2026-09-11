@@ -32,7 +32,7 @@ struct NoOp
 
     using DeviceType = DeviceOp;
 
-    explicit NoOp();
+    explicit NoOp(const std::string& prefix = "");
 
     DeviceType device_instance() const { return m_op; }
 
@@ -80,7 +80,7 @@ struct Constant
 
     using DeviceType = DeviceOp;
 
-    explicit Constant();
+    explicit Constant(const std::string& prefix = "velocity_bc_constant");
 
     DeviceType device_instance() const { return m_op; }
 
@@ -131,7 +131,7 @@ struct Channel
 
     using DeviceType = DeviceOp;
 
-    explicit Channel();
+    explicit Channel(const std::string& prefix = "velocity_bc_channel");
 
     DeviceType device_instance() const { return m_op; }
 
@@ -191,7 +191,7 @@ struct Parabolic
 
     using DeviceType = DeviceOp;
 
-    explicit Parabolic();
+    explicit Parabolic(const std::string& prefix = "velocity_bc_parabolic");
 
     DeviceType device_instance() const { return m_op; }
 

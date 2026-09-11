@@ -19,6 +19,7 @@
 #include "IC.H"
 #include "Utilities.H"
 #include "Stencil.H"
+#include "Bubble.H"
 
 namespace lbm {
 
@@ -105,6 +106,73 @@ public:
     // Initialize is_fluid
     void initialize_is_fluid(const int lev);
 
+    // Initialize moving body shape from file
+    void initialize_moving_body_shape(int lev);
+
+    // Initialize stationary body from file (STL/CSV)
+    void init_stationary_body(int lev);
+
+    // Update integer is_fluid mask from the fractional field and recompute
+    // boundary markers (steps 1 and 2 of refill_and_spill preparation).
+    // If threshold is omitted, class default m_is_fluid_fraction_threshold is
+    // used.
+    void update_is_fluid_from_fraction_and_mark(
+        const int lev, amrex::Real threshold = -1.0);
+
+    // Refill and spill algorithm (steps 3 and 4). This does the following
+    // (per-level):
+    //  - snapshot previous is_fluid (component 0), threshold fractional
+    //    field into integer mask, recompute boundary markers (EB and side
+    //    boundaries), then
+    //  - SPILL: for cells that became solid, distribute their m_f/m_g
+    //    populations to neighboring secondary-boundary (component 3)
+    //    cells into matching population components using stencil weights
+    //    (fallback to component 2 if needed). Donors are zeroed.
+    //  - REFILL: for cells that became fluid, collect immediate boundary
+    //    neighbors (component 2) and compute weighted sums to fill each
+    //    population component; subtract the same weighted amounts from
+    //    donor neighbors so overall conservation holds.
+    // If threshold is negative, the class default is used.
+    void refill_and_spill(const int lev, amrex::Real threshold = -1.0);
+
+    // Reconstruct fractional mask from body signed distance function.
+    // For rigid body motion (translation + rotation), this updates
+    // m_is_fluid_fraction by evaluating the body geometry in its current
+    // position/orientation without numerical diffusion.
+    void reconstruct_body_sdf(const int lev, amrex::Real time);
+
+    // Update m_body_angular_velocity from the target value and the ramp
+    // schedule.  No-op when m_body_angular_velocity_ramp_steps == 0
+    // (legacy instant-on behaviour).  Called at the start of advance()
+    // before any kernel captures m_body_angular_velocity.
+    void update_body_angular_velocity_for_ramp();
+
+    // Advance the conservative phase-field (Chiu & Lin 2011, Eq. 18) for
+    // the free liquid-gas surface by one LBM time step.
+    // Evolves m_is_fluid_fraction in place; calls refill_and_spill internally.
+    void advance_phi(const int lev);
+
+    // FSLBM (Körner 2005): initialize cell type + fill level from z_surf.
+    void fslbm_init_cell_type(const int lev);
+
+    // FSLBM: re-derive m_cell_type from the current m_phi_fslbm and
+    // m_is_fluid; used after regrid prolongation.
+    void fslbm_reclassify_cell_type_from_phi(const int lev);
+
+    // FSLBM: one free-surface sweep (streaming with ABB + φ update +
+    // conversions). Replaces both advance_phi(lev) and stream(lev, m_f).
+    void fslbm_advance_surface(const int lev);
+
+    // FSLBM: replenish m_g populations in INTERFACE cells facing gas.
+    // Prevents thermal energy drain at the free surface.
+    void fslbm_replenish_g(const int lev);
+    void fslbm_replenish_components(const int lev);
+
+    // FSLBM: derive IS_FLUID_IDX (and boundary markers) from m_cell_type.
+    // Replaces update_is_fluid_from_fraction_and_mark for FSLBM to avoid
+    // conflict with the moving-body SDF that also lives in m_is_fluid_fraction.
+    void fslbm_sync_isfluid_markers(const int lev);
+
     // Initialize masks
     void initialize_mask(const int lev);
 
@@ -117,6 +185,39 @@ public:
 
     // put together an array of multifabs for writing
     amrex::Vector<const amrex::MultiFab*> plot_file_mf();
+
+    // clamp negative component densities to zero
+    void clamp_negative_component_densities(const int lev);
+
+    // Apply operator-split reaction source terms for the two-step catalytic
+    // mechanism  S+C <-> I -> P+C  to all component lattices on one level.
+    // Source increments are distributed uniformly across all N_MICRO_STATES
+    // populations so that no net momentum is added by the chemistry.
+    void apply_reaction_source_terms(int lev);
+
+    // Inject the catalyst (component 1) into a box region at a prescribed
+    // simulation step.  Executed only once (guarded by m_cat_inject_done).
+    void apply_timed_catalyst_injection(int lev);
+
+    // Open/close the per-step species statistics CSV file.
+    void open_species_stats_file(bool initialize);
+    void close_species_stats_file();
+
+    // Append one row (step, LB-time, mean rho per species, conservation
+    // residuals) to the species statistics file.
+    void write_species_stats();
+
+    // Reduce the dissolved-O₂ component lattice over the liquid phase and
+    // return the volume-averaged concentration in SI units and the liquid
+    // volume in m³.  Uses CELL_LIQUID + φ·CELL_INTERFACE when the free
+    // surface is on; otherwise averages over IS_FLUID==1 cells.  Defined
+    // public so the extended __device__ lambda inside can be hosted
+    // (CUDA nvcc error 20092 disallows them in private methods).
+    void compute_dissolved_o2_average(
+        const int lev,
+        const amrex::MultiFab& rho_o2,
+        amrex::Real& C_L_mol_m3_out,
+        amrex::Real& V_liq_m3_out) const;
 
 private:
     // read parameters
@@ -177,12 +278,14 @@ private:
     // write plotfile to disk
     void write_plot_file();
 
+public:
     // write checkpoint file to disk
     void write_checkpoint_file() const;
 
     // read checkpoint file from disk
     void read_checkpoint_file();
 
+private:
     // utility to skip to next line in Header
     static void goto_next_line(std::istream& is);
 
@@ -214,10 +317,12 @@ private:
     amrex::Vector<std::string> m_microdata_g_varnames;
     amrex::Vector<std::string> m_deriveddata_varnames;
     amrex::Vector<std::string> m_idata_varnames;
+    amrex::Vector<std::string> m_fracdata_varnames;
 
     // array of multifabs to store the solution at each level of refinement
     amrex::Vector<amrex::MultiFab> m_macrodata;
     amrex::Vector<amrex::MultiFab> m_f;
+    amrex::Vector<amrex::Vector<amrex::MultiFab>> m_component_lattices;
     amrex::Vector<amrex::MultiFab> m_g;
     amrex::Vector<amrex::MultiFab> m_eq;
     amrex::Vector<amrex::MultiFab> m_eq_g;
@@ -225,6 +330,39 @@ private:
     amrex::Vector<amrex::iMultiFab> m_is_fluid;
     amrex::Vector<amrex::MultiFab> m_plt_mf;
     amrex::Vector<amrex::iMultiFab> m_mask;
+
+    // non-integer mask to identify fluid cells. Will be moved with advection
+    // equation for moving solid body
+    amrex::Vector<amrex::MultiFab> m_is_fluid_fraction;
+
+    // Moving body reference data
+    amrex::Gpu::DeviceVector<uint16_t> m_body_voxel_data;
+    amrex::IntVect m_body_voxel_dims{0};
+    amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> m_body_voxel_origin{0.0};
+    amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> m_body_voxel_dx{0.0};
+    amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> m_body_initial_center{0.0};
+    bool m_using_voxel_body = false;
+    // True only while read_checkpoint_file is repopulating m_is_fluid at
+    // t > 0 -- lets initialize_moving_body_shape recapture the reference
+    // voxel table for every level (finest wins), matching cold-start
+    // behaviour.  Outside this window, mid-run RemakeLevel / regrid calls
+    // to initialize_moving_body_shape still short-circuit (they would
+    // otherwise overwrite the reference with a post-motion m_is_fluid
+    // snapshot).
+    bool m_in_restart_init = false;
+
+    // Stationary body reference data
+    amrex::Vector<amrex::iMultiFab> m_stationary_mask;
+    bool m_has_stationary_body = false;
+
+    // FSLBM cell type per cell: CELL_SOLID(0), CELL_GAS(1), CELL_INTERFACE(2),
+    // CELL_LIQUID(3)
+    amrex::Vector<amrex::iMultiFab> m_cell_type;
+
+    // FSLBM fill level φ ∈ [0,1] — separate from m_is_fluid_fraction which is
+    // used by the moving-body SDF / refill_and_spill and must not be modified
+    // by FSLBM code.
+    amrex::Vector<amrex::MultiFab> m_phi_fslbm;
 
     const int m_macrodata_nghost = 1;
     const int m_f_nghost = 3;
@@ -241,6 +379,7 @@ private:
     amrex::Vector<amrex::BCRec> m_bcs;
 
     std::unique_ptr<FillPatchOpsBase> m_fillpatch_op;
+    amrex::Vector<std::unique_ptr<FillPatchOpsBase>> m_component_fillpatch_ops;
     std::unique_ptr<FillPatchOpsBase> m_fillpatch_g_op;
 
     amrex::Vector<std::unique_ptr<amrex::FabFactory<amrex::FArrayBox>>>
@@ -258,6 +397,10 @@ private:
 
     int m_plot_int = -1;
 
+    // screen output frequency (steps between step-header prints, default =
+    // plot_int)
+    int m_print_int = 1000;
+
     // checkpoint prefix and frequency
     std::string m_chk_file{"chk"};
     int m_chk_int = -1;
@@ -273,6 +416,20 @@ private:
     amrex::Real m_dt_outer = 1.0;
     amrex::Real m_nu = 1.0;
     amrex::Real m_alpha = 1.0;
+    int m_n_components = 0;
+    amrex::Vector<amrex::Real> m_component_diffusivities;
+
+    // Physical (SI) cell size and time step.  Default 1.0 means "already in LB
+    // units"; override via lbm.dx_phys [m] and lbm.dt_phys [s] when the input
+    // file contains a body force in physical units (e.g. lbm.gravity in m/s^2).
+    // These also feed BubbleParams (m_bubble_params.dx_phys, .dt_phys).
+    amrex::Real m_dx_phys = 1.0;
+    amrex::Real m_dt_phys = 1.0;
+
+    // External body force per unit mass in physical units [m/s^2].
+    // Converted to LB acceleration  g_LB = g_phys * dt_phys^2 / dx_phys  at the
+    // use site (apply_macroscopic_forcing).  Default = no gravity.
+    amrex::Vector<amrex::Real> m_gravity{0.0, 0.0, 0.0};
 
     // save streaming data to plot file
     bool m_save_streaming = true;
@@ -283,6 +440,103 @@ private:
     // compute and output forces
     bool m_compute_forces = false;
 
+    // clamp negative component densities before collision
+    bool m_clamp_component_densities = false;
+
+    // Mass-fraction window [Y_min, Y_max] for the component-lattice clamp.
+    // Cells with Y_c = rho_comp / rho_main outside this window are
+    // *rescaled* (or zeroed if rho_main is too small) to drag the zeroth
+    // moment back into the physical band [0, 1] with a numerical safety
+    // margin.  Cells INSIDE the window are left untouched — small negative
+    // excursions produced by the entropic Newton solve / streaming
+    // round-off during start-up transients must be preserved (zeroing
+    // them was found to break mass conservation in the single-phase
+    // scalar transport validation tests).
+    // Defaults [-0.1, 1.1] give 10× headroom on each side of the
+    // physically valid range Y ∈ [0, 1].
+    // Set via lbm.component_y_min / lbm.component_y_max.
+    amrex::Real m_clamp_component_y_min = -0.1;
+    amrex::Real m_clamp_component_y_max = 1.1;
+
+    // Carrier-fluid density floor below which the component populations
+    // in the cell are zeroed unconditionally — "mass fraction" is
+    // meaningless when there is no carrier mass (gas / solid cells).
+    // Default 1e-6.  Set via lbm.component_rho_main_floor.
+    amrex::Real m_clamp_component_rho_main_floor = 1.0e-6;
+
+    // use entropic alpha stabilisation for component lattices
+    bool m_use_entropic_components = false;
+
+    // use entropic alpha stabilisation for the main f distribution
+    bool m_use_entropic_f = false;
+
+    // ---------------------------------------------------------------
+    // Lagrangian bubble mass transfer physics
+    // ---------------------------------------------------------------
+
+public:
+    /// Apply macroscopic body force to the fluid distributions m_f and m_g
+    /// using the exact-difference forcing scheme:
+    ///     delta_f_q = f_eq(rho, u + F*dt/rho, T) - f_eq(rho, u, T)
+    ///     delta_g_q = g_eq(2*rho*e1, ...)        - g_eq(2*rho*e0, ...)
+    /// where the energy moments are recomputed with the shifted velocity.
+    /// Skips CELL_INTERFACE cells (Donath 2011, p122) to prevent acoustic
+    /// shocks at the FSLBM boundary.  Always adds gravity m_gravity (in LB
+    /// units g_LB = g_phys * dt_phys^2 / dx_phys); if force_mf != nullptr
+    /// also adds the bubble-induced acceleration (capped at 50x gravity).
+    void apply_macroscopic_forcing(int lev, const amrex::MultiFab* force_mf);
+
+    /// Apply bubble O2 source to the dissolved-O2 component lattice.
+    /// o2_src_mf: 1-component source rate in mol/(m³·s).
+    void apply_bubble_o2_source(int lev, const amrex::MultiFab& o2_src_mf);
+
+    /// Compute per-cell Smagorinsky SGS eddy viscosity nu_sgs into m_nu_sgs.
+    /// Reads velocity gradients from m_macrodata (ghost cells must be
+    /// filled — the caller is responsible; f_to_macrodata's FillBoundary
+    /// at the end of its kernel satisfies this in the standard step
+    /// ordering).  Populates m_nu_sgs[lev] with nu_sgs = (Cs·Δx)² · |S|
+    /// at every IS_FLUID cell, and 0 elsewhere.  No-op when
+    /// m_use_sgs_in_collision is false.
+    void compute_local_sgs_viscosity(int lev);
+
+    /// Append one CSV row of the dissolved-O2 concentration at every
+    /// probe location.  Called every m_probe_stats_int steps from
+    /// advance().  Public because it hosts an extended __device__ lambda
+    /// via amrex::ReduceOps (nvcc error 20092 forbids such lambdas in
+    /// private methods).  See LBM::compute_dissolved_o2_average for the
+    /// same pattern.  No-op when m_probe_enable is false or the step
+    /// does not fall on the m_probe_stats_int cadence.
+    void write_probe_stats(int step, amrex::Real phys_time_s);
+
+    /// Free-surface O2 Henry-equilibrium flux source.
+    ///
+    /// For every CELL_INTERFACE cell, compute a Kawase-style flux between
+    /// the liquid and the gas above the free surface and ADD it to
+    /// o2_src_mf (units mol/(m^3 s), same convention as the bubble source):
+    ///
+    ///   j   = k_L_surf * |grad phi|/dx_phys * (C_eq_surface - C_L_local)
+    ///   k_L = surface_kL_coefficient * (eps_local * nu)^(1/4) * Sc^(-1/2)
+    ///
+    /// where C_L_local is the local dissolved-O2 concentration in mol/m^3
+    /// (rho_O2_LB * C_ref) and C_eq_surface = bubble.surface_C_eq_mol_m3.
+    /// |grad phi| is the canonical phase-field interfacial-area density and
+    /// the gradient is taken from m_phi_fslbm via central differences.
+    /// Local epsilon is read from the m_derived(EPSILON_IDX) field.
+    ///
+    /// When bubble.surface_only_loss = 1 (the default) the flux is gated
+    /// to ZERO whenever (C_eq_surface - C_L_local) >= 0, i.e. the surface
+    /// never INJECTS oxygen and only acts when the liquid is supersaturated
+    /// relative to the headspace equilibrium concentration.  Set it to 0
+    /// for a bidirectional Henry's-law boundary.
+    ///
+    /// total_flux_mol_per_s_out: optional output total mol/s integrated
+    /// over the interface (informational, set to nullptr to skip).
+    void apply_free_surface_o2_flux(
+        int lev,
+        amrex::MultiFab& o2_src_mf,
+        amrex::Real* total_flux_mol_per_s_out = nullptr) const;
+
+private:
     // file for forces
     std::string m_forces_file{"forces.txt"};
 
@@ -295,6 +549,7 @@ private:
     amrex::Real m_cs_2 = 1.0;
 
     std::unique_ptr<ic::InitializerBase> m_ic_op;
+    amrex::Vector<std::unique_ptr<ic::InitializerBase>> m_component_ic_ops;
     std::string m_ic_type;
 
     // LBM Scheme selector. "energyD3Q27" activates product equilibrium,
@@ -304,8 +559,240 @@ private:
     // Initial temperature.
     amrex::Real m_initialTemperature = 1.0 / 3.0;
 
+    // threshold for converting fractional mask into integer is_fluid
+    amrex::Real m_is_fluid_fraction_threshold = 0.5;
+
+    // ---------------------------------------------------------------
+    // Free-surface (conservative phase-field, Chiu & Lin 2011)
+    // ---------------------------------------------------------------
+    // Enable by setting  lbm.free_surface = 1  in the input file.
+    // m_is_fluid_fraction plays the role of Phi in [0,1]:
+    //   Phi = 1  liquid cells  (LBM is active)
+    //   Phi = 0  gas headspace (LBM is inactive — like a moving solid)
+    // The initial flat interface at  z = m_free_surface_z  (LB cells)
+    // is smeared over ~1.5 cells with a tanh profile.
+    bool m_free_surface = false;
+    amrex::Real m_free_surface_z = 0.0; // interface z, in LB cell index units
+    amrex::Real m_free_surface_eps =
+        0.0; // interface half-width  (~1.5*dx, set by init)
+    amrex::Real m_phi_M0 =
+        0.0; // initial total Phi mass for mass redistribution
+    amrex::Real m_phi_gamma_coeff =
+        1.0; // multiplier on gamma = gamma_coeff * |u|
+    // FSLBM reference density: read from ic_constant.density at startup.
+    // Used for ABB ρ₀, repair/spawn seeding (feq target), and repair threshold.
+    // Defaults to 1.0 (the conventional LBM reference) but scales correctly
+    // when the initial bulk density differs from 1.
+    amrex::Real m_fslbm_rho_ref = 1.0;
+    // Surface tension in LB units for the ABB gas-pressure BC.
+    // p_G = p_atm - 2*sigma*kappa;  rho_G = p_G / (Rg*T_interface).
+    // Default 0 = flat interface (no Laplace pressure).
+    // Set via lbm.fslbm_sigma in the input file.
+    amrex::Real m_fslbm_sigma = 0.0;
+    // Static contact angle for all solid walls [degrees].
+    // 90 = neutral wetting (default, same as original Körner model).
+    // < 90 = hydrophilic  ;  > 90 = hydrophobic.
+    // Set via lbm.fslbm_contact_angle in the input file.
+    amrex::Real m_fslbm_contact_angle_deg = 90.0;
+
+    // Stranded-cell sweep search radius (LB cells).
+    // FSLBM Step 0_pre converts any CELL_INTERFACE cell that has no
+    // CELL_LIQUID in a (2R+1)^3 box of neighbours to CELL_GAS
+    // (zeroes φ, f, g).  This is a purely topological criterion:
+    // "cannot drain to bulk fluid via streaming within R steps".
+    // Default R=2 (5x5x5 box = 124 neighbours) catches isolated
+    // droplets and detached splash sheets two cells from any liquid.
+    // R=1 reduces to a strict D3Q27 isolation test (very conservative).
+    // R must not exceed m_f_nghost (=3) so reads stay inside the ghost
+    // layer.  Set to 0 to disable the sweep entirely.
+    // Set via lbm.fslbm_strand_search_radius in the input file.
+    int m_fslbm_strand_search_radius = 2;
+
+    // Dirichlet thermal boundary condition at FSLBM interface cells:
+    //   T(CELL_INTERFACE) = T_ref  (= m_initialTemperature)
+    // Physical justification: the gas headspace (and any free-surface
+    // interface cell facing it) is in thermal equilibrium with the
+    // atmospheric reservoir.  Surface tension / vapour transport
+    // homogenises temperature across the interface much faster than
+    // the lattice can resolve.
+    //
+    // Implementation: after the normal collision step, for each
+    // CELL_INTERFACE cell, REBUILD g_eq using the cell's actual
+    // (rho, u) and T = T_ref, then overwrite g_arr.  f is left
+    // untouched, so mass and momentum are conserved.  Any T anomaly
+    // injected by the ABB / replenish_g / streaming asymmetries at
+    // the interface is healed within one step instead of accumulating
+    // over thousands of steps until a single cell blows up.
+    //
+    // Default 0 (legacy: interface T evolves freely from g moments).
+    // Set lbm.fslbm_interface_isothermal = 1 to activate.
+    bool m_fslbm_interface_isothermal = false;
+
+    // Local-density blending for the Step 1b ABB gas-side target ρ_G.
+    //
+    // Compressible-FSLBM mass leak (June 2026): with ρ_G = ρ_ref and
+    // local cells driven to ρ_iv > ρ_ref by the impeller-driven flow,
+    // each INTERFACE-GAS link injects ≈ 2·w_q·(ρ_G − ρ_iv) of mass,
+    // which is systematically negative in the entire surface band.
+    // Summed over ~88k cells × ~10 gas links per step ≈ −2-3 mass/step.
+    //
+    // The Donath/Körner FSLBM hides this because they assume
+    // incompressibility (ρ_iv ≈ ρ_ref).  In the compressible regime,
+    // we blend the ABB target toward the local cell density:
+    //
+    //   ρ_G = (1 − β) · ρ_ref + β · ρ_iv_smoothed   (then add Δρ_laplace)
+    //
+    // where ρ_iv_smoothed is a 6-face-neighbour-average of CELL_LIQUID
+    // and CELL_INTERFACE densities (skipping GAS/SOLID).  β=0 is the
+    // legacy ρ_G = ρ_ref.  β=1 is fully local — the existing code
+    // comment in Step 1b warns this creates a positive feedback loop;
+    // empirically β ≤ 0.3 is safe.  Recommended for compressible runs:
+    // β = 0.2.  Set lbm.fslbm_abb_local_rho_blend in the input file.
+    amrex::Real m_fslbm_abb_local_rho_blend = 0.0;
+
+    // Per-cell phi-correction (Variant D, June 2026; corrected formula).
+    //
+    // Closes the FSLBM compressible-regime mass leak by routing only
+    // the GAS-link ABB-induced f-mass change at INTERFACE cells back
+    // into the phi field.  Per-cell algorithm at each FSLBM step:
+    //   m_pre[iv]   = Σ_q f[iv][q]                       (Step 0c snapshot,
+    //   comp 0) Δm_full[iv] = Σ_{q : nbr(q) ∈ LIQ/IFC}            (Step 0c,
+    //   comp 1)
+    //                    ( f_pre[nbr(q)][bq] − f_pre[iv][q] )
+    //   ... step 1a / 1b / 2 / 3 / 4 run ...
+    //   m_post[iv]  = Σ_q f[iv][q]                       (after Step 3)
+    //   Δm_ABB      = (m_post − m_pre) − Δm_full
+    //   phi[iv] -= Δm_ABB / max(rho_post, ε·ρ_ref)
+    //
+    // Δm_full is the un-weighted (S_q ≡ 1) bulk-fluid streaming flux —
+    // i.e. what the post-stream m_post would be if there were no ABB.
+    // Subtracting it from (m_post − m_pre) leaves precisely the GAS-link
+    // ABB residual, which is the actual leak.  Solid bounce-back at iv
+    // contributes 0 to (m_post − m_pre) so it needs no separate term.
+    //
+    // f and g moments are NOT modified, so velocity, temperature, and
+    // stress are untouched.  Only phi (the volume-fraction ledger) is
+    // adjusted.  Schwarzmeier 2023 §3.3 proves no ABB variant balances
+    // forces at moving interfaces, so the leak is fundamental; this
+    // closes the bookkeeping at the post-processing level.
+    //
+    // The previous (mass_flux[0]-based) formulation was incorrect: it
+    // used Step 2's Körner-weighted Δm_intended in place of Δm_full,
+    // which leaks (1 − S_q)·flux at every IFC-IFC link into "unintended"
+    // and destabilises the interface band (run 14397288: 6× worse leak
+    // than the no-correction baseline 14348303).
+    //
+    // Default 0 (legacy: leak observable as M_tot drift).  Set
+    // lbm.fslbm_abb_mass_correction = 1 to activate.
+    bool m_fslbm_abb_mass_correction = false;
+
+    // Per-cell pre-FSLBM-step buffer used by the phi correction above.
+    // Allocated 2 components, no ghost.  Filled at the very top of
+    // fslbm_advance_surface for INTERFACE cells; read by the correction
+    // kernel just after Step 4.
+    //   comp 0: m_pre   = Σ_q f_pre[iv][q]
+    //   comp 1: Δm_full = un-weighted Σ over LIQ/IFC links
+    amrex::Vector<amrex::MultiFab> m_pre_fslbm_mass;
+
+    // Variant E: global f₀ mass clamp (June 2026; LIQUID-target since
+    // June 19 2026).
+    //
+    // At the end of each fslbm_advance_surface call, compute the current
+    // total fluid mass
+    //   M_current = Σ_{LIQUID} ρ_iv + Σ_{INTERFACE} φ_iv · ρ_iv
+    // (same formula the [mass_diag] line prints as M_tot), compare with
+    // the target captured at the first call, and inject the per-cell
+    // deficit
+    //   ε_cell = (M_target − M_current) / N_liq
+    // into f[iv][0] at every CELL_LIQUID cell.  Because c₀ = 0, the
+    // injection preserves momentum, stress, heat-flux contribution, and
+    // every other moment of f — only ρ shifts.  Spreading the deficit
+    // over the bulk liquid (~3 M cells) instead of just the interface
+    // band (~25 k cells) keeps |ε_cell| in the 10^-8–10^-5 range even
+    // under pathological ABB drain regimes (see run 14422476: original
+    // interface-target Variant E went unstable when ε_cell reached ~0.5
+    // ≈ f_0 itself during impeller spin-up).
+    //
+    // Default 0.  Set lbm.fslbm_global_mass_clamp = 1 to activate.
+    // Mutually compatible with Variant D, though enabling both is
+    // pointless (E does the bookkeeping correction globally).
+    bool m_fslbm_global_mass_clamp = false;
+
+    // Interval (in steps) between clamp passes.  Each pass costs ~one
+    // 3-component MultiFab::sum() + one small ParallelFor over
+    // CELL_INTERFACE cells + one FillBoundary on m_f (~150 µs/step on
+    // 180³ H100, or ~3% of step time; worse on multi-GPU where the
+    // reduction crosses the network).  Default 10 keeps the deficit
+    // bounded at ~10× per-step leak (~10 mass units = 3×10⁻⁶ relative
+    // to M_target ~3.4e6) which is still well below noise.  Set to 1
+    // to clamp every step.  Ignored when m_fslbm_global_mass_clamp = 0.
+    int m_fslbm_global_mass_clamp_interval = 10;
+
+    // Target mass captured at first call to fslbm_advance_surface.  Stays
+    // < 0 until then; on first call M_target = M_current_at_step_0.
+    // NOTE: not currently checkpointed — restarts re-capture from the
+    // first post-restart step (so M_target locks in any leak that
+    // occurred up to the checkpoint).  Acceptable for cold-start runs;
+    // restart support is a few-line addition in read_checkpoint_file
+    // if/when needed.
+    amrex::Real m_fslbm_mass_target = amrex::Real(-1.0);
+
+    // ---------------------------------------------------------------
+    // Smagorinsky SGS in the collision (Thomas et al. 2021 Eq. 4)
+    // ---------------------------------------------------------------
+    // Master switch: when true, before every relax_f_to_equilibrium call
+    // the local strain rate |S| is computed from macrodata gradients and
+    // the Smagorinsky eddy viscosity
+    //
+    //     nu_sgs = (Cs · Δx)^2 · |S|,   Cs = constants::SMAGORINSKY_CS,
+    //
+    // is stored in m_nu_sgs.  Inside the BGK relaxation the collision uses
+    //
+    //     omega = 1 / (nu_local / (Rg · T · dt) + 1/2),
+    //     nu_local = m_nu + m_nu_sgs[cell],
+    //
+    // i.e. the standard total (molecular + eddy) viscosity form.  The
+    // R·T factor in the denominator is the isothermal LBM sound-speed
+    // squared cs_T² = R·T; adiabatic cs² = γ·R·T is only the physical
+    // sound propagation speed (Mach number) and does NOT enter here.
+    // The existing compute_derived path already stores nu_sgs implicitly
+    // via  ε = ν_T · |S|² ; the same formula is reused here.
+    // Default false (backward-compatible); set lbm.use_sgs_in_collision.
+    bool m_use_sgs_in_collision = false;
+    // Persistent per-cell SGS eddy viscosity nu_sgs (LB units, 1 component,
+    // no ghosts).  Filled by compute_local_sgs_viscosity(lev) right before
+    // relax_f_to_equilibrium.  Only meaningful / read when
+    // m_use_sgs_in_collision is true, but always allocated so the array
+    // layout and MFIter iteration order match m_macrodata unconditionally.
+    amrex::Vector<amrex::MultiFab> m_nu_sgs;
+
+    // Moving body parameters
+    bool m_body_is_moving = false;
+    amrex::GpuArray<amrex::Real, 3> m_body_velocity = {0.0, 0.0, 0.0};
+    // m_body_angular_velocity is the CURRENT (possibly ramped) angular
+    // velocity used by every body kernel.  m_body_angular_velocity_target
+    // is the steady-state value read from the input file
+    // (body.angular_velocity).  m_body_angular_velocity_ramp_steps
+    // controls a linear ramp at startup (step 0 -> 0; ramp_steps -> target):
+    //   0  : no ramp; impeller spins at the target rate from step 0 (legacy)
+    //   N>0: omega(step) = (step / N) * target   for step <= N
+    //        omega(step) =                target for step >  N
+    // A long ramp lets the wall boundary layers develop without seeing the
+    // full Ma=0.067 jet at startup, which produced CELL_LIQUID rho
+    // excursions to ~300 at the baffle wall in run 14310435 (from-zero).
+    amrex::GpuArray<amrex::Real, 3> m_body_angular_velocity = {0.0, 0.0, 0.0};
+    amrex::GpuArray<amrex::Real, 3> m_body_angular_velocity_target = {
+        0.0, 0.0, 0.0};
+    int m_body_angular_velocity_ramp_steps = 0;
+    amrex::GpuArray<amrex::Real, 3> m_body_center = {0.0, 0.0, 0.0};
+    amrex::Real m_body_rotation_angle = 0.0; // accumulated rotation
+    std::string m_body_geom_type;
+
     // Body is isothermal.
     bool m_bodyIsIsothermal = false;
+
+    // Entire fluid is isothermal (force T = body_temperature everywhere).
+    bool m_fluidIsIsothermal = false;
 
     // Body temperature.
     amrex::Real m_bodyTemperature = 1.0 / 3.0;
@@ -322,6 +809,97 @@ private:
     // Set the actual reference speed of sound
     amrex::Real m_speedOfSound_Ref = std::sqrt(
         m_adiabaticExponent * (m_R_u / m_m_bar) * m_initialTemperature);
+
+    // ---------------------------------------------------------------
+    // Two-step catalytic reaction parameters
+    // Mechanism:  S + C <--k_f/k_r--> I --k_p--> P + C
+    //   component 0 = S  (substrate)
+    //   component 1 = C  (catalyst)
+    //   component 2 = I  (intermediate)
+    //   component 3 = P  (product)
+    // ---------------------------------------------------------------
+    bool m_enable_reactions = false;
+    amrex::Real m_rxn_k_forward = 0.0; // bimolecular  [LB_rho^-1 step^-1]
+    amrex::Real m_rxn_k_reverse = 0.0; // unimolecular [step^-1]
+    amrex::Real m_rxn_k_product = 0.0; // unimolecular [step^-1]
+
+    // Timed catalyst injection
+    bool m_cat_inject_done = false;
+    int m_cat_inject_step = -1;             // LB step for catalyst release
+    amrex::Real m_cat_inject_density = 0.0; // LB rho assigned in box
+    amrex::RealVect m_cat_inject_box_lo{AMREX_D_DECL(0.0, 0.0, 0.0)};
+    amrex::RealVect m_cat_inject_box_hi{AMREX_D_DECL(0.0, 0.0, 0.0)};
+
+    // Species statistics output
+    std::string m_species_stats_file{"species_stats.csv"};
+    std::fstream m_species_stats_stream;
+
+    // ---------------------------------------------------------------
+    // Fixed-location probes (analog of Reference Solver's probe.txt output)
+    // ---------------------------------------------------------------
+    // Sample dissolved-O2 concentration at fixed spatial points at a
+    // configurable interval, write to a CSV file.  Configuration lives
+    // under the "probe." namespace in the input file:
+    //     probe.enable       = 0 (default off)   master switch
+    //     probe.n_points     = 1                 number of probes
+    //     probe.positions    = x0 y0 z0 x1 y1 z1 ...   LB cell coords
+    //     probe.stats_int    = 200               steps between CSV rows
+    //     probe.stats_file   = "probes.csv"      output file name
+    // Sampled quantity per probe: C_L(x,t) via trilinear interpolation of
+    // (sum_q f_O2) * C_ref  [mol/m^3] on m_component_lattices[0].  Each
+    // row is written as:
+    //     step, phys_time_s, C_L_probe0, C_L_probe1, ...
+    // No-op when m_probe_enable == false or m_probe_n_points == 0.
+    bool m_probe_enable = false;
+    int m_probe_n_points = 0;
+    amrex::Vector<amrex::Real> m_probe_x, m_probe_y, m_probe_z;
+    std::string m_probe_stats_file = "probes.csv";
+    int m_probe_stats_int = 200;
+    std::fstream m_probe_stats_stream;
+
+    // Read probe.* parameters (called from read_parameters).
+    void read_probe_parameters();
+    // Open the probe stats CSV file, appending or truncating depending on
+    // whether the file already exists.  Called once during initialization.
+    void open_probe_stats_file(bool append);
+    // NOTE: write_probe_stats is DECLARED PUBLIC above (its extended
+    // __device__ lambda cannot live in a private method — nvcc error
+    // 20092).  Left as a private data-only section here.
+
+    // ---------------------------------------------------------------
+    // Lagrangian bubble physics (two-phase kLa mass transfer)
+    // ---------------------------------------------------------------
+    bool m_enable_bubbles = false;
+    BubbleManager m_bubbles;
+    BubbleParams m_bubble_params;
+
+    /// Concentration reference: 1 LB_rho unit ≡ m_bubble_o2_C_ref [mol/m³]
+    /// Used to convert k_La O2 source from mol/(m³·s) → LB_rho/step.
+    amrex::Real m_bubble_o2_C_ref = 1.0;
+
+    // ---------------------------------------------------------------
+    // Free-surface O2 Henry-equilibrium flux (apply_free_surface_o2_flux)
+    // ---------------------------------------------------------------
+    /// Master switch for the free-surface O2 boundary condition.
+    /// Set via bubble.enable_surface_flux in the input file (default off).
+    bool m_surface_o2_flux_enable = false;
+    /// Kawase pre-factor in k_L_surf = C * (eps * nu)^(1/4) * Sc^(-1/2).
+    /// Defaults to 0.301 (same value as the bubble k_L correlation).
+    /// Set via bubble.surface_kL_coefficient.
+    amrex::Real m_surface_kL_coefficient = 0.301;
+    /// Headspace equilibrium liquid concentration C_eq_surface [mol/m^3].
+    /// Drives the flux:  j = k_L_surf * a_surf * (C_eq_surface - C_L_local).
+    /// Defaults to 1.427 (= 0.032 * 44.6 = S * O2_initial_conc, i.e. the
+    /// liquid saturation in equilibrium with the bubble gas at STP).
+    /// Set via bubble.surface_C_eq_mol_m3.
+    amrex::Real m_surface_C_eq_mol_m3 = 1.427;
+    /// When 1, the flux is gated to zero unless C_L_local > C_eq_surface,
+    /// i.e. the surface only DEGASSES the liquid and never inputs O2.
+    /// Set via bubble.surface_only_loss (default 1 — desorption-only).
+    bool m_surface_only_loss = true;
+
+    /// Internal step counter for coalescence and stats intervals
+    int m_bubble_step_counter = 0;
 };
 } // namespace lbm
 #endif

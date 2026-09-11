@@ -28,27 +28,139 @@ struct Constant
 
         int model_type = 1;
 
+        // Shape parameters
+        int region_type{0}; // 0 = all, 1 = sphere, 2 = cylinder, 3 = box
+        amrex::RealVect region_center = {AMREX_D_DECL(0.0, 0.0, 0.0)};
+        amrex::Real region_radius{1.0};
+        amrex::Real cylinder_height{1.0};
+        int cylinder_dir{2}; // 0 = x, 1 = y, 2 = z
+        amrex::RealVect region_lo = {AMREX_D_DECL(0.0, 0.0, 0.0)};
+        amrex::RealVect region_hi = {AMREX_D_DECL(0.0, 0.0, 0.0)};
+        amrex::Real outside_density{0.0};
+
         AMREX_GPU_DEVICE
         void operator()(
-            const amrex::IntVect& /*iv*/,
-            amrex::GeometryData const& /*geom*/,
+            const amrex::IntVect& iv,
+            amrex::GeometryData const& geom,
             amrex::Real& rho,
             amrex::RealVect& vel) const
         {
-            rho = density;
+            const amrex::Real* prob_lo = geom.ProbLo();
+            const amrex::Real* dx = geom.CellSize();
+            const amrex::Real x = prob_lo[0] + (iv[0] + 0.5) * dx[0];
+            const amrex::Real y = prob_lo[1] + (iv[1] + 0.5) * dx[1];
+            [[maybe_unused]] const amrex::Real z =
+                AMREX_D_PICK(, 0.0, prob_lo[2] + (iv[2] + 0.5) * dx[2]);
+
+            bool is_inside = true;
+            if (region_type == 1) { // sphere
+                const amrex::Real r2 = AMREX_D_TERM(
+                    (x - region_center[0]) * (x - region_center[0]),
+                    +(y - region_center[1]) * (y - region_center[1]),
+                    +(z - region_center[2]) * (z - region_center[2]));
+                if (r2 > region_radius * region_radius) {
+                    is_inside = false;
+                }
+            } else if (region_type == 2) { // cylinder
+                amrex::Real r2 = 0.0;
+                amrex::Real h = 0.0;
+                if (cylinder_dir == 0) {
+                    r2 = AMREX_D_TERM(
+                        0.0, +(y - region_center[1]) * (y - region_center[1]),
+                        +(z - region_center[2]) * (z - region_center[2]));
+                    h = std::abs(x - region_center[0]);
+                } else if (cylinder_dir == 1) {
+                    r2 = AMREX_D_TERM(
+                        (x - region_center[0]) * (x - region_center[0]), +0.0,
+                        +(z - region_center[2]) * (z - region_center[2]));
+                    h = std::abs(y - region_center[1]);
+                } else {
+                    r2 = (x - region_center[0]) * (x - region_center[0]) +
+                         (y - region_center[1]) * (y - region_center[1]);
+                    h = AMREX_D_PICK(0.0, 0.0, std::abs(z - region_center[2]));
+                }
+                if (r2 > region_radius * region_radius ||
+                    h > 0.5 * cylinder_height) {
+                    is_inside = false;
+                }
+            } else if (region_type == 3) { // box
+                if (AMREX_D_TERM(
+                        x < region_lo[0] || x > region_hi[0],
+                        || y < region_lo[1] || y > region_hi[1],
+                        || z < region_lo[2] || z > region_hi[2])) {
+                    is_inside = false;
+                }
+            }
+
+            if (is_inside) {
+                rho = density;
+            } else {
+                rho = outside_density;
+            }
             vel = velocity;
         }
 
         AMREX_GPU_DEVICE void thermal_initialize(
-            const amrex::IntVect& /*iv*/,
-            amrex::GeometryData const& /*geom*/,
+            const amrex::IntVect& iv,
+            amrex::GeometryData const& geom,
             amrex::Real& rho,
             amrex::RealVect& vel,
             amrex::Real& temperature,
             amrex::Real& R,
             amrex::Real& gamma) const
         {
-            rho = density;
+            const amrex::Real* prob_lo = geom.ProbLo();
+            const amrex::Real* dx = geom.CellSize();
+            const amrex::Real x = prob_lo[0] + (iv[0] + 0.5) * dx[0];
+            const amrex::Real y = prob_lo[1] + (iv[1] + 0.5) * dx[1];
+            [[maybe_unused]] const amrex::Real z =
+                AMREX_D_PICK(, 0.0, prob_lo[2] + (iv[2] + 0.5) * dx[2]);
+
+            bool is_inside = true;
+            if (region_type == 1) { // sphere
+                const amrex::Real r2 = AMREX_D_TERM(
+                    (x - region_center[0]) * (x - region_center[0]),
+                    +(y - region_center[1]) * (y - region_center[1]),
+                    +(z - region_center[2]) * (z - region_center[2]));
+                if (r2 > region_radius * region_radius) {
+                    is_inside = false;
+                }
+            } else if (region_type == 2) { // cylinder
+                amrex::Real r2 = 0.0;
+                amrex::Real h = 0.0;
+                if (cylinder_dir == 0) {
+                    r2 = AMREX_D_TERM(
+                        0.0, +(y - region_center[1]) * (y - region_center[1]),
+                        +(z - region_center[2]) * (z - region_center[2]));
+                    h = std::abs(x - region_center[0]);
+                } else if (cylinder_dir == 1) {
+                    r2 = AMREX_D_TERM(
+                        (x - region_center[0]) * (x - region_center[0]), +0.0,
+                        +(z - region_center[2]) * (z - region_center[2]));
+                    h = std::abs(y - region_center[1]);
+                } else {
+                    r2 = (x - region_center[0]) * (x - region_center[0]) +
+                         (y - region_center[1]) * (y - region_center[1]);
+                    h = AMREX_D_PICK(0.0, 0.0, std::abs(z - region_center[2]));
+                }
+                if (r2 > region_radius * region_radius ||
+                    h > 0.5 * cylinder_height) {
+                    is_inside = false;
+                }
+            } else if (region_type == 3) { // box
+                if (AMREX_D_TERM(
+                        x < region_lo[0] || x > region_hi[0],
+                        || y < region_lo[1] || y > region_hi[1],
+                        || z < region_lo[2] || z > region_hi[2])) {
+                    is_inside = false;
+                }
+            }
+
+            if (is_inside) {
+                rho = density;
+            } else {
+                rho = outside_density;
+            }
             vel = velocity;
 
             temperature = initial_temperature;
@@ -59,7 +171,7 @@ struct Constant
 
     using DeviceType = DeviceOp;
 
-    explicit Constant();
+    explicit Constant(const std::string& prefix = "ic_constant");
 
     static std::string identifier() { return "ic_constant"; }
 
@@ -98,7 +210,7 @@ struct TaylorGreen
             const amrex::Real* dx = geom.CellSize();
             const amrex::Real x = prob_lo[0] + (iv[0] + 0.5) * dx[0];
             const amrex::Real y = prob_lo[1] + (iv[1] + 0.5) * dx[1];
-            const amrex::Real z =
+            [[maybe_unused]] const amrex::Real z =
                 AMREX_D_PICK(, 0.0, prob_lo[2] + (iv[2] + 0.5) * dx[2]);
             const amrex::Real omega0 = omega[0];
             const amrex::Real omega1 = omega[1];
@@ -130,7 +242,7 @@ struct TaylorGreen
             const amrex::Real* dx = geom.CellSize();
             const amrex::Real x = prob_lo[0] + (iv[0] + 0.5) * dx[0];
             const amrex::Real y = prob_lo[1] + (iv[1] + 0.5) * dx[1];
-            const amrex::Real z =
+            [[maybe_unused]] const amrex::Real z =
                 AMREX_D_PICK(, 0.0, prob_lo[2] + (iv[2] + 0.5) * dx[2]);
             const amrex::Real omega0 = omega[0];
             const amrex::Real omega1 = omega[1];
@@ -432,6 +544,10 @@ public:
     virtual ~InitializerBase() = default;
 
     virtual void initialize(const int lev, amrex::GeometryData const& geom) = 0;
+    virtual void initialize_lattice(
+        const int lev,
+        amrex::GeometryData const& geom,
+        amrex::MultiFab& mf) = 0;
 };
 
 template <typename ICOp>
@@ -444,7 +560,7 @@ public:
         const amrex::Real& mesh_speed,
         const ICOp ic_op,
         amrex::Vector<amrex::MultiFab>& f)
-        : m_mesh_speed(mesh_speed), m_op(ic_op), m_f(f)
+        : m_mesh_speed(mesh_speed), m_op(ic_op), m_f(f), m_g(nullptr)
     {}
 
     Initializer(
@@ -452,18 +568,19 @@ public:
         const ICOp& ic_op,
         amrex::Vector<amrex::MultiFab>& f,
         amrex::Vector<amrex::MultiFab>& g)
-        : m_mesh_speed(mesh_speed), m_op(ic_op), m_f(f), m_g(g)
+        : m_mesh_speed(mesh_speed), m_op(ic_op), m_f(f), m_g(&g)
     {}
 
     ~Initializer() override = default;
 
     void initialize(const int lev, amrex::GeometryData const& geom) override
     {
+        AMREX_ASSERT(m_g != nullptr);
         const stencil::Stencil stencil;
         const auto& evs = stencil.evs;
         const auto& weight = stencil.weights;
         auto const& f_arrs = m_f[lev].arrays();
-        auto const& g_arrs = m_g[lev].arrays();
+        auto const& g_arrs = (*m_g)[lev].arrays();
         const amrex::Real l_mesh_speed = m_mesh_speed;
         ICDeviceOp ic(m_op.device_instance());
 
@@ -524,10 +641,53 @@ public:
         amrex::Gpu::synchronize();
     }
 
+    void initialize_lattice(
+        [[maybe_unused]] const int lev,
+        amrex::GeometryData const& geom,
+        amrex::MultiFab& mf) override
+    {
+        const stencil::Stencil stencil;
+        const auto& evs = stencil.evs;
+        const auto& weight = stencil.weights;
+        auto const& f_arrs = mf.arrays();
+        const amrex::Real l_mesh_speed = m_mesh_speed;
+        ICDeviceOp ic(m_op.device_instance());
+
+        if (ic.model_type == 1) {
+            amrex::ParallelFor(
+                mf, mf.nGrowVect(), constants::N_MICRO_STATES,
+                [=] AMREX_GPU_DEVICE(
+                    int nbx, int i, int j, int k, int q) noexcept {
+                    const amrex::Real wt = weight[q];
+                    const auto& ev = evs[q];
+
+                    const amrex::IntVect iv(AMREX_D_DECL(i, j, k));
+                    amrex::Real rho = 1.0;
+                    amrex::RealVect vel(AMREX_D_DECL(0.0, 0.0, 0.0));
+                    amrex::Real temperature = 1.0 / 3.0;
+                    amrex::Real specific_gas_constant =
+                        ic.R_u / constants::AIR_MOLAR_MASS;
+                    amrex::Real gamma = 1.667;
+
+                    ic.thermal_initialize(
+                        iv, geom, rho, vel, temperature, specific_gas_constant,
+                        gamma);
+
+                    f_arrs[nbx](i, j, k, q) = set_equilibrium_value(
+                        rho, vel, specific_gas_constant * temperature,
+                        l_mesh_speed, wt, ev);
+                });
+        } else {
+            amrex::Abort("Invalid model_type");
+        }
+
+        amrex::Gpu::synchronize();
+    }
+
     const amrex::Real m_mesh_speed;
     const ICOp m_op;
     amrex::Vector<amrex::MultiFab>& m_f;
-    amrex::Vector<amrex::MultiFab>& m_g;
+    amrex::Vector<amrex::MultiFab>* m_g;
 };
 
 } // namespace lbm::ic

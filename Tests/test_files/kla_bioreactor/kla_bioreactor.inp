@@ -1,0 +1,469 @@
+# ============================================================
+# KLA BIOREACTOR — SPARGED STIRRED TANK, OXYGEN MASS TRANSFER
+# ============================================================
+#
+# Reference: Thomas et al. (2021), CES 237, 116538.
+#            DOI: 10.1016/j.ces.2021.116538
+# Target:    k_La ≈ 4.1 hr⁻¹  (literature benchmark at 400 RPM, 0.4 L/min gas)
+#
+# Physics:
+#   Component 0 : dissolved O₂  (Sc = 500)
+#   Lagrangian bubbles: injection, buoyancy/drag/added-mass, coalescence,
+#   breakup (Hinze criterion, triangle-mode daughter distribution),
+#   Kawase k_L (Eq. 17) mass-transfer source deposited onto component 0.
+#
+# ---------------------------------------------------------------
+# Unit conversion reference
+# ---------------------------------------------------------------
+#   Physical tank diameter  : T  = 0.18 m        => 180 lattice cells
+#   Lattice spacing         : dx = T/180          = 1.000e-3 m
+#   Impeller diameter       : Di = 0.058 m        => 58 cells  (radius = 29 cells)
+#   Impeller off-bottom     : C  = 0.05 m         => 50 cells  => body.center z = -90+50 = -40
+#
+#   Impeller rotation rate  : N  = 400 RPM  = 41.888 rad/s
+#   Speed of sound (thermal LBM): cs = sqrt(γ·T) = sqrt(1.4×0.03333) = 0.2160
+#   LB angular velocity     : omega_LB = 0.0005 rad/step
+#     => tip speed LB = omega_LB × 29 cells = 0.01450
+#     => Ma = 0.01450 / 0.2160 = 0.067  ✓  (stable; cf. stirred_tank_reacting
+#        which used omega_LB=0.00025 at 180 RPM → Ma≈0.031)
+#   Physical time step      : dt_phys = omega_LB / omega_phys
+#                           = 0.0005 / 41.888 = 1.19365e-5 s/step
+#
+#   Reynolds number (impeller) : Re = N*Di²/ν
+#     = (400/60)*(0.058)²/(1e-6) ≈ 22 400
+#
+#   Kinematic viscosity     : ν_phys = 1e-6 m²/s (water)
+#   LB viscosity            : ν_LB   = 0.016 (bare BGK; molecular part of ν_T)
+#     LES-SGS closure per Thomas et al. (2021) Eq. 4 is active in the collision:
+#       ν_r = (C_s·Δx)² · |S|,     C_s = 0.1  (Yu et al. 2005 DNS calibration)
+#       ν_T = ν_LB + ν_r          → used in omega = 1/(ν_T/(R·T·dt) + 1/2)
+#     The R·T factor is the isothermal LBM sound-speed² cs_T² = R·T; adiabatic
+#     cs² = γ·R·T only sets the physical sound-wave speed (Mach number) and
+#     does NOT appear in the ν → τ relation.  The same ν_T·|S|² is written to
+#     the EPSILON_IDX diagnostic consumed by the bubble breakup D_e and the
+#     k_L mass-transfer coefficient (Kawase Eq. 17).
+#
+#   O₂ diffusivity          : D_O2_phys = 2e-9 m²/s   (Sc = 500)
+#   LB O₂ diffusivity       : D_O2_LB   = ν_LB / Sc = 0.008 / 500 = 1.6e-5
+#     (uses entropic solver to maintain stability at Sc = 500)
+#
+#   Concentration reference : C_ref = 100 mol/m³
+#     => 1 LB_rho unit represents 100 mol/m³ dissolved O₂
+#     => O₂ saturation conc: S × C_g = 0.032 × 44.6 = 1.43 mol/m³ = 0.0143 LB_rho
+#
+#   Gas flow rate           : Q   = 0.4 L/min = 6.67e-6 m³/s
+#   Bubble initial diameter : d₀  = 1.1 mm = 1.1e-3 m
+#   Bubble initial O₂ conc  : Cg₀ = 1/V_m = 1/0.0224 = 44.6 mol/m³
+#   Injection rate          : ṅ = Q/V_b0 ≈ 9568 bubbles/s
+#                           = ṅ × dt_phys ≈ 0.114 bub/step total (≈ 0.016 bub/step/point)
+#
+#   Free surface (liquid top): h_fluid = 0.16 m = 160 cells from bottom
+#     => liquid free surface at z = -90 + 160 = 70 LB cells
+#
+#   Total sim (10 s physical): 10 / 1.19365e-5 ≈ 838 000 steps
+#   Coalescence start (2 s physical): 2 / 1.19365e-5 ≈ 167 500 steps
+#   Coalescence interval: 33 steps ≈ 395 µs physical (matches benchmark's 5 steps at 79 µs)
+#
+#   Sparger ring: 7 holes, radius = 15 cells, z = -55 (15 cells below impeller)
+#
+#   STL geometry notes:
+#     pitched_impeller.stl  — designed for radius ≈ 26.7 cells; scale to 29/26.7 ≈ 1.086
+#     baffled_wall.stl      — designed for 128-cell tank; scale to 180/128 ≈ 1.406
+# ============================================================
+
+max_step = 2514000  # ≈ 10 s physical time
+
+# ---------------------------------------------------------------
+# Geometry
+# ---------------------------------------------------------------
+geometry.prob_lo = 0.0 0.0 -90.0
+geometry.prob_hi = 180.0 180.0 90.0
+geometry.is_periodic = 0 0 0
+
+# ---------------------------------------------------------------
+# Grid / time-stepping
+# ---------------------------------------------------------------
+amr.n_cell  = 180 180 180
+amr.max_level = 0
+# 2-GPU X-cut decomposition — 2 grids of 90x180x180 (one per rank).
+# Ghost exchange = a single 180x180 face across NVLink (via libmpi_gtl_cuda,
+# requires MPICH_GPU_SUPPORT_ENABLED=1 at runtime).  Cut is along X so both
+# ranks own half the impeller region — load-balanced.  Measured on
+# Kestrel-GPU H100: 49.5 s / 1000 steps on 2 GPUs vs 67.4 s on 1 GPU
+# (1.36x speedup), and 15x total speedup vs the previous mgs=32 config.
+#
+# For 1-GPU runs, override on the srun line:
+#     srun -n 1 ... kla_bioreactor.inp amr.max_grid_size=180
+# For a 2x2x2 cube split (slightly slower but symmetric), use:
+#     srun -n 2 ... kla_bioreactor.inp amr.max_grid_size=90
+amr.max_grid_size_x = 90
+amr.max_grid_size_y = 180
+amr.max_grid_size_z = 180
+amr.blocking_factor = 2
+amr.plot_int = 10000         # every 
+amr.print_int = 2000
+amr.chk_int = 100000        # checkpoint every ~2.4 s physical
+amr.file_name_digits = 5
+
+# ---------------------------------------------------------------
+# LBM solver
+# ---------------------------------------------------------------
+lbm.bc_lo = 5 5 5
+lbm.bc_hi = 5 5 5
+lbm.dx_outer = 1.0
+lbm.dt_outer = 1.0
+
+# Bare BGK molecular viscosity (LB units).  LES-SGS adds nu_r = Cs^2 * |S|
+# via lbm.use_sgs_in_collision below.  DO NOT drop this below 0.016 for
+# this geometry: run 15051573 tried nu=0.008 (halved) and blew up at
+# step ~305k when the FSLBM interface eroded past a critical threshold
+# and the mass clamp amplified 2000 remaining LIQUID cells to rho=1e+30
+# within a few thousand steps.  nu=0.016 is the value that produced the
+# validated kLa = 3.95 /hr against Reference Solver Fig 25.
+lbm.nu    = 0.016
+lbm.alpha = 0.016
+
+# LES-SGS closure per Thomas et al. (2021) Eq. 4: add the Smagorinsky eddy
+# viscosity  ν_r = (Cs·Δx)² · |S|  to the molecular ν when computing the
+# BGK relaxation rate ω = 1/(ν_T/(R·T·dt) + 1/2).  Cs = 0.1 hardcoded in
+# Constants.H (Yu et al. 2005 DNS calibration).  Default OFF in code for
+# backward compatibility; enable here.  The same ν_T also feeds the
+# existing EPSILON diagnostic consumed by bubble breakup / kL.
+lbm.use_sgs_in_collision = 0
+
+# One passive scalar: dissolved O₂  (component 0)
+# D_O2_LB = nu_LB / Sc = 0.016 / 500 = 3.20e-5
+lbm.n_components = 1
+lbm.diffusivity_component_0 = 3.20e-5
+
+lbm.initial_temperature = 0.03333
+lbm.adiabatic_exponent = 1.66666666667
+lbm.save_streaming = 0
+lbm.compute_forces = 1
+
+# Enable entropic alpha stabilisation — required for Sc = 500 scalar transport
+lbm.use_entropic_components = 1
+# Component-lattice clamp based on the species mass fraction
+#   Y_c = rho_comp / rho_main.
+# Cells with Y_c outside [Y_min, Y_max] are rescaled (or zeroed if rho_main
+# is too small) back to the bound; cells inside the band are left untouched
+# so the small negative excursions from the entropic Newton during start-up
+# are preserved (zeroing them was found to break mass conservation in the
+# single-phase scalar transport validation tests).
+# Defaults Y_min=-0.1, Y_max=1.1 give 10x margin around the physical
+# range Y ∈ [0, 1].  Catches catastrophic runaways while preserving
+# transients.
+lbm.clamp_component_densities = 1
+# lbm.component_y_min = -0.1   # default
+# lbm.component_y_max =  1.1   # default
+
+# Entropic alpha stabilisation for the main f distribution.
+# Required: spill deposits create rho≈3.8 at impeller tips (far from equilibrium).
+lbm.use_entropic_f = 1
+
+lbm.body_is_isothermal = 1
+lbm.fluid_is_isothermal = 0
+lbm.body_temperature = 0.03333
+
+# Free surface (Chiu & Lin 2011 conservative phase-field, Eq. 18)
+# Interface at z = 70 LB cells = 160 cells above domain bottom (z=-90)
+# = 0.16 m fluid height, leaving 0.02 m headspace — matches benchmark (3.9 L fill).
+# gamma = 1.0 (default: compression coefficient = |u|).
+lbm.free_surface       = 1
+lbm.free_surface_z     = 70.0   # LB cell z-coordinate of the gas-liquid interface
+lbm.free_surface_gamma = 1.0    # multiplier: actual gamma = gamma_coeff * |u|
+# Surface tension (Laplace pressure ABB BC, Schwarzmeier 2023 Eq.11-14).
+# σ_LB = σ_phys * dt² / (ρ_phys * dx³)
+#       = 0.072 * (1.19365e-5)² / (1000 * (1e-3)³) ≈ 1.026e-5
+# Surface tension and contact angle (Schwarzmeier 2023 / Attar & Körner 2009)
+# Bo ≈ 4400, We_tip ≈ 600,000 → surface tension negligible at tank scale (correct).
+lbm.fslbm_sigma        = 1.026e-5
+# Contact angle in degrees (90 = neutral/Körner default; < 90 hydrophilic; > 90 hydrophobic).
+# Formula: φ_ghost = φ + cos(θ)·|∇_tangential φ|  (Attar & Körner 2009, Schwarzmeier 2023).
+lbm.fslbm_contact_angle = 90.0
+
+# Dirichlet thermal boundary at the interface band.  When 1, every
+# CELL_INTERFACE cell has its g distribution rebuilt at T = T_ref
+# after each collision pass (g_eq with rho_local, u_local, T_ref).
+# Physical justification: the gas headspace + interface band sits in
+# thermal equilibrium with the atmospheric reservoir; surface tension
+# and vapour transport homogenise T across the interface much faster
+# than the lattice can resolve.  Heals any T anomaly from the FSLBM
+# ABB / replenish_g / streaming asymmetries within one step instead
+# of letting it accumulate over thousands of steps.  f and component
+# lattices are unaffected — mass and momentum conservation untouched.
+lbm.fslbm_interface_isothermal = 1
+
+# Step 1b ABB local-density blending (Option B mass-conservation fix).
+# Replace the gas-side ABB target density
+#   ρ_G = ρ_ref + Δρ_laplace
+# with
+#   ρ_G = (1 − β) · ρ_ref + β · ρ_iv_smooth + Δρ_laplace
+# where ρ_iv_smooth is a 6-face-neighbour average of CELL_LIQUID/CELL_INTERFACE
+# pre-stream densities.  β = 0 reproduces legacy behaviour (mass leak).
+# β > 0 reduces the systematic asymmetry at INTERFACE-GAS links in the
+# compressible regime.  Empirically β ≤ 0.3 is stable; β ≥ 0.5 risks
+# positive feedback.  In compressible kLa runs β = 0.2 EMPIRICALLY MADE THE
+# LEAK 30× WORSE (~17/step vs 0.5/step) — Schwarzmeier 2023 §5 "no variant
+# balances forces at a free interface in motion" applies.  Reverted to 0.
+lbm.fslbm_abb_local_rho_blend = 0.0
+
+# Variant D: ABB φ-correction (Schwarzmeier 2023 motivated; Marbles original).
+# Snapshot Σ_q f at every CELL_INTERFACE before Step 1a, recompute after
+# Step 3, subtract the un-weighted bulk streaming flux Δm_full; route the
+# residual Δm_ABB into the φ field.  In compressible kLa runs (14397288,
+# 14416145) this destabilised the interface band — N_ifc roughly doubled
+# within 13k steps and M_tot drained ~25× faster than the no-correction
+# baseline.  Per-cell ABB-only routing is too noisy.  Disabled.
+lbm.fslbm_abb_mass_correction = 0
+
+# Variant E: global f₀ mass clamp (June 2026, recommended).
+# At end of every fslbm_advance_surface call:
+#   M_current  = Σ_{LIQ} ρ + Σ_{IFC} φ·ρ        (same as [mass_diag] M_tot)
+#   ε_cell     = (M_target − M_current) / N_liq
+#   f[iv][0]  += ε_cell  for every CELL_LIQUID cell
+# Since c_0 = 0, this preserves momentum, stress, and all higher moments
+# — only ρ shifts.  M_target is captured at the first call (≈ initial
+# fill mass).  Spreading over LIQUID (≈3 M cells) instead of INTERFACE
+# (~25 k cells) keeps |ε_cell| in the 10^-8–10^-5 range, far below noise,
+# even when the underlying ABB drain transiently spikes during impeller
+# spin-up.  Earlier interface-target draft (commit bdfcbed) destabilised
+# at ~step 27000 of run 14422476 when ε ≈ f_0; LIQUID-target avoids that.
+lbm.fslbm_global_mass_clamp = 1
+# Interval (steps) between clamp passes.  Each pass costs ~150 µs on 180³ H100
+# (one MultiFab::sum reduction + small kernel + FillBoundary on m_f).  At
+# leak rate ~1 mass/step and target ~3.4e6, N=10 keeps deficit bounded
+# at ~10 units (3e-6 relative) which is well below noise.  Set to 1 to
+# clamp every step (~3% step-time overhead, exact mass preservation).
+lbm.fslbm_global_mass_clamp_interval = 5
+
+# ---------------------------------------------------------------
+# Bubble module
+# ---------------------------------------------------------------
+lbm.enable_bubbles = 1
+
+# Physical scale factors — REQUIRED: these are SI values used by bubble physics
+# AND by the lbm.gravity → LB conversion (g_LB = g_phys * dt_phys² / dx_phys).
+# dx_phys = physical cell size [m];  dt_phys = omega_LB / omega_phys [s]
+# omega_LB = 0.0005 rad/step, omega_phys = 400*2π/60 = 41.888 rad/s
+lbm.dx_phys = 1.0e-3       # m  (= T/N_cells = 0.18/180)
+lbm.dt_phys = 1.19365e-5   # s  (= omega_LB / omega_phys)
+
+# Continuous-liquid gravity body force (m/s², physical SI units).
+# Converted internally to LB units:
+#   g_LB = g_phys * dt_phys² / dx_phys
+#        = -9.81 * (1.19365e-5)² / 1.0e-3
+#        ≈ -1.398e-6  (per-step velocity decrement in lattice units)
+# Applied to all CELL_LIQUID cells via exact-difference equilibrium shift on
+# both f and g.  CELL_INTERFACE is excluded (Donath 2011 p.122) because the
+# free surface already enforces the hydrostatic pressure boundary.
+# Without this, rising liquid produced by the free-surface advection has no
+# restoring force and remains suspended as floating clumps.
+lbm.gravity = 0.0 0.0 -9.81
+
+# Concentration reference: 1 LB_rho = 100 mol/m³ dissolved O₂
+# O₂ saturation = S × C_g = 0.032 × 44.6 = 1.43 mol/m³ = 0.0143 LB_rho
+bubble.O2_concentration_reference = 100.0   # mol/m³ per LB_rho
+
+# ---------------------------------------------------------------
+# Free-surface Henry-equilibrium O2 BC (June 2026)
+# ---------------------------------------------------------------
+# Adds a Kawase-style mass-transfer flux at every CELL_INTERFACE cell:
+#   j = k_L_surf · |∇φ|/dx_phys · (C_eq_surface − C_L_local)   [mol/(m³·s)]
+#   k_L_surf = surface_kL_coefficient · (ε·ν)^(1/4) · Sc^(-1/2)
+# The |∇φ|/dx_phys factor is the canonical phase-field interfacial-area
+# density: integrating it over IFC cells recovers the geometric A_interface.
+# C_L_local is the local lattice rho_O2 in mol/m³.
+#
+# enable_surface_flux        = master switch (1 = on, 0 = off; default 0).
+# surface_kL_coefficient     = pre-factor in k_L_surf (default 0.301, same
+#                              as bubble.kL_coefficient).
+# surface_C_eq_mol_m3        = headspace equilibrium concentration C_eq.
+#                              Default 1.427 = S * O2_initial_conc =
+#                              0.032*44.6 = liquid sat in equilibrium with
+#                              pure-O2 headspace at STP.  Use 0.275 for
+#                              normal air (S * 8.59 mol/m³ at 21% O2).
+# surface_only_loss          = 1 (default): one-way valve — flux is gated
+#                              to zero unless C_L > C_eq, so the surface
+#                              only DEGASSES the liquid (never inputs O2).
+#                              Set 0 for bidirectional Henry equilibrium.
+bubble.enable_surface_flux      = 1
+bubble.surface_kL_coefficient   = 0.301
+bubble.surface_C_eq_mol_m3      = 0.275    # = S × C_g_bubble (pure O2 headspace)
+bubble.surface_only_loss        = 1        # desorption-only valve
+
+# ---------------------------------------------------------------
+# Sparger (7-hole ring, 15 cells below impeller center)
+# ---------------------------------------------------------------
+# The benchmark states: 7 × 0.8 mm holes "on the bottom of the gas line
+# directly below the impeller" — no radial offset or axial distance given.
+# The ring layout below (r=15 mm, 15 mm below impeller centre) is an assumed
+# approximation that keeps injection points in separate LB cells within the
+# impeller swept volume.
+# Ring radius = 15 cells = 15 mm, centre (90, 90), z = -55
+# Positions are (x y z) in LB cell coordinates, 7 holes at 360°/7 apart
+sparger.n_points       = 7
+sparger.flow_rate      = 6.67e-6          # m³/s  (= 0.4 L/min)
+sparger.bubble_diameter = 1.1e-3          # m     (initial bubble diameter)
+sparger.positions = 105.0 90.0  -55.0 \
+                     99.35 101.73 -55.0 \
+                     86.66 104.62 -55.0 \
+                     76.49  96.51 -55.0 \
+                     76.49  83.49 -55.0 \
+                     86.66  75.38 -55.0 \
+                     99.35  78.27 -55.0
+
+# ---------------------------------------------------------------
+# Bubble physics
+# ---------------------------------------------------------------
+bubble.O2_molar_volume    = 0.0224   # m³/mol  (STP)
+bubble.O2_solubility      = 0.032    # dimensionless (Henry solubility)
+bubble.O2_initial_conc    = 44.6     # mol/m³ in bubble (= 1/V_m at STP)
+bubble.kL_coefficient     = 0.301    # C in k_L = C*(ε*ν)^(1/4) * Sc^(-1/2)
+bubble.D_O2               = 2.0e-9  # m²/s     (O₂ in water)
+bubble.rho_fluid          = 1000.0  # kg/m³   (water)
+bubble.nu_fluid           = 1.0e-6  # m²/s    (water)
+bubble.surface_tension    = 0.072   # N/m     (air-water)
+bubble.P_atm              = 101325.0 # Pa
+bubble.g_grav             = 9.81    # m/s²
+
+# Free surface z used ONLY for Boyle's law hydrostatic pressure correction
+# (depth h = z_surf - z_bubble).  Bubble exit is governed by the phase-field
+# Φ < 0.5 criterion (via lbm.free_surface = 1), NOT by this threshold.
+bubble.free_surface_z     = 70.0    # LB cell coordinate (= -90 + 160)
+
+# Boyle's law / hydrostatic-pressure correction (June 2026).
+# When ON, each bubble's molar volume V_m is recomputed from its current
+# depth h = max(0, free_surface_z - z) [LB cells × dx_phys = m]:
+#   P(h)   = P_atm + rho_l · g · h         (Pa)
+#   V_m(P) = V_m_ref · P_atm / P(h)        (m^3/mol; isothermal ideal gas)
+# V_b = n_O2 · V_m(P) → bubble shrinks at depth, expands toward the
+# surface, and C_g = n_O2/V_b varies in the range
+#   [O2_init_conc, O2_init_conc · (1 + rho_l·g·h_max/P_atm)].
+# For this geometry (h_max ≈ 0.16 m) the correction is ~1.5%.
+# Default OFF: V_m fixed at O2_molar_volume, C_g identically 44.6 mol/m^3.
+bubble.boyle_law_enable   = 1
+
+# Coalescence parameters (Boshenyatov Re_a criterion)
+bubble.enable_coalescence      = 1
+bubble.coalescence_Re_crit     = 40.0
+bubble.coalescence_start_time  = 0.10    # s  (wait for flow to develop)
+bubble.coalescence_interval    = 33     # steps between neighbour checks (~395 µs physical, matching benchmark)
+# Breakup parameters (Hinze criterion + triangle daughter distribution)
+bubble.enable_breakup = 1
+bubble.breakup_model  = "triangle"   # mode = 0.2 (80/20 vol split most probable)
+# Minimum bubble diameter [m]: daughters below this are not created.
+# Prevents runaway fragmentation driven by near-wall epsilon spikes.
+# 0.1 mm ≈ physical Hinze limit at peak impeller ε ~ 2000 m²/s³.
+bubble.min_diameter   = 1.0e-4       # m  (0.1 mm)
+# Maximum local epsilon fed to Hinze criterion [m²/s³].
+# Reference Solver reports peak ε ≈ 10 m²/s³ for this geometry (5L, 400 RPM, 1mm lattice).
+# Cap at 50 m²/s³ (5× safety factor) to prevent under-resolved boundary-layer
+# spikes from driving unphysical fragmentation.  At 50 m²/s³, D_e ≈ 0.68 mm.
+bubble.eps_max        = 50.0         # m²/s³
+
+# Statistics output
+bubble.stats_int  = 2000             # steps between CSV writes (~0.01 s physical)
+bubble.stats_file = "bubble_stats.csv"
+
+# Force-deposition safety mechanisms (June 2026).
+# Run 14348303 reached |F_x|=1253 LB units at step 205000 (vs typical ~1e-4),
+# correlated with the receding free surface and bubble passage through cells
+# of unphysical state.  Two independent guards keep this bounded:
+#
+#  (1) force_cap_factor: cap |F_couple| at cap·m_eff·|g| (≈50× gravity).
+#      Set 0 to disable.  Default 50 = ample headroom over physical peaks
+#      while bounded enough to prevent unbounded LB injection.
+#  (2) require_liquid_host: skip force deposit when the bubble's host
+#      cell is not CELL_LIQUID (i.e. bubble is in INTERFACE / GAS / SOLID).
+#      Drag/added-mass calculated from interpolated u_fluid in those cells
+#      is unphysical (gas-side ABB equilibrium, ρ≈0, etc.).  Set 0 to
+#      disable.  Default 1 (enabled).
+bubble.force_cap_factor    = 50.0
+bubble.require_liquid_host = 1
+
+# ---------------------------------------------------------------
+# Fixed-location probes (Reference Solver probe.txt analog, Fig. 22 style)
+# ---------------------------------------------------------------
+# Sample dissolved-O₂ concentration C_L (mol/m³) at fixed spatial points
+# every probe.stats_int steps and write to a CSV file.  Analog of
+# Reference Solver's `probe.txt` output that feeds their Fig. 22 gassing-out fit
+# (their kLa = 4.1 /hr benchmark).
+#
+# Positions are in LB cell coordinates (matching geometry.prob_lo/hi).
+# Tank domain: x,y ∈ [0, 180],  z ∈ [-90, 90].  Impeller centre at
+# (90, 90, -40), radius 29 cells, free surface at z = 70.  Suggested
+# locations:
+#   probe0 = (150, 90, -40)  Reference Solver analog: between impeller tip (r=29)
+#                            and side wall (x=180), at impeller z-height
+#   probe1 = ( 90, 90,  20)  mid-column, tank centerline
+#   probe2 = ( 90, 90, -70)  near sparger (below impeller)
+#   probe3 = ( 90, 90,  60)  just below free surface (z_surface = 70)
+probe.enable       = 1
+probe.n_points     = 4
+probe.positions    = 150.0 90.0 -40.0 \
+                      90.0 90.0  20.0 \
+                      90.0 90.0 -70.0 \
+                      90.0 90.0  60.0
+probe.stats_int    = 2000          # steps between rows (~0.0024 s physical)
+probe.stats_file   = "probes.csv"
+
+# ---------------------------------------------------------------
+# Initial conditions
+# ---------------------------------------------------------------
+lbm.ic_type = "constant"
+ic_constant.mach_components = 0.0 0.0 0.0
+ic_constant.density = 1.0
+ic_constant.initial_temperature = 0.03333
+ic_constant.adiabatic_exponent = 1.66666666667
+
+# Component 0: dissolved O₂ — starts fully deaerated (zero)
+ic_constant_component_0.mach_components = 0.0 0.0 0.0
+ic_constant_component_0.density = 0.0    # 0 mol/m³ (deaerated)
+ic_constant_component_0.initial_temperature = 0.03333
+
+# ---------------------------------------------------------------
+# Moving body — pitched-blade impeller
+# ---------------------------------------------------------------
+body.is_moving = true
+body.velocity = 0.0 0.0 0.0
+body.angular_velocity = 0.0 0.0 0.0005  # rad/step  => 400 RPM physical  (Ma=0.067)
+# Linear startup ramp on the angular velocity to avoid hitting walls at full
+# Mach during spin-up (the from-zero run 14310435 produced rho=300+ at the
+# baffle wall during steps ~125000 with instant-on).  The ramp interpolates
+# linearly from 0 at step 0 to the target above at step ramp_steps.
+# 50000 steps = 0.597 s physical (roughly 4 impeller revolutions at target
+# RPM, and ~0.6x the bench-scale spin-up time).  Set 0 for legacy instant-on.
+body.angular_velocity_ramp_steps = 10000
+# Impeller centre: horizontal centre of tank, 50 cells off bottom (z = -90+50=-40)
+body.center = 90.0 90.0 -40.0
+
+# STL: pitched_impeller.stl is designed for blade_radius ≈ 26.7 cells
+# Scale to match Di/2 = 29 cells: 29/26.7 ≈ 1.086
+eb2.geom_type = "all_regular"
+eb2.stl_file = "pitched_impeller.stl"
+eb2.stl_center = 90.0 90.0 -40.0
+eb2.stl_scale = 1.086
+eb2.stl_reverse_normal = 0
+
+# ---------------------------------------------------------------
+# Stationary body — baffled tank wall
+# ---------------------------------------------------------------
+# baffled_wall.stl is designed for 128-cell tank; scale to 180 cells: 180/128 ≈ 1.406
+eb2.stationary_stl_file = "baffled_wall.stl"
+eb2.stationary_stl_center = 0.0 0.0 0.0
+eb2.stationary_stl_scale = 1.40625
+eb2.stationary_stl_reverse_normal = 0
+
+# ---------------------------------------------------------------
+# AMReX runtime settings
+# ---------------------------------------------------------------
+amrex.fpe_trap_invalid = 1
+amrex.fpe_trap_zero = 1
+amrex.fpe_trap_overflow = 1
+# Managed (unified) memory required for CPU-side Lagrangian particle loops.
+# Bubble physics runs on CPU with host-pinned copies of all MultiFabs (D2H before
+# advance, H2D after deposits).  Managed memory is therefore NOT required, and
+# disabling it avoids costly page-migration overhead on large GPU allocations.
+amrex.the_arena_is_managed = 0
+amrex.abort_on_out_of_gpu_memory = 1

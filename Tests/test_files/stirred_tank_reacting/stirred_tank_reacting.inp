@@ -1,0 +1,206 @@
+# ============================================================
+# STIRRED TANK WITH TWO-STEP CATALYTIC REACTION
+# ============================================================
+#
+# Reaction mechanism (two-step enzyme-like):
+#
+#   S + C  --k_f-->  I          (forward binding, bimolecular)
+#   I      --k_r-->  S + C      (reverse, unimolecular)
+#   I      --k_p-->  P + C      (product release, unimolecular)
+#
+# Species / component index mapping:
+#   Component 0 : S   substrate       (impulsively loaded at t = 0)
+#   Component 1 : C   catalyst        (impulsively loaded at t = t_cat via
+#                                      lbm.cat_inject_* parameters below)
+#   Component 2 : I   intermediate    (produced in-situ, zero IC)
+#   Component 3 : P   product         (produced in-situ, zero IC)
+#
+# Conservation laws that should be satisfied everywhere at all times
+# after catalyst injection:
+#   rho_I + rho_C  = const   (catalyst balance — d(C+I)/dt = 0)
+#   rho_S + rho_I + rho_P = const   (substrate balance — d(S+I+P)/dt = 0)
+#
+# ---------------------------------------------------------------
+# Unit conversion reference (for rate constant scaling)
+# ---------------------------------------------------------------
+#   Physical tank diameter  : D = 0.30 m       => 128 lattice cells
+#   Lattice spacing         : dx_phys = D/128  = 2.344e-3 m
+#   Impeller diameter       : Di = 0.125 m      => Di/dx = 53.33 cells  (radius = 26.67 cells)
+#   Impeller off-bottom C   : 0.096 m           => C/dx  = 40.96 cells  => body.center z = -64+41 = -23
+#   Impeller rotation rate  : 180 RPM = 18.850 rad/s
+#   LB angular velocity     : omega_LB = 0.00025 rad/step  (halved from 0.0005 for stability)
+#   Physical time step      : dt_phys = omega_LB / omega_phys
+#                           = 0.00025 / 18.850 = 1.326e-5 s/step
+#
+#   Concentration reference : C_ref = 500 (mol/L) / LB_rho
+#     i.e. 1 LB_rho unit represents 500 mol/L physical concentration
+#     => rho_S0 = 0.01 LB units  <->  0.01 × 500 = 5.0 mol/L substrate
+#     => rho_C0 = 2e-4 LB units  <->  2e-4 × 500 = 0.1 mol/L catalyst
+#
+#   Physical rate constants (Michaelis-Menten-like kinetics):
+#     k_f_phys = 500  M^-1 s^-1    k_r_phys = 10  s^-1    k_p_phys = 100 s^-1
+#
+#   LB rate constants (all scale with dt_phys):
+#     k_f is BIMOLECULAR: d(rho_S)/dn = -k_f_LB * rho_S * rho_C
+#       => k_f_LB = k_f_phys * C_ref * dt_phys = 500 * 500 * 1.326e-5 = 3.316
+#     k_r_LB = k_r_phys * dt_phys          = 10  * 1.326e-5        = 1.326e-4
+#     k_p_LB = k_p_phys * dt_phys          = 100 * 1.326e-5        = 1.326e-3
+#
+#   Catalyst injection time : t_cat = 5.0 s  
+#     => cat_inject_step = 5.0 / 1.326e-5 = 377,000 steps
+#
+#   Total simulation time (full) : ~8 s  => 600000 steps
+# ============================================================
+
+max_step = 1800000  # ~8 s physical 
+
+# geometry parameters
+geometry.prob_lo = 0.0 0.0 -64.0
+geometry.prob_hi = 128.0 128.0 64.0
+geometry.is_periodic = 0 0 0
+
+# timestepping
+amr.n_cell  = 128 128 128
+amr.max_level = 0
+amr.max_grid_size = 32
+amr.blocking_factor_x = 2
+amr.blocking_factor_y = 1
+amr.blocking_factor_z = 1
+amr.plot_int = 2000
+amr.print_int = 200   # screen output every N steps (default = plot_int/10)
+amr.chk_int = 10000000
+amr.file_name_digits = 5
+
+lbm.bc_lo = 5 5 5
+lbm.bc_hi = 5 5 5
+lbm.dx_outer = 1.0
+lbm.dt_outer = 1.0
+
+lbm.nu = 0.008
+lbm.alpha = 0.008
+
+# Four passive scalar components: S (substrate), C (catalyst),
+# I (intermediate), P (product).  Diffusivities kept equal to the
+# fluid kinematic viscosity (Schmidt number = 1); reduce towards
+# 1e-4 to approach the physical high-Sc limit if needed.
+lbm.n_components = 4
+lbm.diffusivity_component_0 = 0.000008
+lbm.diffusivity_component_1 = 0.000008
+lbm.diffusivity_component_2 = 0.000008
+lbm.diffusivity_component_3 = 0.000008
+
+lbm.initial_temperature = 0.03333
+lbm.adiabatic_exponent = 1.4
+lbm.save_streaming = 0
+lbm.compute_forces = 1
+
+# Enable negativity guard on component populations (recommended for
+# reactive scalar fields that start at zero).
+lbm.clamp_component_densities = 0
+
+# Enable entropic alpha stabilisation for component lattices.
+# Allows lowering diffusivity_component_* without BGK blow-up.
+lbm.use_entropic_components = 1
+
+lbm.body_is_isothermal = 0
+#lbm.body_temperature = 0.060
+
+# ---------------------------------------------------------------
+# Reaction parameters (LB units — see unit conversion above)
+# ---------------------------------------------------------------
+lbm.enable_reactions   = 1
+lbm.rxn_k_forward      = 3.316      # bimolecular rate k_f  [LB_rho^-1 step^-1]
+lbm.rxn_k_reverse      = 1.326e-4   # reverse rate     k_r  [step^-1]
+lbm.rxn_k_product      = 1.326e-3   # product rate     k_p  [step^-1]
+
+# ---------------------------------------------------------------
+# Timed catalyst injection (component 1 released at t_cat)
+# Box coordinates in LB units; catalyst fills all cells whose
+# centres fall inside [cat_inject_box_lo, cat_inject_box_hi].
+# Centre of injection: lower tank region (z ~ -39), centred in x and y.
+# ---------------------------------------------------------------
+lbm.cat_inject_step     = 377000    # step at which C is released (~5.0 s physical)
+lbm.cat_inject_density  = 2.0e-4    # LB rho for catalyst injection (~0.1 mol/L)
+# Box: 0.029 m x 0.029 m x 0.029 m centered at (0, 0.0595, 0) m  [Reference y=height]
+#   -> LB center (x=64, y=64, z=-64+25.4=-38.6), half-side = 0.0145/(0.3/128) = 6.19 cells
+lbm.cat_inject_box_lo   = 57.8 57.8 -44.8
+lbm.cat_inject_box_hi   = 70.2 70.2 -32.4
+
+#lbm.velocity_bc_type = "parabolic"
+#velocity_bc_parabolic.Mach_ref = 0.1
+#velocity_bc_parabolic.normal_dir = 1
+#velocity_bc_parabolic.tangential_dir = 0
+#velocity_bc_parabolic.initial_density = 1.0
+#velocity_bc_parabolic.initial_temperature = 0.03333
+#velocity_bc_parabolic.adiabatic_exponent = 1.4
+
+lbm.ic_type = "constant"
+ic_constant.mach_components = 0.0 0.0 0.0
+ic_constant.density = 1.0
+ic_constant.initial_temperature = 0.03333
+ic_constant.adiabatic_exponent = 1.4
+
+# Component 0: substrate S — box injection at t=0
+# Reference : 0.029 m x 0.029 m x 0.029 m box centred at (0, 0.1595, 0) m  [Reference y=height]
+#   -> LB center (x=64, y=64, z=-64+68.1=+4.1), half-side = 0.0145/(0.3/128) = 6.19 cells
+# rho_S0 = 0.01 LB units  <->  5.0 mol/L physical concentration
+ic_constant_component_0.mach_components = 0.0 0.0 0.0
+ic_constant_component_0.region_type = "box"
+ic_constant_component_0.region_lo = 57.8 57.8 -2.1
+ic_constant_component_0.region_hi = 70.2 70.2 10.2
+ic_constant_component_0.density = 0.01
+ic_constant_component_0.outside_density = 0.0
+ic_constant_component_0.initial_temperature = 0.03333
+
+# Component 1: catalyst C — starts at zero everywhere; injected at
+# cat_inject_step via apply_timed_catalyst_injection() in advance().
+ic_constant_component_1.mach_components = 0.0 0.0 0.0
+ic_constant_component_1.density = 0.0
+ic_constant_component_1.initial_temperature = 0.03333
+
+# Component 2: intermediate I — zero initial condition
+ic_constant_component_2.mach_components = 0.0 0.0 0.0
+ic_constant_component_2.density = 0.0
+ic_constant_component_2.initial_temperature = 0.03333
+
+# Component 3: product P — zero initial condition
+ic_constant_component_3.mach_components = 0.0 0.0 0.0
+ic_constant_component_3.density = 0.0
+ic_constant_component_3.initial_temperature = 0.03333
+
+# MOVING BODY PARAMETERS
+body.is_moving = true
+body.velocity = 0.0 0.0 0.0
+body.angular_velocity = 0.0 0.0 0.00025
+# Z is the vertical axis; z=-64 is tank bottom.
+# Impeller is 0.096 m off-bottom: 0.096/(0.3/128)=40.96 cells => z = -64+41 = -23
+# Impeller centred horizontally: x=64, y=64
+body.center = 64.0 64.0 -23.0
+
+# Moving body geometry (STL) — generated by Build/generate_impeller_stl.py
+#   blade_outer_radius = 26.7 cells  (~0.0625 m = Di/2 = 0.125/2 m)
+#   hub_radius         = 17.8 cells  (~0.0417 m)
+#   blade_thickness    = 3.6  cells  (~0.00844 m)
+#   height             = 17.8 cells  (~0.0417 m)
+#   STL generated at origin; eb2.stl_center translates to body.center in domain
+eb2.geom_type = "all_regular"
+eb2.stl_file = "pitched_impeller.stl"
+eb2.stl_center = 64.0 64.0 -23.0
+eb2.stl_scale = 1.0
+eb2.stl_reverse_normal = 0
+
+# STATIONARY BODY PARAMETERS (STL)
+# Using the generated baffled wall STL
+eb2.stationary_stl_file = "baffled_wall.stl"
+eb2.stationary_stl_center = 0.0 0.0 0.0
+eb2.stationary_stl_scale = 1.0
+eb2.stationary_stl_reverse_normal = 0
+
+# Alternatively, you can use a CSV file:
+# eb2.stationary_crack_file = "impeller.csv"
+
+amrex.fpe_trap_invalid = 1
+amrex.fpe_trap_zero = 1
+amrex.fpe_trap_overflow = 1
+amrex.the_arena_is_managed = 0
+amrex.abort_on_out_of_gpu_memory = 1

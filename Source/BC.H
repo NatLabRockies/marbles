@@ -462,7 +462,9 @@ struct BCFill
                             }
                         } else {
                             // to avoid spurious NaNs fill with a dummy value
-                            data(iv, q) = -1.0;
+                            // Use 0.0 instead of -1.0 to avoid negative
+                            // densities in component lattices (passive scalars)
+                            data(iv, q) = 0.0;
                         }
                     }
                 }
@@ -486,6 +488,19 @@ struct BCOpCreator
         , m_bc_type(bc_type)
         , m_ng(ng)
         , m_vel_bc_op()
+        , m_is_energy_lattice(m_is_energy_lattice_)
+    {}
+
+    explicit BCOpCreator(
+        const amrex::Real& mesh_speed,
+        const amrex::GpuArray<int, AMREX_SPACEDIM * 2>& bc_type,
+        const amrex::IntVect& ng,
+        const std::string& prefix,
+        bool m_is_energy_lattice_ = false)
+        : m_mesh_speed(mesh_speed)
+        , m_bc_type(bc_type)
+        , m_ng(ng)
+        , m_vel_bc_op(prefix)
         , m_is_energy_lattice(m_is_energy_lattice_)
     {}
 

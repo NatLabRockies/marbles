@@ -1,2 +1,2 @@
-CEXE_sources += main.cpp Geometry.cpp EB.cpp IC.cpp LBM.cpp Stencil.cpp Utilities.cpp VelocityBC.cpp
-CEXE_headers += BC.H Constants.H EB.H Factory.H FillPatchOps.H Geometry.H IC.H LBM.H Stencil.H Utilities.H VelocityBC.H
+CEXE_sources += main.cpp Bubble.cpp Geometry.cpp EB.cpp IC.cpp LBM.cpp Stencil.cpp Utilities.cpp VelocityBC.cpp
+CEXE_headers += BC.H Bubble.H Constants.H EB.H Factory.H FillPatchOps.H Geometry.H IC.H LBM.H Stencil.H Utilities.H VelocityBC.H
